@@ -59,6 +59,16 @@ export class AuthStack extends cdk.Stack {
         requireDigits: true,
         requireSymbols: false,
       },
+      userVerification: {
+        emailSubject: 'GoSteady — Verify your email',
+        emailBody:
+          'Welcome to GoSteady!\n\n' +
+          'Your verification code is: {####}\n\n' +
+          'Enter this code in the GoSteady Portal to complete your account setup.\n\n' +
+          'If you did not create a GoSteady account, you can safely ignore this email.\n\n' +
+          '— The GoSteady Team',
+        emailStyle: cognito.VerificationEmailStyle.CODE,
+      },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
       removalPolicy:
         p === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
