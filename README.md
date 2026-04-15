@@ -7,9 +7,11 @@ Caregiver monitoring dashboard for the GoSteady smart walker cap. Built in Flutt
 V1 is intentionally narrow. It shows two things:
 
 1. **Device health** — battery level, cellular signal strength, last data received, device info (serial, firmware). Everything a caregiver or dev needs to know the device is alive and reporting.
-2. **Distance traveled** — today's distance and step count, a 24-hour activity timeline, and a 7-day history row. This maps directly to the first algorithm going into firmware (`firmware_algo_dev`).
+2. **Distance traveled** — distance and step count with toggleable time frames (24H, 7-Day, 30-Day, 6-Month).
+3. **Time in motion** — how long the user was actively moving within each time frame, displayed alongside distance traveled.
+4. **Activity timeline** — interactive charts (fl_chart) across all four time windows, with responsive layout.
 
-Explicitly out of scope for V1: tip-over alerts, no-activity alerts, assistance score, multi-device view, user accounts, 7d/30d activity views, device activation flow.
+Explicitly out of scope for V1: tip-over alerts, no-activity alerts, assistance score, multi-device view, user accounts, device activation flow.
 
 Data is currently mocked from the actual capture annotations in `GoSteady_Capture_Annotations_v1.xlsx`. When the AWS pipeline is live, swap `lib/data/mock_data.dart` for a real API client.
 
@@ -68,8 +70,8 @@ Matches gosteady.co:
 
 | Version | Features |
 |---------|----------|
-| V1 (current) | Device health + distance traveled, mock data |
-| V2 | Live AWS data via REST API, assistance score, 7d/30d views |
+| V1 (current) | Device health, distance traveled, time in motion, 24H/7D/30D/6M views, mock data |
+| V2 | Live AWS data via REST API, assistance score |
 | V3 | Tip-over alerts, push notifications, device activation |
 | V4 | Multi-device view, user accounts + auth, caregiver settings |
 

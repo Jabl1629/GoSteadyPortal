@@ -6,13 +6,13 @@ import '../models/activity.dart';
 import '../models/device.dart';
 import '../theme/app_theme.dart';
 import '../widgets/activity_timeline.dart';
-import '../widgets/daily_history.dart';
 import '../widgets/device_health_card.dart';
 import '../widgets/distance_card.dart';
+import '../widgets/time_range_toggle.dart';
+import 'device_screen.dart';
 
-/// Single-page V1 dashboard. Responsive: desktop lays out side-by-side,
-/// mobile stacks. No routing or tabs in V1 — caregivers land here and
-/// see everything at once.
+/// Single-page V1 dashboard. The "today" tile is always locked to today's
+/// data. Three trend charts below share a single time range toggle.
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -24,7 +24,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final MockDataSource _data = MockDataSource();
   late DeviceHealth _device;
   late DailyActivity _today;
-  late List<DailyActivity> _history;
+  late List<DailyActivity> _last7;
+  late List<DailyActivity> _last30;
+  late List<WeeklyActivity> _last6M;
+
+  TimeRange _selectedRange = TimeRange.day;
 
   @override
   void initState() {
@@ -35,8 +39,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void _refresh() {
     _device = _data.currentDevice();
     _today = _data.today();
-    _history = _data.last7Days();
+    _last7 = _data.last7Days();
+    _last30 = _data.last30Days();
+    _last6M = _data.last6Months();
   }
+
+  void _openDeviceScreen() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => DeviceScreen(device: _device),
+      ),
+    );
+  }
+
+  List<DailyActivity> get _activeDailyData =>
+      _selectedRange == TimeRange.week ? _last7 : _last30;
+
+  Widget _chartCard(ChartMetric metric) => TrendChartCard(
+        metric: metric,
+        timeRange: _selectedRange,
+        todayHours: _today.hours,
+        dailyData: _activeDailyData,
+        weeklyData: _last6M,
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -49,32 +74,72 @@ class _DashboardScreenState extends State<DashboardScreen> {
             return SingleChildScrollView(
               child: Center(
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 1180),
+                  constraints: const BoxConstraints(maxWidth: 1100),
                   child: Padding(
                     padding: EdgeInsets.symmetric(
-                      horizontal: isWide ? 40 : 20,
-                      vertical: isWide ? 40 : 24,
+                      horizontal: isWide ? 48 : 20,
+                      vertical: isWide ? 44 : 24,
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        _Header(device: _device, onRefresh: () {
-                          setState(_refresh);
-                        }),
-                        const SizedBox(height: 32),
-                        if (isWide)
-                          _WideLayout(
+                        _Header(
+                          device: _device,
+                          onRefresh: () => setState(_refresh),
+                        ),
+                        const SizedBox(height: 10),
+                        Padding(
+                          padding: const EdgeInsets.only(left: 2),
+                          child: DeviceStatusBar(
                             device: _device,
-                            today: _today,
-                            history: _history,
-                          )
-                        else
-                          _NarrowLayout(
-                            device: _device,
-                            today: _today,
-                            history: _history,
+                            onTap: _openDeviceScreen,
                           ),
-                        const SizedBox(height: 40),
+                        ),
+                        const SizedBox(height: 28),
+                        TodayCard(today: _today),
+                        const SizedBox(height: 36),
+                        // Trend section: toggle + charts
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Text(
+                              'Activity Trends',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .headlineMedium
+                                  ?.copyWith(fontSize: 22),
+                            ),
+                            const Spacer(),
+                            SizedBox(
+                              width: 240,
+                              child: TimeRangeToggle(
+                                selected: _selectedRange,
+                                onChanged: (r) =>
+                                    setState(() => _selectedRange = r),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 20),
+                        _chartCard(ChartMetric.timeInMotion),
+                        const SizedBox(height: 20),
+                        if (isWide)
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                  child: _chartCard(ChartMetric.distance)),
+                              const SizedBox(width: 20),
+                              Expanded(
+                                  child: _chartCard(ChartMetric.steps)),
+                            ],
+                          )
+                        else ...[
+                          _chartCard(ChartMetric.distance),
+                          const SizedBox(height: 20),
+                          _chartCard(ChartMetric.steps),
+                        ],
+                        const SizedBox(height: 48),
                         const _Footer(),
                       ],
                     ),
@@ -99,121 +164,68 @@ class _Header extends StatelessWidget {
   Widget build(BuildContext context) {
     final dateLabel = DateFormat('EEEE, MMMM d').format(DateTime.now());
 
-    return Row(
-      children: [
-        Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            color: AppTheme.sage,
-            borderRadius: BorderRadius.circular(12),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: AppTheme.sage,
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: const Icon(
+              Icons.accessibility_new_rounded,
+              color: Colors.white,
+              size: 22,
+            ),
           ),
-          child: const Icon(
-            Icons.accessibility_new_rounded,
-            color: Colors.white,
-            size: 22,
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'GoSteady',
+                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                        fontSize: 26,
+                      ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  dateLabel,
+                  style: const TextStyle(
+                    color: AppTheme.textSoft,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'GoSteady',
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                      fontSize: 26,
-                    ),
-              ),
-              Text(
-                dateLabel,
-                style: const TextStyle(
-                  color: AppTheme.textSoft,
-                  fontSize: 14,
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: OutlinedButton.icon(
+              onPressed: onRefresh,
+              icon: const Icon(Icons.refresh_rounded, size: 16),
+              label: const Text('Refresh'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppTheme.sage,
+                side: BorderSide(color: AppTheme.border.withOpacity(0.6)),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(100),
+                ),
+                textStyle: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
-            ],
-          ),
-        ),
-        OutlinedButton.icon(
-          onPressed: onRefresh,
-          icon: const Icon(Icons.refresh_rounded, size: 18),
-          label: const Text('Refresh'),
-          style: OutlinedButton.styleFrom(
-            foregroundColor: AppTheme.sage,
-            side: const BorderSide(color: AppTheme.border),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(100),
             ),
           ),
-        ),
-      ],
-    );
-  }
-}
-
-class _WideLayout extends StatelessWidget {
-  const _WideLayout({
-    required this.device,
-    required this.today,
-    required this.history,
-  });
-
-  final DeviceHealth device;
-  final DailyActivity today;
-  final List<DailyActivity> history;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              flex: 5,
-              child: DistanceCard(today: today),
-            ),
-            const SizedBox(width: 24),
-            Expanded(
-              flex: 6,
-              child: DeviceHealthCard(device: device),
-            ),
-          ],
-        ),
-        const SizedBox(height: 24),
-        ActivityTimeline(today: today),
-        const SizedBox(height: 24),
-        DailyHistory(days: history),
-      ],
-    );
-  }
-}
-
-class _NarrowLayout extends StatelessWidget {
-  const _NarrowLayout({
-    required this.device,
-    required this.today,
-    required this.history,
-  });
-
-  final DeviceHealth device;
-  final DailyActivity today;
-  final List<DailyActivity> history;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        DistanceCard(today: today),
-        const SizedBox(height: 20),
-        DeviceHealthCard(device: device),
-        const SizedBox(height: 20),
-        ActivityTimeline(today: today),
-        const SizedBox(height: 20),
-        DailyHistory(days: history),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -224,11 +236,15 @@ class _Footer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Text(
-        'GoSteady Portal · V1 preview · mock data',
-        style: TextStyle(
-          color: AppTheme.textSoft.withOpacity(0.8),
-          fontSize: 12,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Text(
+          'GoSteady Portal  ·  V1 preview  ·  mock data',
+          style: TextStyle(
+            color: AppTheme.textSoft.withOpacity(0.6),
+            fontSize: 12,
+            letterSpacing: 0.3,
+          ),
         ),
       ),
     );

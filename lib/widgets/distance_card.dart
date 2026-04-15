@@ -4,103 +4,81 @@ import 'package:intl/intl.dart';
 import '../models/activity.dart';
 import '../theme/app_theme.dart';
 
-/// Today's headline activity numbers: distance traveled + step count +
-/// active hours. Big, glanceable typography — this is what caregivers
-/// look at first.
-class DistanceCard extends StatelessWidget {
-  const DistanceCard({super.key, required this.today});
+/// Today's headline glanceable tile. Always locked to today — this is the
+/// caregiver's "is everything okay?" check. Clear language up top, key
+/// metrics immediately below.
+class TodayCard extends StatelessWidget {
+  const TodayCard({super.key, required this.today});
 
   final DailyActivity today;
 
+  String get _motionLabel {
+    final mins = today.totalTimeInMotionMinutes;
+    final hours = mins ~/ 60;
+    final remainder = mins % 60;
+    if (hours > 0 && remainder > 0) return '${hours}h ${remainder}m';
+    if (hours > 0) return '${hours}h 0m';
+    return '${remainder}m';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final formatter = NumberFormat('#,##0');
     final feet = today.totalDistanceFt;
     final steps = today.totalSteps;
-    final activeHours = today.activeHourCount;
-    final formatter = NumberFormat('#,##0');
 
     return Container(
-      padding: const EdgeInsets.all(28),
+      padding: const EdgeInsets.fromLTRB(32, 28, 32, 30),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(AppTheme.cardRadius),
-        boxShadow: AppTheme.cardShadow,
+        boxShadow: AppTheme.cardShadowElevated,
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [AppTheme.sage, AppTheme.sageDark],
+          stops: [0.0, 0.5, 1.0],
+          colors: [
+            Color(0xFF5A8E6A),
+            AppTheme.sage,
+            Color(0xFF375A42),
+          ],
         ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'DISTANCE TODAY',
-            style: TextStyle(
-              color: Colors.white.withOpacity(0.85),
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 1.2,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
-            children: [
-              Text(
-                formatter.format(feet.round()),
-                style: Theme.of(context)
-                    .textTheme
-                    .displayLarge
-                    ?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w500,
-                      fontSize: 56,
-                      height: 1.0,
-                    ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'ft',
-                style: TextStyle(
-                  color: Colors.white.withOpacity(0.85),
-                  fontSize: 20,
+            'Today\'s Activity',
+            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                  color: Colors.white,
+                  fontSize: 22,
                   fontWeight: FontWeight.w500,
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '${formatter.format(steps)} steps · $activeHours active '
-            '${activeHours == 1 ? 'hour' : 'hours'}',
-            style: TextStyle(
-              color: Colors.white.withOpacity(0.88),
-              fontSize: 15,
-            ),
           ),
           const SizedBox(height: 24),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.14),
-              borderRadius: BorderRadius.circular(100),
-            ),
+          IntrinsicHeight(
             child: Row(
-              mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  Icons.directions_walk_rounded,
-                  color: Colors.white.withOpacity(0.9),
-                  size: 16,
+                // Active time — left
+                Expanded(
+                  child: _Metric(
+                    icon: Icons.timer_outlined,
+                    value: _motionLabel,
+                    label: 'Active time',
+                  ),
                 ),
-                const SizedBox(width: 6),
-                Text(
-                  '${(feet / 5280 * 100).toStringAsFixed(1)}% of a mile',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
+                VerticalDivider(
+                  width: 32,
+                  thickness: 1,
+                  indent: 4,
+                  endIndent: 4,
+                  color: Colors.white.withOpacity(0.18),
+                ),
+                // Distance — right
+                Expanded(
+                  child: _Metric(
+                    icon: Icons.directions_walk_rounded,
+                    value: '${formatter.format(feet.round())} ft',
+                    label: '${formatter.format(steps)} steps',
                   ),
                 ),
               ],
@@ -108,6 +86,62 @@ class DistanceCard extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _Metric extends StatelessWidget {
+  const _Metric({
+    required this.icon,
+    required this.value,
+    required this.label,
+  });
+
+  final IconData icon;
+  final String value;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Icon(icon, color: Colors.white.withOpacity(0.85), size: 20),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                value,
+                style: Theme.of(context).textTheme.displayLarge?.copyWith(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w500,
+                      fontSize: 32,
+                      height: 1.0,
+                    ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.75),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

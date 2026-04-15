@@ -51,12 +51,36 @@ class MockDataSource {
   }
 
   /// Last 7 days (not including today) of daily aggregates.
-  List<DailyActivity> last7Days() {
+  List<DailyActivity> last7Days() => _generateDays(7);
+
+  /// Last 30 days (not including today) of daily aggregates.
+  List<DailyActivity> last30Days() => _generateDays(30);
+
+  /// Last ~26 weeks (6 months) of weekly aggregates.
+  List<WeeklyActivity> last6Months() {
+    final days = _generateDays(182);
+    final weeks = <WeeklyActivity>[];
+
+    // Group into 7-day chunks starting from the oldest day.
+    for (var i = 0; i < days.length; i += 7) {
+      final chunk = days.sublist(i, min(i + 7, days.length));
+      weeks.add(WeeklyActivity(
+        weekStart: chunk.first.date,
+        totalSteps: chunk.fold(0, (s, d) => s + d.totalSteps),
+        totalDistanceFt: chunk.fold(0.0, (s, d) => s + d.totalDistanceFt),
+        totalTimeInMotionMinutes:
+            chunk.fold(0, (s, d) => s + d.totalTimeInMotionMinutes),
+      ));
+    }
+    return weeks;
+  }
+
+  List<DailyActivity> _generateDays(int count) {
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
     final days = <DailyActivity>[];
 
-    for (var d = 7; d >= 1; d--) {
+    for (var d = count; d >= 1; d--) {
       final date = startOfToday.subtract(Duration(days: d));
       final hours = <HourlyActivity>[];
       for (var h = 0; h < 24; h++) {
@@ -74,7 +98,12 @@ class MockDataSource {
     // meal-time trips, quiet afternoon, light evening, nothing overnight.
     final intensity = _intensityCurve(hourOfDay);
     if (intensity < 0.01) {
-      return HourlyActivity(hour: hour, steps: 0, distanceFt: 0);
+      return HourlyActivity(
+        hour: hour,
+        steps: 0,
+        distanceFt: 0,
+        timeInMotionMinutes: 0,
+      );
     }
 
     // Peak hour is ~120 steps. Scale by intensity, add some day-to-day
@@ -88,7 +117,15 @@ class MockDataSource {
     final stride = 1.25 + _rng.nextDouble() * 0.15;
     final distanceFt = steps * stride;
 
-    return HourlyActivity(hour: hour, steps: steps, distanceFt: distanceFt);
+    // Roughly 1 minute of motion per 15 steps, capped at 55 min/hr.
+    final motionMinutes = min((steps / 15).round(), 55);
+
+    return HourlyActivity(
+      hour: hour,
+      steps: steps,
+      distanceFt: distanceFt,
+      timeInMotionMinutes: motionMinutes,
+    );
   }
 
   double _intensityCurve(int hourOfDay) {

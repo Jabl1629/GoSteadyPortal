@@ -26,9 +26,27 @@ class AppTheme {
   static const double cardRadius = 20.0;
   static List<BoxShadow> cardShadow = [
     BoxShadow(
+      color: Colors.black.withOpacity(0.03),
+      blurRadius: 8,
+      offset: const Offset(0, 2),
+    ),
+    BoxShadow(
       color: Colors.black.withOpacity(0.04),
-      blurRadius: 16,
+      blurRadius: 24,
+      offset: const Offset(0, 8),
+    ),
+  ];
+
+  static List<BoxShadow> cardShadowElevated = [
+    BoxShadow(
+      color: sage.withOpacity(0.12),
+      blurRadius: 12,
       offset: const Offset(0, 4),
+    ),
+    BoxShadow(
+      color: Colors.black.withOpacity(0.06),
+      blurRadius: 32,
+      offset: const Offset(0, 12),
     ),
   ];
 
