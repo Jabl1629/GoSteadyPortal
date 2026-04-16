@@ -55,8 +55,12 @@ export class ProcessingStack extends cdk.Stack {
     });
 
     // Grant DynamoDB access
+    // - activity table: write sessions
+    // - device table: look up walkerUserId (to resolve timezone)
+    // - user profile table: read timezone for local-date GSI field
     dataStack.activityTable.grantReadWriteData(this.activityProcessor);
     dataStack.deviceTable.grantReadData(this.activityProcessor);
+    dataStack.userProfileTable.grantReadData(this.activityProcessor);
 
     // ── Heartbeat Processor Lambda ───────────────────────────────
     this.heartbeatProcessor = new lambda.Function(this, 'HeartbeatProcessor', {
@@ -71,7 +75,10 @@ export class ProcessingStack extends cdk.Stack {
       logRetention: logs.RetentionDays.ONE_MONTH,
     });
 
+    // - device table: update battery/signal/last_seen
+    // - alert table: write synthetic alerts (battery/signal thresholds)
     dataStack.deviceTable.grantReadWriteData(this.heartbeatProcessor);
+    dataStack.alertTable.grantWriteData(this.heartbeatProcessor);
 
     // ── Alert Handler Lambda ─────────────────────────────────────
     this.alertHandler = new lambda.Function(this, 'AlertHandler', {
