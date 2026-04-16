@@ -55,12 +55,6 @@ const data = new DataStack(app, `${prefix}-Data`, {
   description: `GoSteady Data Layer — ${config.envName}`,
 });
 
-const ingestion = new IngestionStack(app, `${prefix}-Ingestion`, {
-  env,
-  config,
-  description: `GoSteady IoT Ingestion — ${config.envName}`,
-});
-
 const processing = new ProcessingStack(app, `${prefix}-Processing`, {
   env,
   config,
@@ -68,7 +62,14 @@ const processing = new ProcessingStack(app, `${prefix}-Processing`, {
   description: `GoSteady Processing — ${config.envName}`,
 });
 processing.addDependency(data);
-processing.addDependency(ingestion);
+
+const ingestion = new IngestionStack(app, `${prefix}-Ingestion`, {
+  env,
+  config,
+  processingStack: processing,
+  description: `GoSteady IoT Ingestion — ${config.envName}`,
+});
+ingestion.addDependency(processing);
 
 const notification = new NotificationStack(app, `${prefix}-Notification`, {
   env,

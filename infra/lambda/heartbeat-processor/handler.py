@@ -1,32 +1,42 @@
 """
-Heartbeat Processor Lambda — Phase 1B
+Heartbeat Processor Lambda
 
-Triggered by: IoT Rule on gs/{serial}/heartbeat
-Writes to:    Device Registry table (DynamoDB)
+Triggered by: IoT Rule on gs/+/heartbeat
+IoT Rule SQL: SELECT *, topic(2) AS thingName FROM 'gs/+/heartbeat'
 
-Expected MQTT payload:
+Expected payload (hourly):
 {
-    "serial": "GS-0001",
-    "ts": "2026-04-15T14:05:00Z",
+    "serial": "GS0000001234",
+    "ts": "2026-04-15T14:00:00Z",
     "battery_mv": 3850,
     "battery_pct": 0.72,
-    "signal_dbm": -87,
+    "rsrp_dbm": -87,
+    "snr_db": 12.5,
     "firmware": "1.2.0",
-    "uptime_s": 86400
+    "uptime_s": 86400,
+    "thingName": "GS0000001234"    <-- injected by IoT Rule SQL
 }
 
-This handler will:
-1. Update device registry (battery, signal, last_seen, firmware)
-2. Check thresholds:
-   - Battery < 20%  → publish warning to EventBridge
-   - Signal < -110 dBm → publish warning to EventBridge
-3. Touch last_seen timestamp
+Phase 1A: logs payload to CloudWatch.
+Phase 1B: update device registry, check thresholds, publish to EventBridge.
 """
 
 import json
+import os
+
+DEVICE_TABLE = os.environ.get("DEVICE_TABLE", "")
 
 
 def handler(event, context):
-    # TODO: Implement in Phase 1B
+    serial = event.get("serial", event.get("thingName", "UNKNOWN"))
+    battery = event.get("battery_pct", "?")
+    rsrp = event.get("rsrp_dbm", "?")
+    snr = event.get("snr_db", "?")
+    print(f"[HEARTBEAT] serial={serial} battery={battery} rsrp={rsrp} snr={snr}")
     print(json.dumps(event))
-    return {"statusCode": 200, "body": "Heartbeat processor placeholder"}
+
+    # TODO Phase 1B: update device registry, check thresholds
+    return {
+        "statusCode": 200,
+        "body": f"Heartbeat received for {serial}",
+    }

@@ -1,7 +1,12 @@
 import * as cdk from 'aws-cdk-lib/core';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as path from 'path';
 import { Construct } from 'constructs';
 import { GoSteadyEnvConfig } from '../config.js';
 import { DataStack } from './data-stack.js';
+// Note: @aws-cdk/aws-lambda:useCdkManagedLogGroup is true in cdk.json
+// so CDK auto-creates log groups — we use logRetention instead of explicit LogGroup
 
 export interface ProcessingStackProps extends cdk.StackProps {
   readonly config: GoSteadyEnvConfig;
@@ -12,40 +17,12 @@ export interface ProcessingStackProps extends cdk.StackProps {
  * Processing — Lambda functions that validate, transform, and react
  * to incoming device data.
  *
- * Phase 1B will implement:
- *   - Activity Processor Lambda
- *       Validates hourly payload schema, deduplicates by device+timestamp,
- *       writes to activity time-series table, computes daily roll-ups.
- *       Triggered by IoT Rule on gs/{serial}/activity.
- *
- *   - Heartbeat Processor Lambda
- *       Updates device registry (battery, signal, last_seen),
- *       checks thresholds (low battery, weak signal),
- *       publishes warning events to EventBridge.
- *       Triggered by IoT Rule on gs/{serial}/heartbeat.
- *
- *   - Alert Handler Lambda
- *       Receives tip-over / fall events from IoT Rules,
- *       logs to alert history table,
- *       resolves linked caregivers from relationships table,
- *       publishes to EventBridge for fan-out (SNS + integration targets).
- *       Triggered by IoT Rule on gs/{serial}/alert.
- *
- *   - Scheduled Jobs (EventBridge cron → Lambda)
- *       No-activity check: every 30 min
- *       Weekly trend computation: 7d rolling averages
- *       Offline detector: flags devices with no heartbeat > 8h
- *
- * Each Lambda gets:
- *   - Read/write to the relevant DynamoDB tables (least-privilege)
- *   - CloudWatch log group with 30d retention
- *   - X-Ray tracing enabled
+ * Deployed before Ingestion so IoT Rules can reference these Lambdas.
  */
 export class ProcessingStack extends cdk.Stack {
-  // Public properties will be added:
-  // public readonly activityProcessor: lambda.Function;
-  // public readonly heartbeatProcessor: lambda.Function;
-  // public readonly alertHandler: lambda.Function;
+  public readonly activityProcessor: lambda.Function;
+  public readonly heartbeatProcessor: lambda.Function;
+  public readonly alertHandler: lambda.Function;
 
   constructor(scope: Construct, id: string, props: ProcessingStackProps) {
     super(scope, id, props);
@@ -53,26 +30,77 @@ export class ProcessingStack extends cdk.Stack {
     const { config, dataStack } = props;
     const p = config.prefix;
 
-    // ── Phase 1B: Processing Lambdas ─────────────────────────────
-    // TODO: Activity Processor Lambda (Python, lambda/activity-processor/)
-    //       - dataStack.activityTable read/write
-    //       - dataStack.deviceTable read (to resolve walker user)
-    //
-    // TODO: Heartbeat Processor Lambda (Python, lambda/heartbeat-processor/)
-    //       - dataStack.deviceTable read/write
-    //
-    // TODO: Alert Handler Lambda (Python, lambda/alert-handler/)
-    //       - dataStack.alertTable write
-    //       - authStack.relationshipsTable read
-    //       - EventBridge putEvents
-    //
-    // TODO: Scheduled Jobs Lambda (Python, lambda/scheduled-jobs/)
-    //       - EventBridge cron rules
-    //       - dataStack.activityTable read
-    //       - dataStack.deviceTable read
+    const lambdaDir = path.join(__dirname, '..', '..', 'lambda');
 
-    new cdk.CfnOutput(this, 'Status', {
-      value: 'SCAFFOLD — Phase 1B pending',
+    // ── Shared Lambda config ─────────────────────────────────────
+    const commonEnv: Record<string, string> = {
+      DEVICE_TABLE: dataStack.deviceTable.tableName,
+      ACTIVITY_TABLE: dataStack.activityTable.tableName,
+      ALERT_TABLE: dataStack.alertTable.tableName,
+      USER_PROFILE_TABLE: dataStack.userProfileTable.tableName,
+      ENVIRONMENT: p,
+    };
+
+    // ── Activity Processor Lambda ────────────────────────────────
+    this.activityProcessor = new lambda.Function(this, 'ActivityProcessor', {
+      functionName: `gosteady-${p}-activity-processor`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'handler.handler',
+      code: lambda.Code.fromAsset(path.join(lambdaDir, 'activity-processor')),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: commonEnv,
+      description: 'Processes activity session payloads from IoT Core',
+      logRetention: logs.RetentionDays.ONE_MONTH,
+    });
+
+    // Grant DynamoDB access
+    dataStack.activityTable.grantReadWriteData(this.activityProcessor);
+    dataStack.deviceTable.grantReadData(this.activityProcessor);
+
+    // ── Heartbeat Processor Lambda ───────────────────────────────
+    this.heartbeatProcessor = new lambda.Function(this, 'HeartbeatProcessor', {
+      functionName: `gosteady-${p}-heartbeat-processor`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'handler.handler',
+      code: lambda.Code.fromAsset(path.join(lambdaDir, 'heartbeat-processor')),
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 128,
+      environment: commonEnv,
+      description: 'Processes device heartbeat payloads from IoT Core',
+      logRetention: logs.RetentionDays.ONE_MONTH,
+    });
+
+    dataStack.deviceTable.grantReadWriteData(this.heartbeatProcessor);
+
+    // ── Alert Handler Lambda ─────────────────────────────────────
+    this.alertHandler = new lambda.Function(this, 'AlertHandler', {
+      functionName: `gosteady-${p}-alert-handler`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'handler.handler',
+      code: lambda.Code.fromAsset(path.join(lambdaDir, 'alert-handler')),
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 128,
+      environment: commonEnv,
+      description: 'Processes alert events (tip-over, fall) from IoT Core',
+      logRetention: logs.RetentionDays.ONE_MONTH,
+    });
+
+    dataStack.alertTable.grantReadWriteData(this.alertHandler);
+    dataStack.deviceTable.grantReadData(this.alertHandler);
+
+    // ── Outputs ──────────────────────────────────────────────────
+    new cdk.CfnOutput(this, 'ActivityProcessorArn', {
+      value: this.activityProcessor.functionArn,
+      exportName: `${p}-ActivityProcessorArn`,
+    });
+    new cdk.CfnOutput(this, 'HeartbeatProcessorArn', {
+      value: this.heartbeatProcessor.functionArn,
+      exportName: `${p}-HeartbeatProcessorArn`,
+    });
+    new cdk.CfnOutput(this, 'AlertHandlerArn', {
+      value: this.alertHandler.functionArn,
+      exportName: `${p}-AlertHandlerArn`,
     });
   }
 }

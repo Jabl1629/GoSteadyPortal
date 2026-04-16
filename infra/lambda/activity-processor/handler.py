@@ -1,30 +1,40 @@
 """
-Activity Processor Lambda — Phase 1B
+Activity Processor Lambda
 
-Triggered by: IoT Rule on gs/{serial}/activity
-Writes to:    Activity time-series table (DynamoDB)
+Triggered by: IoT Rule on gs/+/activity
+IoT Rule SQL: SELECT *, topic(2) AS thingName FROM 'gs/+/activity'
 
-Expected MQTT payload:
+Expected payload (session-based):
 {
-    "serial": "GS-0001",
-    "ts": "2026-04-15T14:00:00Z",
+    "serial": "GS0000001234",
+    "session_start": "2026-04-15T14:02:00Z",
+    "session_end": "2026-04-15T14:18:00Z",
     "steps": 142,
     "distance_ft": 340.5,
-    "active_min": 9,
-    "assist_score": null
+    "active_min": 16,
+    "thingName": "GS0000001234"    <-- injected by IoT Rule SQL
 }
 
-This handler will:
-1. Validate payload schema
-2. Deduplicate by serial + timestamp
-3. Write hourly record to activity table
-4. On the final hour of the day (23:00), compute daily roll-up
+Phase 1A: logs payload to CloudWatch.
+Phase 1B: validate, dedup by serial+session_start, write to DynamoDB.
 """
 
 import json
+import os
+
+DEVICE_TABLE = os.environ.get("DEVICE_TABLE", "")
+ACTIVITY_TABLE = os.environ.get("ACTIVITY_TABLE", "")
 
 
 def handler(event, context):
-    # TODO: Implement in Phase 1B
+    serial = event.get("serial", event.get("thingName", "UNKNOWN"))
+    steps = event.get("steps", 0)
+    active = event.get("active_min", 0)
+    print(f"[ACTIVITY] serial={serial} steps={steps} active_min={active}")
     print(json.dumps(event))
-    return {"statusCode": 200, "body": "Activity processor placeholder"}
+
+    # TODO Phase 1B: validate, dedup by serial+session_start, write to DynamoDB
+    return {
+        "statusCode": 200,
+        "body": f"Activity received for {serial}: {steps} steps",
+    }
