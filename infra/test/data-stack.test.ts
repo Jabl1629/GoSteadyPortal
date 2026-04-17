@@ -13,6 +13,10 @@ describe('DataStack', () => {
       pitrEnabled: false,
       dynamoBillingMode: 'PAY_PER_REQUEST',
       alarmsEnabled: false,
+      kmsCmkEnabled: false,
+      cloudTrailEnabled: false,
+      cloudTrailObjectLockEnabled: false,
+      costAlarmThresholdUsd: 100,
     },
   });
   const template = Template.fromStack(stack);

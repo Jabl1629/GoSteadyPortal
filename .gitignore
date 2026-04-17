@@ -7,6 +7,7 @@
 .pub/
 build/
 .fvm/
+flutter_*.log
 
 # IDE
 .idea/

@@ -4,6 +4,7 @@
  *
  * Wires all stacks together with their dependency chain:
  *
+ *   Security ──→ (Auth, Data, Ingestion consume CMKs)
  *   Auth ──→ Data ──→ Ingestion ──→ Processing ──→ API ──→ Hosting
  *                                        ↓
  *                                  Notification ──→ Integration
@@ -14,6 +15,7 @@
  */
 import * as cdk from 'aws-cdk-lib/core';
 import { ENVIRONMENTS, GoSteadyEnvConfig } from '../lib/config.js';
+import { SecurityStack } from '../lib/stacks/security-stack.js';
 import { AuthStack } from '../lib/stacks/auth-stack.js';
 import { DataStack } from '../lib/stacks/data-stack.js';
 import { IngestionStack } from '../lib/stacks/ingestion-stack.js';
@@ -42,6 +44,13 @@ const env: cdk.Environment = {
 const prefix = `GoSteady-${config.prefix.charAt(0).toUpperCase() + config.prefix.slice(1)}`;
 
 // ── Stack instantiation (dependency order) ─────────────────────────
+
+// Security stack deploys FIRST — creates CMKs referenced by Auth, Data, Ingestion.
+const security = new SecurityStack(app, `${prefix}-Security`, {
+  env,
+  config,
+  description: `GoSteady Security Foundation — ${config.envName}`,
+});
 
 const auth = new AuthStack(app, `${prefix}-Auth`, {
   env,
