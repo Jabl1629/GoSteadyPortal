@@ -312,6 +312,149 @@ else:
 - **Patient mobility:** Patients move between censuses (memory care → skilled nursing) and rarely between facilities. Telemetry rows store the hierarchy snapshot **at write time** — history follows the patient, not the unit. Patient-centric queries use `patientId` PK; unit-centric reporting uses denormalized `censusId`/`facilityId`/`clientId`.
 - **Device mobility:** Devices are owned by a Client/Facility (inventory). Devices are *assigned* to patients temporarily via `DeviceAssignments`. Reassignment is common (Mrs. Jones's cap is reset and assigned to Mr. Smith). Assignment history is preserved for audit.
 
+### Device Lifecycle
+
+Devices follow a 5-state lifecycle from manufacturer to end-of-life. The state machine is intentionally simple — most operational complexity (sanitization, discharge, reset) is encoded in transition rules and firmware behavior rather than additional states.
+
+#### State machine
+
+```
+       [external: device manufactured, GoSteady ops registers in DDB]
+                              ↓
+                  ┌──────────────────────┐
+                  │  ready_to_provision  │ ◄──── reset (firmware-driven on
+                  └──────────┬───────────┘        charger when discontinued)
+                             │ assign(patient)              ▲
+                             ▼                              │
+                     ┌──────────────┐                       │
+                     │ provisioned  │                       │
+                     └──────┬───────┘                       │
+                            │ first heartbeat               │
+                            ▼                               │
+                  ┌─────────────────────┐                   │
+                  │ active_monitoring   │                   │
+                  └──────────┬──────────┘                   │
+                             │ end_assignment()             │
+                             ▼                              │
+                     ┌──────────────┐                       │
+                     │ discontinued │ ──────────────────────┘
+                     └──────┬───────┘
+                            │ retire(reason)
+                            ▼
+                  ┌─────────────────────┐
+                  │   decommissioned    │ — terminal (with reason)
+                  └─────────────────────┘
+                            ▲
+                            │ retire(reason: lost | broken)
+                            │ reachable from any non-terminal state
+```
+
+#### State definitions
+
+| State | Meaning |
+|-------|---------|
+| `ready_to_provision` | In inventory pool. Either fresh from manufacturer (no owner) or post-reset (owner persists). Can be claimed/assigned. |
+| `provisioned` | Assigned to a patient; cloud has not yet received any message from the device. |
+| `active_monitoring` | Assigned + cloud has received ≥1 message. The live-monitoring state. |
+| `discontinued` | Patient assignment ended; device awaits physical retrieval and reset. |
+| `decommissioned` | Terminal. Will never be used again. Always paired with a `decommissionReason`. |
+
+#### Decommission reasons
+
+| Reason | Recoverable? | Typical actor |
+|--------|--------------|---------------|
+| `lost` | **Yes** — admin override → `ready_to_provision` (audit-logged) | Caregiver flags |
+| `broken` | No (replace; refurb workflow deferred) | Caregiver flags |
+| `retired` | No | facility_admin / client_admin asset decision |
+| `end_of_life` | No | facility_admin / client_admin |
+
+#### Ownership invariants
+
+- **Ownership claimed at first provisioning.** Manufacturer-side Device Registry records have NULL `owningClientId` and `owningFacilityId`. The first time a caregiver provisions the device, ownership snaps to their client/facility.
+- **Ownership persists through reset.** Reset clears the on-device patient cache and the cloud's patient assignment only. `owningClientId` / `owningFacilityId` stay until an explicit cross-facility (client_admin) or cross-client (internal_admin) move.
+- **Physical possession is the security boundary for first-provision.** A caregiver must hold the physical device to type its printed serial. Phase 5 firmware will harden this via cert-bound ownership.
+- **No facility inventory pool / no pre-allocation.** Devices are not pre-assigned to facilities or censuses; ownership is established at first-provision. There is no portal UI for "devices in my facility's inventory."
+
+#### Reset is firmware-driven, not a UI action
+
+A device transitions `discontinued` → `ready_to_provision` only when:
+
+1. Device is in `discontinued` state, AND
+2. Device is connected to its charger, AND
+3. Device successfully wipes local data (patient cache, calibration drift, accumulated session buffer — keeping firmware + device cert), AND
+4. Device reports completion to cloud
+
+The "on the charger" moment is the natural sanitization checkpoint. There is **no caregiver-clickable reset button** in the portal — the closest is a `force_reset` admin override (facility_admin+) for stuck devices that fail to report reset completion. Force-reset is heavily audited.
+
+#### Provision-by-serial flow
+
+When a caregiver / admin / household_owner provisions a device:
+
+```
+1. User types serial GS0000001234 + selects patient
+2. Lookup Device Registry by serial:
+   ├── (a) Not found
+   │       → "Device not found. Confirm serial."
+   ├── (b) status != ready_to_provision
+   │       → "Device unavailable. Status: {state}."
+   │         If discontinued: "Plug into charger to reset."
+   ├── (c) ready_to_provision, no owner
+   │       → Claim ownership (set owningClientId + owningFacilityId)
+   │       → Create DeviceAssignment row
+   │       → Transition status to provisioned
+   │       → Audit: device.claimed + device.assigned
+   └── (d) ready_to_provision, owned by different client
+           → "Device belongs to another organization. Contact support."
+```
+
+Same flow for facility caregivers and D2C household_owners — only the resulting client/facility ownership differs.
+
+#### Patient discharge cascade
+
+When a patient is marked `discharged`:
+
+- All `provisioned` and `active_monitoring` devices currently assigned → automatic `end_assignment` → `discontinued`
+- Device does **not** auto-reset — staff must physically retrieve and plug into charger
+- Audit: `device.assignment_ended` with `reason: patient_discharged`
+
+#### Authorization matrix
+
+✅ = allowed; **scope** in parens.
+
+| Transition | family_viewer | caregiver | facility_admin | client_admin | household_owner | internal_support | internal_admin |
+|------------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| View device | ✅ (linked patients) | ✅ (scope*) | ✅ (facility) | ✅ (client) | ✅ (own) | ✅ (read all) | ✅ (all) |
+| Provision (assign to patient) | ❌ | ✅ (scope) | ✅ (facility) | ✅ (client) | ✅ (own) | ❌ | ✅ |
+| End assignment | ❌ | ✅ (scope) | ✅ (facility) | ✅ (client) | ✅ (own) | ❌ | ✅ |
+| Mark `lost` or `broken` | ❌ | ✅ (scope) | ✅ (facility) | ✅ (client) | ✅ (own) | ❌ | ✅ |
+| Mark `retired` / `end_of_life` | ❌ | ❌ | ✅ (facility) | ✅ (client) | ✅ (own) | ❌ | ✅ |
+| Reactivate from `decommissioned (lost)` | ❌ | ❌ | ✅ (facility) | ✅ (client) | ✅ (own) | ❌ | ✅ |
+| Force reset (admin override) | ❌ | ❌ | ✅ (facility) | ✅ (client) | ✅ (own) | ❌ | ✅ (audited) |
+| Move device between facilities (same client) | ❌ | ❌ | ❌ | ✅ (client) | N/A | ❌ | ✅ |
+| Move device between clients | ❌ | ❌ | ❌ | ❌ | N/A | ❌ | ✅ (audited heavily) |
+| Manufacturer-side device record creation | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+\* **caregiver scope** = devices currently assigned to patients in their assigned censuses. There is no "facility inventory pool" view — provisioning is by typing the serial.
+
+#### Audit events
+
+Every transition emits one audit log entry:
+
+| Event | Trigger |
+|-------|---------|
+| `device.created` | Manufacturer-side record creation by `internal_admin` |
+| `device.claimed` | First-provision; ownership set |
+| `device.assigned` | Patient assignment created |
+| `device.first_heartbeat` | Auto on `provisioned → active_monitoring` |
+| `device.assignment_ended` | `end_assignment` action; includes `reason` |
+| `device.reset_complete` | Firmware confirms reset on charger |
+| `device.force_reset` | Admin override |
+| `device.decommissioned` | Includes `decommissionReason` |
+| `device.recovered` | Reactivation from `decommissioned (lost)` |
+| `device.ownership_moved` | Cross-facility or cross-client transfer |
+
+Detailed implementation, API contracts, error states, and UX flows live in [`phase-2a-device-lifecycle.md`](phase-2a-device-lifecycle.md).
+
 ---
 
 ## 5. CDK Stack Map
@@ -983,6 +1126,21 @@ Phase 3B (CI/CD)    ←── any time
 | T5 | Device ownership and patient assignment are separate entities | Multi-tenancy |
 | T6 | Internal GoSteady users belong to reserved `_internal` client; cross-tenant authority is role-based (`internal_*`); every cross-tenant access generates elevated audit entry | Multi-tenancy |
 
+### Device Lifecycle
+| # | Requirement | Source |
+|---|-------------|--------|
+| DL1 | 5 device states: `ready_to_provision`, `provisioned`, `active_monitoring`, `discontinued`, `decommissioned` | Architecture §4 |
+| DL2 | `decommissioned` always carries a `decommissionReason` (`lost`, `broken`, `retired`, `end_of_life`) | Architecture §4 |
+| DL3 | Device ownership (`owningClientId`, `owningFacilityId`) is claimed at first provisioning, not at manufacture or shipping | Architecture §4 |
+| DL4 | Ownership persists through reset; only explicit cross-facility or cross-client moves change it | Architecture §4 |
+| DL5 | No facility inventory pool / no pre-allocation — provisioning is by typing the device serial | Architecture §4 |
+| DL6 | Reset (`discontinued` → `ready_to_provision`) is firmware-driven on charger; no portal "reset" button | Architecture §4 |
+| DL7 | `force_reset` admin override exists for stuck firmware; facility_admin+ only; audited | Architecture §4 |
+| DL8 | Patient discharge auto-ends device assignments → `discontinued`; staff must physically retrieve and reset | Architecture §4 |
+| DL9 | Cross-facility moves: client_admin only. Cross-client moves: internal_admin only. | Architecture §4 |
+| DL10 | Decommissioned-lost is the only recoverable terminal — admin override → `ready_to_provision` | Architecture §4 |
+| DL11 | Caregivers can mark `lost`/`broken` (operational) but only admins can mark `retired`/`end_of_life` (asset decision) | Architecture §4 |
+
 ### Device & Ingestion
 | # | Requirement | Source |
 |---|-------------|--------|
@@ -1098,6 +1256,7 @@ Phase 3B (CI/CD)    ←── any time
 | 1.6 | Observability | — | 🔲 Planned (new) |
 | 1.7 | Audit Logging | — | 🔲 Planned (new) |
 | 2A | Portal API | — | 🔲 Planned |
+| 2A-dl | Device Lifecycle (subset of 2A) | [`phase-2a-device-lifecycle.md`](phase-2a-device-lifecycle.md) | 🔲 Planned |
 | 2B | Portal Integration | — | 🔲 Planned |
 | 2C | Notifications | — | 🔲 Planned |
 | 3A | Portal Hosting | — | 🔲 Planned |
