@@ -409,6 +409,24 @@ When a caregiver / admin / household_owner provisions a device:
 
 Same flow for facility caregivers and D2C household_owners — only the resulting client/facility ownership differs.
 
+#### Activation message (cloud → device)
+
+Provisioning has two halves: the cloud-side state transition (`ready_to_provision` → `provisioned`) and the firmware-side acknowledgement that it should exit pre-activation sleep and begin session capture. The activation message bridges them.
+
+When the `device-api` Lambda completes a successful `provision` action:
+1. Generate `cmd_id` UUID (e.g., `act_5e8a23b4-...`)
+2. Publish to `gs/{serial}/cmd` topic with `cmd: "activate"` (see §7 for full schema)
+3. Emit audit event `device.activation_sent` with the `cmd_id`
+
+Firmware receives the command, persists `activated_at` to flash, exits pre-activation sleep loop, extinguishes its blue LED, and begins normal session capture. On the next heartbeat, firmware echoes `last_cmd_id: <issued cmd_id>`.
+
+Cloud's heartbeat handler:
+- If `last_cmd_id` matches an outstanding activation command → set `Device Registry.activated_at = ts of this heartbeat`
+- Emit audit event `device.activated`
+- Threshold Detector now considers this device active for synthetic alerts (see §8 pre-activation suppression)
+
+If the activation message is lost in transit (cellular outage), the device stays in pre-activation sleep until the next provision retry. The provision endpoint is idempotent — a caregiver can re-provision the same patient/serial pair to retransmit the activation command.
+
 #### Patient discharge cascade
 
 When a patient is marked `discharged`:
@@ -445,6 +463,9 @@ Every transition emits one audit log entry:
 | `device.created` | Manufacturer-side record creation by `internal_admin` |
 | `device.claimed` | First-provision; ownership set |
 | `device.assigned` | Patient assignment created |
+| `device.activation_sent` | Cloud published `activate` cmd to `gs/{serial}/cmd` |
+| `device.activated` | Heartbeat echoed `last_cmd_id` matching activation; firmware ack confirmed |
+| `device.preactivation_heartbeat` | Heartbeat received before activation (sampled to 1/hour/serial) |
 | `device.first_heartbeat` | Auto on `provisioned → active_monitoring` |
 | `device.assignment_ended` | `end_assignment` action; includes `reason` |
 | `device.reset_complete` | Firmware confirms reset on charger |
@@ -452,6 +473,7 @@ Every transition emits one audit log entry:
 | `device.decommissioned` | Includes `decommissionReason` |
 | `device.recovered` | Reactivation from `decommissioned (lost)` |
 | `device.ownership_moved` | Cross-facility or cross-client transfer |
+| `device.snippet_uploaded` | IoT Rule wrote a snippet blob to S3 |
 
 Detailed implementation, API contracts, error states, and UX flows live in [`phase-2a-device-lifecycle.md`](phase-2a-device-lifecycle.md).
 
@@ -648,8 +670,18 @@ npx cdk deploy GoSteady-Dev-Processing --context env=dev               # single 
 
 ## 7. MQTT Payload Contracts
 
-All payloads flow through `gs/{serialNumber}/{type}`. IoT Rule SQL injects
+All uplink payloads flow through `gs/{serialNumber}/{type}`. IoT Rule SQL injects
 `thingName` from the topic so handlers always have a reliable device identifier.
+Cloud → device commands flow through `gs/{serialNumber}/cmd` (downlink, see below).
+
+### Universal payload conventions
+
+- **Timestamps are device-authoritative.** Firmware sources UTC from cellular network time (`AT+CCLK?` after modem attach). Cloud accepts and stores timestamps as provided; no NTP fallback or cloud-side time correction in v1. Validation only rejects unparseable ISO 8601.
+- **Extra fields are gracefully accepted.** All uplink schemas tolerate additional fields beyond those listed below. Validators reject only on missing required fields or out-of-range required values. Unknown fields:
+  - **Heartbeat** → persisted into Device Shadow `reported` state alongside named ones
+  - **Activity** → persisted into the Activity Series row's `extras` map (DDB)
+  - **Alert** → persisted into the Alert History row's `data` map
+  - This lets firmware add diagnostic fields (`reset_reason`, `fault_counters`, `watchdog_hits`) without contract churn.
 
 ### Activity (session-end event)
 ```json
@@ -669,6 +701,9 @@ All payloads flow through `gs/{serialNumber}/{type}`. IoT Rule SQL injects
 | `steps` | Yes | Integer, 0–100,000 |
 | `distance_ft` | Yes | Number, 0–50,000 |
 | `active_min` | Yes | Integer, 0–1,440 |
+| `roughness_R` | No | Float — terrain roughness metric from on-device M9 algorithm |
+| `surface_class` | No | Enum: `indoor`, `outdoor` (M9 surface classifier output) |
+| `firmware_version` | No | Semver string — useful for cohort dashboards + retrain triage |
 
 ### Heartbeat (hourly) — written to Device Shadow
 ```json
@@ -689,6 +724,13 @@ All payloads flow through `gs/{serialNumber}/{type}`. IoT Rule SQL injects
 | `battery_pct` | Yes | Float, 0.0–1.0 |
 | `rsrp_dbm` | Yes | Float, −140 to 0 |
 | `snr_db` | Yes | Float, −20 to 40 |
+| `battery_mv` | No | Integer (diagnostic) |
+| `firmware` | No | Semver string |
+| `uptime_s` | No | Integer |
+| `reset_reason` | No | Firmware crash-forensics field; persisted to Shadow |
+| `fault_counters` | No | Object — firmware diagnostic counters; persisted to Shadow |
+| `watchdog_hits` | No | Integer — firmware watchdog trigger count |
+| `last_cmd_id` | No | Echoes the most recent downlink command ID for ack tracking |
 
 > Heartbeat updates Device Shadow `reported` state. Threshold detection runs on shadow delta, not on every heartbeat Lambda invocation.
 
@@ -713,6 +755,62 @@ All payloads flow through `gs/{serialNumber}/{type}`. IoT Rule SQL injects
 | `severity` | Yes | Enum: `critical`, `warning`, `info` |
 | `data` | No | Arbitrary map, floats auto-converted to DDB Decimal |
 
+### Snippet (raw IMU data, opportunistic)
+
+Topic: `gs/{serial}/snippet`
+Payload: **binary** — raw 100 Hz BMI270 IMU samples, typically a 30 s window (~84 KB)
+Routing: IoT Rule writes the binary blob directly to S3 via the Rule's S3 action — **no Lambda in the ingestion path**, for latency + cost.
+
+| MQTT user property | Required | Validation |
+|--------------------|----------|-----------|
+| `snippet_id` | Yes | Firmware-generated UUID for idempotency |
+| `window_start_ts` | Yes | ISO 8601 UTC |
+| `anomaly_trigger` | No | Enum: `session_sigma`, `R_outlier`, `high_g`. Absent for scheduled snippets. |
+
+Constraints:
+- **Max payload size: 100 KB** — under AWS IoT Core 128 KB hard limit with headroom
+- Stored at `s3://gosteady-{env}-snippets/{serial}/{snippet_id}.bin`
+- Encryption: AWS-managed key (sensor data, no PHI)
+- Lifecycle: 90 days hot → Glacier; 13-month total retention (aligned with v1.5 algorithm-retrain need)
+- Audit event: `device.snippet_uploaded` per snippet
+- **Migration path:** when v2 snippet sizing exceeds 100 KB, switch to S3 presigned URL flow (mirrors OTA pattern). MQTT topic deprecated at that point.
+
+### Downlink Command (cloud → device)
+
+Topic: `gs/{serial}/cmd`
+Direction: **cloud → device** (only downlink in v1)
+Payload: JSON
+
+| Field | Required | Validation |
+|-------|----------|-----------|
+| `cmd` | Yes | Enum: `activate` (only command in v1) |
+| `cmd_id` | Yes | UUID — firmware echoes in next heartbeat as `last_cmd_id` for ack |
+| `ts` | Yes | ISO 8601 cloud-side wall-clock at publish time |
+
+#### `activate` command
+
+Sent by the `device-api` Lambda when a caregiver successfully provisions a device for the first time (transition `ready_to_provision` → `provisioned`).
+
+```json
+{
+  "cmd": "activate",
+  "cmd_id": "act_5e8a23b4-...",
+  "ts": "2026-04-17T19:00:00Z",
+  "session_id": "<provision audit log ID>"
+}
+```
+
+Firmware behavior on receipt:
+1. Persist `activated_at` to flash
+2. Exit pre-activation sleep loop
+3. Extinguish blue activation-pending LED
+4. Begin normal session capture
+5. Echo `cmd_id` back via `last_cmd_id` field on the next heartbeat
+
+Cloud sees a heartbeat with `last_cmd_id` matching the issued activation command → marks `Device Registry.activated_at` and emits `device.activated` audit event. The state machine has already transitioned to `provisioned` at provision time; this is the firmware-side acknowledgement.
+
+Per-thing IoT policy authorizes the device to subscribe to `gs/{iot:Connection.Thing.ThingName}/cmd` only — devices cannot read other devices' command topics.
+
 ---
 
 ## 8. Threshold & Alert Policy
@@ -730,6 +828,12 @@ most severe tier per dimension fires (critical suppresses low; lost suppresses w
 | Device offline | Shadow `lastSeen > 2 hours` | `device_offline` | `warning` | Detected via IoT Events or scheduled sweep (Phase 1C) |
 
 Thresholds are hard-coded in Lambda source. Per-walker overrides deferred to Phase 2A.
+
+### Pre-activation suppression
+
+A device may publish heartbeats while in `ready_to_provision` (firmware wakes on motion and pings periodically before any caregiver has provisioned it). **Threshold Detector suppresses synthetic alerts on devices whose `Device Registry.activated_at` is unset.** Rationale: there is no patient yet, no caregiver to notify, and any battery/signal alert is noise at this stage.
+
+Suppressed alerts are still observable for ops via Device Shadow `reported` state and audit logs (`device.preactivation_heartbeat` event, sampled to one per hour per serial to avoid log flood).
 
 ---
 
@@ -1140,6 +1244,8 @@ Phase 3B (CI/CD)    ←── any time
 | DL9 | Cross-facility moves: client_admin only. Cross-client moves: internal_admin only. | Architecture §4 |
 | DL10 | Decommissioned-lost is the only recoverable terminal — admin override → `ready_to_provision` | Architecture §4 |
 | DL11 | Caregivers can mark `lost`/`broken` (operational) but only admins can mark `retired`/`end_of_life` (asset decision) | Architecture §4 |
+| DL12 | Provisioning publishes `activate` cmd to `gs/{serial}/cmd`; firmware echoes `cmd_id` in next heartbeat as `last_cmd_id`; cloud sets `Device Registry.activated_at` on echo | Firmware coordination 2026-04-17 |
+| DL13 | Threshold Detector suppresses synthetic alerts on devices where `activated_at` is unset (no patient yet, no caregiver to notify) | Firmware coordination 2026-04-17 |
 
 ### Device & Ingestion
 | # | Requirement | Source |
@@ -1155,6 +1261,12 @@ Phase 3B (CI/CD)    ←── any time
 | D9 | Device state lives in IoT Device Shadow, not DDB | Revised |
 | D10 | OTA via AWS IoT Jobs with signed images (MCUboot) | Phase 5A |
 | D11 | Device certs stored in nRF9151 secure element (CryptoCell-312 / TF-M) | Phase 5A |
+| D12 | Per-device manual cert flash for first deployment (≤3 units); fleet provisioning template stays Phase 5A | Firmware coordination 2026-04-25 |
+| D13 | Downlink topic: `gs/{serial}/cmd`. Per-thing IoT policy authorizes subscribe to own topic only. | Firmware coordination 2026-04-17 |
+| D14 | Snippet topic: `gs/{serial}/snippet`. Binary payload ≤100 KB. IoT Rule → S3 direct write. | Firmware coordination 2026-04-17 |
+| D15 | Cloud accepts device-provided UTC timestamps as authoritative; no NTP fallback in v1 | Firmware coordination 2026-04-17 |
+| D16 | All uplink schemas tolerate extra fields gracefully — heartbeat extras → Shadow, activity extras → DDB `extras` map, alert extras → `data` map | Firmware coordination 2026-04-17 |
+| D17 | Activity payload supports optional firmware-derived `roughness_R`, `surface_class`, `firmware_version` | Firmware coordination 2026-04-17 |
 
 ### Data Schema
 | # | Requirement | Source |
@@ -1250,6 +1362,7 @@ Phase 3B (CI/CD)    ←── any time
 | 0A-rev | Auth Revision (multi-tenancy + RBAC + MFA) | [`phase-0a-revision.md`](phase-0a-revision.md) | 🔲 Planned |
 | 0B | Data Layer | [`phase-0b-data.md`](phase-0b-data.md) | 🔄 Revision pending |
 | 1A | IoT Ingestion | [`phase-1a-ingestion.md`](phase-1a-ingestion.md) | ✅ Deployed |
+| 1A-rev | Ingestion Revision (snippet IoT Rule, downlink topic, pre-activation handling) | [`phase-1a-revision.md`](phase-1a-revision.md) | 🔲 Planned |
 | 1B | Processing Logic | [`phase-1b-processing.md`](phase-1b-processing.md) | 🔄 Revision pending |
 | 1C | Scheduled Jobs | — | 🔲 Planned |
 | 1.5 | Security Foundation | [`phase-1.5-security.md`](phase-1.5-security.md) | 🔲 Planned (new) |

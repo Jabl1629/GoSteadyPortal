@@ -63,7 +63,7 @@ companion specs and share the same API Gateway and authorizer infrastructure.
 |--------|------|---------|------------------|
 | `GET` | `/devices/{serial}` | View single device + current assignment | family_viewer (linked patient), caregiver (scope), facility_admin+, internal_* |
 | `GET` | `/patients/{patientId}/devices` | List devices ever assigned to patient | family_viewer (linked), caregiver (scope), facility_admin+, internal_* |
-| `POST` | `/devices/{serial}/provision` | Assign to patient (transitions `ready_to_provision` → `provisioned`; claims ownership if first time) | caregiver (scope), facility_admin (facility), client_admin (client), household_owner (own), internal_admin |
+| `POST` | `/devices/{serial}/provision` | Assign to patient (transitions `ready_to_provision` → `provisioned`; claims ownership if first time; **publishes `activate` command to `gs/{serial}/cmd`** for firmware to exit pre-activation sleep) | caregiver (scope), facility_admin (facility), client_admin (client), household_owner (own), internal_admin |
 | `POST` | `/devices/{serial}/end-assignment` | End current assignment (transitions to `discontinued`) | same as provision |
 | `POST` | `/devices/{serial}/decommission` | Mark `decommissioned` with reason (lost/broken/retired/end_of_life) | reason-dependent: `lost`/`broken` allowed for caregiver+; `retired`/`end_of_life` requires facility_admin+ |
 | `POST` | `/devices/{serial}/recover` | Reactivate from `decommissioned (lost)` to `ready_to_provision` | facility_admin (facility), client_admin (client), household_owner (own), internal_admin |
@@ -71,6 +71,15 @@ companion specs and share the same API Gateway and authorizer infrastructure.
 | `POST` | `/devices/{serial}/move-facility` | Transfer `owningFacilityId` within same client | client_admin, internal_admin |
 | `POST` | `/devices/{serial}/move-client` | Transfer `owningClientId` (rare) | internal_admin only; elevated audit |
 | `POST` | `/admin/devices` (internal) | Manufacturer-side bulk creation of new Device Registry records (no owner) | internal_admin only |
+
+#### Activation message publish
+
+After a successful provision, the handler synchronously publishes the `activate` command to `gs/{serial}/cmd` (per ARCHITECTURE.md §7 Downlink Command schema). Firmware echoes the `cmd_id` in its next heartbeat as `last_cmd_id`; cloud's heartbeat handler then sets `Device Registry.activated_at` and emits `device.activated` audit event.
+
+Failure modes:
+- IoT publish fails → `provision` endpoint returns 500; caller can retry. Provision is idempotent so duplicate activation commands are safe (same `cmd_id` semantics).
+- Activation command lost in flight (cellular outage) → device stays in pre-activation sleep until next provision retry, which republishes a fresh `cmd_id`.
+- Firmware never echoes `last_cmd_id` (firmware bug) → cloud's `Device Registry.activated_at` stays NULL; Threshold Detector continues to suppress synthetic alerts (correct behavior — the device hasn't actually started monitoring). Operations alert on devices stuck in `provisioned` state >24 hr post-activation-send.
 
 #### Discharge cascade hook
 - Listener on Patients table updates (DDB Streams or direct invocation from API handler that flips patient status)
@@ -299,7 +308,9 @@ Response 200:
 
 | # | Scenario | Method | Expected Result | Status |
 |---|----------|--------|-----------------|--------|
-| T1 | Provision new device by serial (case c) — first-provision claims ownership | API call as caregiver | 200; device status=provisioned, ownership set, assignment row created, audit event `device.claimed`+`device.assigned` | Pending |
+| T1 | Provision new device by serial (case c) — first-provision claims ownership + publishes activation cmd | API call as caregiver | 200; device status=provisioned, ownership set, assignment row created, IoT message published to `gs/{serial}/cmd`, audit events `device.claimed`+`device.assigned`+`device.activation_sent` | Pending |
+| T1b | Activation acknowledgement | Heartbeat with matching `last_cmd_id` | `Device Registry.activated_at` set; audit event `device.activated`; threshold suppression released | Pending |
+| T1c | Pre-activation heartbeat suppression | Heartbeat from device where `activated_at` is NULL with `battery_pct=0.03` | No `battery_critical` alert generated; audit event `device.preactivation_heartbeat` (sampled to 1/hr) | Pending |
 | T2 | Provision unknown serial (case a) | API call | 404 `DEVICE_NOT_FOUND` | Pending |
 | T3 | Provision device in `active_monitoring` (case b) | API call | 409 `DEVICE_UNAVAILABLE` w/ currentStatus | Pending |
 | T4 | Provision device owned by different client (case d) | API call as caregiver of client_006 against device owned by client_005 | 403 `OWNED_BY_OTHER_CLIENT` | Pending |
