@@ -490,7 +490,7 @@ Deployed via CDK with `--context env=dev|prod`.
 | 2 | `GoSteady-{Env}-Data` | 0B | **Deployed** (revisions pending) | Organizations, Patients, Device Registry, Device Assignments, Activity Series, Alert History, Users (DDB tables + GSIs) | — |
 | 3 | `GoSteady-{Env}-Processing` | 1A/1B | **Deployed** (revisions pending) | Activity Processor, Threshold Detector, Alert Handler (3 Lambdas, Python 3.12 ARM64) | Data |
 | 4 | `GoSteady-{Env}-Ingestion` | 1A | **Deployed** | IoT Thing Type, Device Policy, 3 Topic Rules, IoT Jobs config, SQS DLQ, S3 OTA Bucket, Fleet Provisioning Template | Processing |
-| 5 | `GoSteady-{Env}-Security` | 1.5 | **New** | KMS CMKs, CloudTrail, multi-account guardrails | — |
+| 5 | `GoSteady-{Env}-Security` | 1.5 | **Deployed** (2026-04-17) | 3 KMS CMKs (identity / firmware / audit), CloudTrail multi-region trail, KMS-encrypted S3 log bucket, SNS cost alarm topic, billing alarm | — |
 | 6 | `GoSteady-{Env}-Observability` | 1.6 | **New** | Powertools layer, X-Ray config, CloudWatch dashboards, alarm catalog | All |
 | 7 | `GoSteady-{Env}-Audit` | 1.7 | **New** | Audit log group (CloudWatch + S3 Object Lock), audit-writer Lambda | Auth, Data |
 | 8 | `GoSteady-{Env}-Notification` | 2C | Stub | EventBridge bus, SNS topics, SES templates, SQS integration queue | — |
@@ -947,6 +947,7 @@ Structured JSON via Lambda Powertools:
 | Status | Meaning |
 |--------|---------|
 | ✅ **Deployed** | Code written, deployed to dev AWS, verified with live tests |
+| 🟡 **Partially deployed** | Some sub-deliverables live; others pending dependencies or deferred |
 | 🔄 **Revision pending** | Originally deployed; needs update for current architecture |
 | 🔲 Planned | Design understood, not yet implemented |
 | ⬜ Future | Broad scope defined, details TBD |
@@ -1028,13 +1029,33 @@ Structured JSON via Lambda Powertools:
 
 ---
 
-### Phase 1.5 — Security Foundation 🔲 **NEW**
+### Phase 1.5 — Security Foundation 🟡 **Partially deployed (2026-04-17)**
 
-- KMS CMKs for identity-bearing tables + S3 OTA bucket (~3 keys)
-- CloudTrail with management events, 90-day CloudWatch + indefinite S3 archive
-- Multi-account migration plan: dev / prod / shared-services via AWS Organizations
-- IAM policy review — least-privilege audit on all Lambda execution roles
-- Security baseline documented: TLS 1.2 minimum, MFA on all human accounts, no long-lived access keys
+**Spec:** [`phase-1.5-security.md`](phase-1.5-security.md)
+
+**✅ Deployed in dev (Security stack `GoSteady-Dev-Security`, 2026-04-17):**
+- 3 KMS Customer-Managed Keys with annual rotation:
+  - `gosteady/dev/identity` (for identity-bearing DDB tables — referenced by future 0A/0B revisions)
+  - `gosteady/dev/firmware` (for S3 OTA bucket — to be wired by 1A revision)
+  - `gosteady/dev/audit` (for CloudTrail logs and Phase 1.7 audit log destination)
+- CloudTrail multi-region trail with KMS-encrypted S3 destination (`gosteady-dev-cloudtrail-logs-460223323193`), 90-day CloudWatch retention, log file validation enabled
+- SNS cost alarm topic + $100/mo billing alarm
+
+**🔲 Pending — same phase, not yet shipped:**
+- AWS Organizations bootstrap (manual runbook — create org, OU structure `Workloads/Dev`, `Workloads/Prod`, `Shared/Logging`, `Shared/Security`, draft SCPs but do NOT attach in 1.5 per spec D7)
+- IAM password policy (min 14 chars, all classes, 90-day max, no reuse of last 12)
+- IAM least-privilege audit on existing Lambda execution roles
+- TLS 1.2 enforcement audit (verify IoT Core, API Gateway, Cognito)
+- S3 Object Lock on CloudTrail bucket (prod-only, not deployed in dev)
+- Cost anomaly detection monitor
+
+**🔲 Pending — depends on downstream stack revisions:**
+- Auth stack consuming IdentityKey CMK on RoleAssignments table → blocked on **Phase 0A revision**
+- Data stack consuming IdentityKey CMK on Patients/Users/Organizations/DeviceAssignments → blocked on **Phase 0B revision**
+- Ingestion stack consuming FirmwareKey CMK on S3 OTA bucket → blocked on **Phase 1A revision**
+- Processing stack Lambdas migrating to ARM64 + adding `kms:Decrypt` grants → blocked on **Phase 1B revision**
+
+**Security stack itself does not need redeployment for these — they are downstream stack edits that will reference the already-published CMK ARNs via cross-stack imports.**
 
 ---
 
@@ -1189,7 +1210,7 @@ Phase 3B (CI/CD)    ←── any time
 ### Critical Path (MVP: real data on a caregiver's screen)
 ```
 0A → 0B → 1A → 1B → 1.5 → 1.7 → 2A → 2B → [Portal renders real data]
-🔄   🔄   ✅   🔄    🔲    🔲    🔲    🔲
+🔄   🔄   ✅   🔄    🟡    🔲    🔲    🔲
 ```
 
 ---
@@ -1365,7 +1386,7 @@ Phase 3B (CI/CD)    ←── any time
 | 1A-rev | Ingestion Revision (snippet IoT Rule, downlink topic, pre-activation handling) | [`phase-1a-revision.md`](phase-1a-revision.md) | 🔲 Planned |
 | 1B | Processing Logic | [`phase-1b-processing.md`](phase-1b-processing.md) | 🔄 Revision pending |
 | 1C | Scheduled Jobs | — | 🔲 Planned |
-| 1.5 | Security Foundation | [`phase-1.5-security.md`](phase-1.5-security.md) | 🔲 Planned (new) |
+| 1.5 | Security Foundation | [`phase-1.5-security.md`](phase-1.5-security.md) | 🟡 Partially deployed — Security stack live; Org bootstrap + IAM audits + downstream CMK consumption pending |
 | 1.6 | Observability | — | 🔲 Planned (new) |
 | 1.7 | Audit Logging | — | 🔲 Planned (new) |
 | 2A | Portal API | — | 🔲 Planned |

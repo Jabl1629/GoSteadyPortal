@@ -2,10 +2,33 @@
 
 ## Overview
 - **Phase**: 1.5
-- **Status**: Planned
-- **Branch**: feature/phase-1.5-security (TBD)
-- **Date Started**: TBD
-- **Date Completed**: TBD
+- **Status**: 🟡 **Partially deployed** — Security stack live in dev (2026-04-17); downstream consumption + Org bootstrap + IAM audits pending. See "Deployment status" subsection below.
+- **Branch**: feature/infra-scaffold (Security stack deployed via this branch)
+- **Date Started**: 2026-04-17
+- **Date Completed**: TBD (final completion when downstream stack revisions consume CMKs and Org bootstrap is run)
+
+### Deployment status (2026-04-17)
+
+**✅ Live in dev:**
+- 3 KMS CMKs with annual rotation: `gosteady/dev/identity`, `gosteady/dev/firmware`, `gosteady/dev/audit`
+- CloudTrail multi-region trail `gosteady-dev-cloudtrail` with KMS-encrypted S3 destination
+- SNS cost alarm topic + $100/mo billing alarm
+- Verified via `cdk deploy GoSteady-Dev-Security` + post-deploy `aws kms`/`cloudtrail`/`s3` checks
+
+**🔲 Pending (same phase, not yet run):**
+- AWS Organizations bootstrap (manual runbook — see Decision D6)
+- IAM password policy (custom resource)
+- IAM least-privilege audit on existing Lambda execution roles
+- TLS 1.2 enforcement audit (IoT Core, API Gateway, Cognito)
+- Cost anomaly detection (separate from billing alarm)
+
+**🔲 Pending (depends on downstream stack revisions):**
+- Auth stack referencing `IdentityKey` for RoleAssignments → blocked on Phase 0A revision
+- Data stack referencing `IdentityKey` for identity tables → blocked on Phase 0B revision
+- Ingestion stack referencing `FirmwareKey` for OTA bucket → blocked on Phase 1A revision
+- Processing stack ARM64 migration + `kms:Decrypt` grants → blocked on Phase 1B revision
+
+The Security stack **does not need redeployment** for downstream consumption — CMK ARNs are exported and ready to be imported via cross-stack references.
 
 Establishes the cross-cutting security primitives the rest of the platform
 depends on: KMS customer-managed keys for identity-bearing data, AWS
