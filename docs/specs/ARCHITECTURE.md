@@ -421,11 +421,24 @@ When the `device-api` Lambda completes a successful `provision` action:
 Firmware receives the command, persists `activated_at` to flash, exits pre-activation sleep loop, extinguishes its blue LED, and begins normal session capture. On the next heartbeat, firmware echoes `last_cmd_id: <issued cmd_id>`.
 
 Cloud's heartbeat handler:
-- If `last_cmd_id` matches an outstanding activation command → set `Device Registry.activated_at = ts of this heartbeat`
+- If `last_cmd_id` matches **any** activation command issued to this serial within a recent window (see ack-matching note below) → set `Device Registry.activated_at = ts of this heartbeat`
 - Emit audit event `device.activated`
 - Threshold Detector now considers this device active for synthetic alerts (see §8 pre-activation suppression)
 
-If the activation message is lost in transit (cellular outage), the device stays in pre-activation sleep until the next provision retry. The provision endpoint is idempotent — a caregiver can re-provision the same patient/serial pair to retransmit the activation command.
+**Ack-matching breadth (firmware coordination §F.2, 2026-04-26).** Firmware always echoes the *most recently received* `cmd_id` in `last_cmd_id` (it doesn't track a queue of unacked commands). If the portal retried provision after a transient publish failure, two `activate` cmds with different `cmd_id`s may have been issued for the same serial in quick succession; firmware will only echo the more recent one. The heartbeat handler therefore matches `last_cmd_id` against any `cmd_id` issued to this serial within the last N hours (recommended N: 24, mirroring the "stuck in provisioned" ops alarm window) — not only against the most-recent one. Matching against only the most-recent would otherwise produce false-negative "stuck in `provisioned`" alarms during benign retry windows.
+
+**Re-check on each cellular wake (firmware §F.6, decided 2026-04-26).** Firmware does not unconditionally trust its on-flash `activated_at` flag; on every cellular wake it re-checks provisioning state with cloud before allowing session capture, to remain robust against (a) flash bit-flips and (b) cloud-side de-provisioning (RMA, facility move, recovery).
+
+**Mechanism: Device Shadow `desired` state.** Cloud is source-of-truth for activation; Shadow is the durable channel.
+
+- Cloud writes Shadow `desired.activated_at` (ISO 8601 UTC) at provision time, in addition to publishing the existing `activate` cmd to `gs/{serial}/cmd`. Cmd topic remains the immediate-push signal at provision; Shadow is the durable state-of-record consulted on every wake.
+- Cloud writes `desired.activated_at = null` (or removes the key) on every transition out of `provisioned` or `active_monitoring` (end-assignment, decommission, force-reset, ownership move, discharge cascade). Single invariant: Shadow `desired.activated_at` is non-null **iff** Device Registry status ∈ {`provisioned`, `active_monitoring`}.
+- On every cellular wake, firmware reads `desired.activated_at` via the standard AWS IoT shadow get; if non-null and matches its on-flash value, normal operation; if null (or any mismatch versus its persisted value), firmware re-enters pre-activation behavior, blue LED back on, no session capture, and updates `reported.activated_at` to match.
+- Firmware writes `reported.activated_at` to confirm device-side persistence after every state change; cloud's heartbeat handler (or shadow-delta handler) uses `reported.activated_at == desired.activated_at` as the durable activation ack signal alongside the existing `last_cmd_id` heartbeat echo.
+
+**Why Shadow over MQTT-retained:** Shadow scales to richer future device-targeted state without a second mechanism (per-device threshold overrides, sampling-rate adjustments, OTA gating flags, calibration baselines all fit naturally as additional `desired.*` keys). The "every transition must remember to clear retain" discipline that retained-MQTT would have required becomes "every transition must update the shadow" — same number of touchpoints, but the resulting state model is explicit and queryable rather than encoded in topic-retention metadata.
+
+If the activation message is lost in transit (cellular outage), the device stays in pre-activation sleep until the next provision retry. The provision endpoint is idempotent — a caregiver can re-provision the same patient/serial pair to retransmit the activation command and re-write Shadow desired.
 
 #### Patient discharge cascade
 
@@ -758,22 +771,51 @@ Cloud → device commands flow through `gs/{serialNumber}/cmd` (downlink, see be
 ### Snippet (raw IMU data, opportunistic)
 
 Topic: `gs/{serial}/snippet`
-Payload: **binary** — raw 100 Hz BMI270 IMU samples, typically a 30 s window (~84 KB)
-Routing: IoT Rule writes the binary blob directly to S3 via the Rule's S3 action — **no Lambda in the ingestion path**, for latency + cost.
+Payload: **length-prefixed JSON header followed by raw 100 Hz BMI270 IMU samples**, typically a 30 s window (~84 KB).
 
-| MQTT user property | Required | Validation |
-|--------------------|----------|-----------|
+> **Framing change — 2026-04-26 (firmware coordination §F.3).** Original design assumed MQTT 5 user properties for snippet metadata; NCS 3.2.4 (the firmware deployment build) only supports MQTT 3.1.1, so user properties are not available. Metadata is now carried as a JSON preamble inside the binary payload.
+
+#### Wire format
+
+```
+[4-byte big-endian uint32: header_len_bytes][header_len_bytes JSON][N × 28-byte sample records]
+```
+
+JSON header (required fields):
+
+| Field | Required | Validation |
+|-------|----------|-----------|
 | `snippet_id` | Yes | Firmware-generated UUID for idempotency |
 | `window_start_ts` | Yes | ISO 8601 UTC |
 | `anomaly_trigger` | No | Enum: `session_sigma`, `R_outlier`, `high_g`. Absent for scheduled snippets. |
 
+Binary body — 16-byte payload header + 28-byte sample records (all multi-byte fields **little-endian** to match nRF9151 native byte order; firmware coord §F.4):
+
+```
+payload header (16 bytes, packed):
+  uint8  format_version = 1
+  uint8  sensor_id      = 1   // 1 = BMI270 (v1); reserved for fusion later
+  uint16 sample_rate_hz = 100
+  uint32 sample_count_n       // number of 28-byte records that follow
+  uint64 window_start_uptime_ms  // pair with JSON header window_start_ts to anchor wall-clock
+
+sample record (28 bytes, packed; mirrors firmware session.h gosteady_sample minus session-specific fields):
+  uint32 t_ms       // ms since window_start_uptime_ms
+  float  ax, ay, az // m/s², gravity NOT removed (raw sensor frame)
+  float  gx, gy, gz // rad/s
+```
+
+A 30 s window at 100 Hz is `16 + 3000 × 28 = 84,016` bytes binary body. Cloud-side parser: Python `struct` `<BBHIQ` for the 16-byte header, `<Iffffff` per record.
+
 Constraints:
-- **Max payload size: 100 KB** — under AWS IoT Core 128 KB hard limit with headroom
-- Stored at `s3://gosteady-{env}-snippets/{serial}/{snippet_id}.bin`
+- **Max total payload size: 100 KB** — under AWS IoT Core 128 KB hard limit with headroom
+- Stored at `s3://gosteady-{env}-snippets/{serial}/{date}/{snippet_id}.bin` — full payload (length-prefix + JSON header + binary body) preserved as-is so the file is self-describing for offline analytics tooling
 - Encryption: AWS-managed key (sensor data, no PHI)
 - Lifecycle: 90 days hot → Glacier; 13-month total retention (aligned with v1.5 algorithm-retrain need)
 - Audit event: `device.snippet_uploaded` per snippet
-- **Migration path:** when v2 snippet sizing exceeds 100 KB, switch to S3 presigned URL flow (mirrors OTA pattern). MQTT topic deprecated at that point.
+- v1 cloud parsers reject `format_version != 1` and ignore unknown JSON header fields (forward compat)
+- **Routing implication:** because the S3 object key embeds `snippet_id`, the IoT Rule cannot construct the key from binary payload alone via plain SQL — a thin Lambda (or Rule action with `decode()` + JSON extraction across the length-prefix boundary) sits in the snippet ingestion path. The Phase 1A revision spec is updated to reflect this.
+- **Migration path:** when v2 snippet sizing exceeds 100 KB (longer windows, multi-sensor, higher rate), switch to S3 presigned URL flow (mirrors OTA pattern). MQTT topic deprecated at that point. Binary `format_version` bumps to 2; v1 parsers must reject.
 
 ### Downlink Command (cloud → device)
 
@@ -980,45 +1022,61 @@ Structured JSON via Lambda Powertools:
 - Portal Client: `1q9l9ujtsomf3ugq2tnqvdg6d7`
 
 #### Phase 0B — Data Layer 🔄
-**Spec:** [`phase-0b-data.md`](phase-0b-data.md) *(needs revision)*
+**Specs:** [`phase-0b-data.md`](phase-0b-data.md) (original, deployed) + [`phase-0b-revision.md`](phase-0b-revision.md) (revision, planned)
 
 **Originally deployed:**
 - 4 DynamoDB tables (devices, activity, alerts, user-profiles)
 - 4 GSIs
 
-**Revisions pending (Tier 1):**
-- Add Organizations table (single-table for Client/Facility/Census)
-- Split Device Registry into Device Registry (ownership) + Device Assignments (patient links)
-- Add hierarchy denormalization on Activity Series, Alert History (`clientId`, `facilityId`, `censusId`)
-- Migrate `walkerUserId` → `patientId` throughout
-- Add new GSIs: `by-census-date`, `by-census-time`, `by-client-time`
-- Apply DynamoDB TTL on Activity Series (13mo) and Alert History (24mo)
+**Revisions specced (full detail in [`phase-0b-revision.md`](phase-0b-revision.md)):**
+- 4 new identity-bearing tables (Organizations, Patients, Users, DeviceAssignments) — CMK-encrypted with IdentityKey from Phase 1.5
+- Split Device Registry's assignment fields into the new DeviceAssignments table (PK: serial, SK: assignedAt; active = `validUntil == null`)
+- Activity Series and Alert History: PK migration `serialNumber → patientId`; hierarchy denormalization (`clientId`, `facilityId`, `censusId`); new GSIs `by-census-date`, `by-census-time`, `by-client-time`; DynamoDB TTL anchored on `expiresAt` (sessionEnd + 13mo / eventTimestamp + 24mo)
+- Device Registry adds optional `activated_at`, `firstHeartbeatAt`, `decommissionReason`; removes `walkerUserId`; new GSI `by-owning-client`
+- Patients table emits DDB Streams (NEW_AND_OLD_IMAGES) for the Phase 2A discharge-cascade Lambda
+- Old `user-profiles` table removed; replaced by `users`
+- **Destructive in dev** — PK migrations cannot be done in place; existing test data is reproducible via the Phase 1B 15-scenario suite
+- Independent of 0A revision; can deploy in either order or in parallel
 
 ---
 
 ### Phase 1: Data In (device → cloud)
 
 #### Phase 1A — IoT Core + Ingestion ✅
-**Spec:** [`phase-1a-ingestion.md`](phase-1a-ingestion.md)
+**Specs:** [`phase-1a-ingestion.md`](phase-1a-ingestion.md) (original, deployed) + [`phase-1a-revision.md`](phase-1a-revision.md) (revision, planned)
 
-**No revisions to base ingestion. Pending additions:**
-- Configure AWS IoT Jobs for OTA (replaces bare S3 OTA pattern)
-- Configure Device Shadow for state tracking
-- Per-thing topic restrictions verified
+**Originally deployed:**
+- 3 IoT Topic Rules (`gs/+/{activity, heartbeat, alert}`)
+- Per-thing IoT policy with topic restrictions (`${iot:Connection.Thing.ThingName}`)
+- SQS DLQ
+- OTA S3 bucket (AWS-managed encryption — to be CMK-upgraded by revision)
+- Fleet provisioning template
+
+**Revisions specced (full detail in [`phase-1a-revision.md`](phase-1a-revision.md)):**
+- Snippet ingestion path: new `gs/+/snippet` IoT Rule + thin SnippetParser Python Lambda + `gosteady-{env}-snippets` S3 bucket. Binary payload framed `[4-byte BE length][JSON header][binary body]` per firmware §F.3 (NCS 3.2.4 = MQTT 3.1.1; user properties not viable). Lambda parses preamble, writes full payload to `{serial}/{date}/{snippet_id}.bin`.
+- Downlink topic `gs/{serial}/cmd` — IoT policy authorizes per-thing subscribe to own cmd topic only.
+- Shadow IoT-policy grants — adds `iot:GetThingShadow` + `iot:UpdateThingShadow` for the device's own thing (per the §F.9.4 Shadow re-check decision DL14). Cloud-side Shadow writes themselves live in Phase 2A.
+- OTA bucket FirmwareKey CMK wiring — encryption swap from AWS-managed to `gosteady/{env}/firmware` CMK (deferred from Phase 1.5; bucket is empty, in-place swap).
+- Pre-activation suppression and activation-ack via `last_cmd_id` heartbeat echo are **NOT** in 1A revision — those land in Phase 1B revision (per 1A revision D10, since 1B is doing a full handler refactor anyway).
+- Independent of 0B revision (no DDB schema dependency).
 
 #### Phase 1B — Processing Logic 🔄
-**Spec:** [`phase-1b-processing.md`](phase-1b-processing.md) *(needs revision)*
+**Specs:** [`phase-1b-processing.md`](phase-1b-processing.md) (original, deployed) + [`phase-1b-revision.md`](phase-1b-revision.md) (revision, planned)
 
-**Originally deployed:** Activity, Heartbeat, Alert handlers with idempotent writes.
+**Originally deployed:** Activity, Heartbeat, Alert handlers with idempotent writes against `serialNumber`-keyed tables.
 
-**Revisions pending (Tier 1):**
-- Refactor Heartbeat Processor → Threshold Detector (Shadow delta-triggered)
-- Resolve out-of-order heartbeat handling: `UpdateItem` condition `attribute_not_exists(lastSeen) OR lastSeen < :newTs`
-- Hierarchy lookup in all processors (patient → census → facility → client) with snapshot at write time
-- Switch all Lambdas to ARM64 (Graviton)
-- Adopt Lambda Powertools for structured logging + tracing
-- Add audit log emission on all writes
-- Apply log scrubbing (no PII in CloudWatch logs)
+**Revisions specced (full detail in [`phase-1b-revision.md`](phase-1b-revision.md)):**
+- New `threshold-detector` Lambda triggered by Shadow `update/accepted` IoT Rule — replaces heartbeat-processor's threshold-checking role
+- Heartbeat-processor slimmed to Shadow update + activation-ack only (no DDB writes on routine heartbeat per Architecture P5)
+- Patient-resolution helper shared across activity / threshold-detector / alert handlers: `serial → DeviceAssignments active row → Patients row → hierarchy`
+- Hierarchy snapshot at write time on every telemetry row (against new 0B tables)
+- Pre-activation suppression: Threshold Detector skips synthetic alerts when Device Registry `activated_at` is unset; sampled audit at 1/hr/serial *(moved here from 1A revision per 1A-rev D10)*
+- Activation-ack via `last_cmd_id` heartbeat echo with 24 h matching breadth (DL14a); reads `Device Registry.outstandingActivationCmds` populated by Phase 2A `device-api` Lambda *(moved here from 1A revision per 1A-rev D10)*
+- All four Lambdas migrate to ARM64 (G7); Powertools as pip dependency for structured logging + tracing + metrics; log scrubber strips `displayName`/`dateOfBirth`/`email`
+- Structured audit-shape log entries on every write (Phase 1.7 will route via subscription filter)
+- KMS Decrypt grants on IdentityKey CMK for handlers that read CMK-encrypted Patients / DeviceAssignments
+- Out-of-order heartbeat handling resolved via Shadow built-in versioning (no longer needs DDB conditional UpdateItem)
+- Depends on Phase 0B revision (new tables); independent of 0A and 1A revisions; activation-ack path is dormant until Phase 2A device-api lands
 
 #### Phase 1C — Scheduled Jobs 🔲
 
@@ -1052,7 +1110,7 @@ Structured JSON via Lambda Powertools:
 **🔲 Pending — depends on downstream stack revisions:**
 - Auth stack consuming IdentityKey CMK on RoleAssignments table → blocked on **Phase 0A revision**
 - Data stack consuming IdentityKey CMK on Patients/Users/Organizations/DeviceAssignments → blocked on **Phase 0B revision**
-- Ingestion stack consuming FirmwareKey CMK on S3 OTA bucket → blocked on **Phase 1A revision**
+- Ingestion stack consuming FirmwareKey CMK on S3 OTA bucket → **scoped into [`phase-1a-revision.md`](phase-1a-revision.md) L10 / D14**; lands when 1A revision deploys
 - Processing stack Lambdas migrating to ARM64 + adding `kms:Decrypt` grants → blocked on **Phase 1B revision**
 
 **Security stack itself does not need redeployment for these — they are downstream stack edits that will reference the already-published CMK ARNs via cross-stack imports.**
@@ -1209,8 +1267,15 @@ Phase 3B (CI/CD)    ←── any time
 
 ### Critical Path (MVP: real data on a caregiver's screen)
 ```
-0A → 0B → 1A → 1B → 1.5 → 1.7 → 2A → 2B → [Portal renders real data]
-🔄   🔄   ✅   🔄    🟡    🔲    🔲    🔲
+Originals (deployed):           0A ✅   0B ✅   1A ✅   1B ✅   1.5 🟡
+
+Revisions (4 specs ready):       0A-rev 🔲   0B-rev 🔲   1A-rev 🔲   1B-rev 🔲
+                                 (independent — can deploy in parallel except 1B-rev needs 0B-rev)
+
+New phases needed:               1.6 🔲   1.7 🔲   2A 🔲   2B 🔲
+
+Path to portal-renders-real-data:
+  [0A-rev + 0B-rev + 1A-rev parallel] → 1B-rev → 1.6 + 1.7 → 2A → 2B
 ```
 
 ---
@@ -1267,6 +1332,7 @@ Phase 3B (CI/CD)    ←── any time
 | DL11 | Caregivers can mark `lost`/`broken` (operational) but only admins can mark `retired`/`end_of_life` (asset decision) | Architecture §4 |
 | DL12 | Provisioning publishes `activate` cmd to `gs/{serial}/cmd`; firmware echoes `cmd_id` in next heartbeat as `last_cmd_id`; cloud sets `Device Registry.activated_at` on echo | Firmware coordination 2026-04-17 |
 | DL13 | Threshold Detector suppresses synthetic alerts on devices where `activated_at` is unset (no patient yet, no caregiver to notify) | Firmware coordination 2026-04-17 |
+| DL14 | Activation re-check on each wake = Device Shadow `desired.activated_at`. Cloud maintains invariant: `desired.activated_at` is non-null **iff** Device Registry status ∈ {`provisioned`, `active_monitoring`}. Every transition out of those states clears `desired.activated_at`. Shadow chosen over retained-MQTT for forward-compat with richer device-targeted state. | Firmware coordination 2026-04-26 §F.9.4 |
 
 ### Device & Ingestion
 | # | Requirement | Source |
@@ -1284,7 +1350,8 @@ Phase 3B (CI/CD)    ←── any time
 | D11 | Device certs stored in nRF9151 secure element (CryptoCell-312 / TF-M) | Phase 5A |
 | D12 | Per-device manual cert flash for first deployment (≤3 units); fleet provisioning template stays Phase 5A | Firmware coordination 2026-04-25 |
 | D13 | Downlink topic: `gs/{serial}/cmd`. Per-thing IoT policy authorizes subscribe to own topic only. | Firmware coordination 2026-04-17 |
-| D14 | Snippet topic: `gs/{serial}/snippet`. Binary payload ≤100 KB. IoT Rule → S3 direct write. | Firmware coordination 2026-04-17 |
+| D14 | Snippet topic: `gs/{serial}/snippet`. Length-prefixed JSON header + binary BMI270 sample records (`format_version=1`, little-endian). Total payload ≤100 KB. Stored to S3 at `{serial}/{date}/{snippet_id}.bin` as full-payload-as-received. (Original MQTT-user-property contract was retired when NCS 3.2.4 was confirmed MQTT 3.1.1 only.) | Firmware coordination 2026-04-17 + 2026-04-26 §F.3 §F.4 |
+| D14a | Activation ack matches `last_cmd_id` against any `cmd_id` issued to the serial within the last 24 h, not only the most recent — tolerates portal retry windows. | Firmware coordination 2026-04-26 §F.2 |
 | D15 | Cloud accepts device-provided UTC timestamps as authoritative; no NTP fallback in v1 | Firmware coordination 2026-04-17 |
 | D16 | All uplink schemas tolerate extra fields gracefully — heartbeat extras → Shadow, activity extras → DDB `extras` map, alert extras → `data` map | Firmware coordination 2026-04-17 |
 | D17 | Activity payload supports optional firmware-derived `roughness_R`, `surface_class`, `firmware_version` | Firmware coordination 2026-04-17 |
@@ -1340,9 +1407,14 @@ Phase 3B (CI/CD)    ←── any time
 
 | Lambda | Stack | Phase | Status | Trigger | Architecture |
 |--------|-------|-------|--------|---------|--------------|
-| `gosteady-{env}-activity-processor` | Processing | 1B | 🔄 Implemented (revisions pending) | IoT Rule | ARM64 |
-| `gosteady-{env}-threshold-detector` | Processing | 1B | 🔄 Replaces heartbeat-processor | IoT Shadow Δ | ARM64 |
-| `gosteady-{env}-alert-handler` | Processing | 1B | 🔄 Implemented (revisions pending) | IoT Rule | ARM64 |
+| `gosteady-{env}-activity-processor` | Processing | 1B | 🔄 Implemented (revision pending) | IoT Rule (`gs/+/activity`) | ARM64 (post-rev) |
+| `gosteady-{env}-heartbeat-processor` | Processing | 1B | 🔄 Implemented (revision slims to Shadow update + activation-ack) | IoT Rule (`gs/+/heartbeat`) | ARM64 (post-rev) |
+| `gosteady-{env}-threshold-detector` | Processing | 1B-rev | 🔲 New (replaces heartbeat-processor's threshold role) | IoT Rule on `$aws/things/+/shadow/update/accepted` | ARM64 |
+| `gosteady-{env}-alert-handler` | Processing | 1B | 🔄 Implemented (revision pending) | IoT Rule (`gs/+/alert`) | ARM64 (post-rev) |
+| `gosteady-{env}-snippet-parser` | Ingestion | 1A-rev | 🔲 New | IoT Rule (`gs/+/snippet`) | ARM64 |
+| `gosteady-{env}-device-api` | Api | 2A | 🔲 New | API Gateway (`/devices/*`) | ARM64 |
+| `gosteady-{env}-discharge-cascade` | Api | 2A | 🔲 New | DDB Stream on Patients | ARM64 |
+| `gosteady-{env}-device-shadow-handler` | Api | 2A | 🔲 New | IoT Shadow Δ (reset_complete + reported.activated_at) | ARM64 |
 | `gosteady-{env}-audit-writer` | Audit | 1.7 | 🔲 New | Invoked from handlers via Powertools | ARM64 |
 | `gosteady-{env}-jwt-authorizer` | Api | 2A | 🔲 New | API Gateway | ARM64 |
 | `gosteady-{env}-api-handler` | Api | 2A | 🔲 Stub | API Gateway | ARM64 |
@@ -1360,6 +1432,16 @@ Phase 3B (CI/CD)    ←── any time
 - [ ] **Daily rollup scope:** Steps/distance/active-min by day? By hour? Both?
 - [ ] **Audit hot-path latency:** Acceptable to add ~10ms per mutation for synchronous audit write? Or fire-and-forget via SQS?
 - [ ] **Multi-facility caregiver UX:** Single facility selector, or unified inbox across all assigned facilities?
+
+### Firmware-coordination open items (raised 2026-04-26 in [`firmware-coordination/2026-04-17-cloud-contracts.md`](../firmware-coordination/2026-04-17-cloud-contracts.md) §F.9; cloud response pending)
+
+- [x] **§F.9.1 Per-device cert + key delivery flow** — **Decided 2026-04-26: option (a) cloud-generates-and-sends** for the first ≤3 manually-flashed units. Cloud runs `aws iot create-keys-and-certificate`, attaches per-thing IoT policy (subscribe `gs/{serial}/cmd`, publish `gs/{serial}/{heartbeat,activity,snippet}`), hands off cert PEM + private key PEM via 1Password shared item per device with 7-day expiry. AWS IoT root CA pin: **Amazon Root CA 1**. Long-term migration to firmware-CSR-cloud-signs is folded into Phase 5A fleet provisioning, not a separate near-term track.
+- [x] **§F.9.2 AWS IoT MQTT endpoint URL** — **Decided 2026-04-26.** Dev endpoint: `a2dl73jkjzv6h5-ats.iot.us-east-1.amazonaws.com`, port `8883` (standard MQTT-over-TLS). Prod endpoint will be a separate AWS account (per Phase 1.5 multi-account plan), so each environment gets its own endpoint hostname. Firmware separation strategy: **separate Kconfig per env, separate firmware builds.** Matches AWS account boundary cleanly; avoids embedding multiple endpoints in a single binary.
+- [x] **§F.9.3 Starting serial range** — **Decided 2026-04-26.** First 3 units: `GS0000000001`, `GS0000000002`, `GS0000000003`. Test/dev synthetic fixtures reserved at `GS9999999990–GS9999999999` (visually distinct, won't collide with low-range first units or with future production allocations).
+- [x] **§F.9.4 Pre-activation re-check mechanism on each wake** — **Decided 2026-04-26: (b) Device Shadow `desired.activated_at`.** Cloud writes desired on every state-machine transition; firmware reads desired on every wake; mismatch with on-flash value → re-enter pre-activation. See §4 Activation message section for full mechanism. Chosen over (a) MQTT retained because Shadow scales to richer future device-targeted state (per-device thresholds, sampling rate, OTA gating) without a second mechanism.
+- [x] **§F.9.5 Manufacturer-side device enrollment workflow** — **Decided 2026-04-26: two-step.** Short-term (first ≤10 units, until 2A ships): option (b) — firmware team owns a private companion repo (or private gist) holding `device-registry.csv` with `serial, cert_fingerprint, flash_date, firmware_version` per row. Firmware pings cloud team in Slack before each shipment; cloud team runs CLI helper to write `ready_to_provision` records into Device Registry (NULL ownership, NULL provisionedAt). Minimum data cloud needs: `serial` (required) + `cert_fingerprint` (recommended for first-connect verification). Long-term: option (c) `POST /admin/devices` endpoint already specced in [`phase-2a-device-lifecycle.md`](phase-2a-device-lifecycle.md) — flash script auto-calls it once 2A lands.
+- [x] **§F.9.6 Snippet payload encryption posture confirmation** — **Decided 2026-04-26.** Yes — TLS 1.2 in transit (MQTT) + AWS-managed S3 SSE at rest is the full v1 posture for snippets. No device-side AES-GCM layer required. Snippets are non-PHI sensor data; per §9 encryption table, AWS-managed keys are appropriate. Revisit only if a customer specifically requires CMK on snippet bucket.
+- [x] **Snippet IoT Rule design under JSON-header framing** — **Decided 2026-04-26 in [`phase-1a-revision.md`](phase-1a-revision.md) D1: option (i) — thin Python Lambda (`SnippetParser`) parses preamble → S3 PutObject.** IoT Rule passes binary via `encode(*, 'base64')`; Lambda decodes, validates JSON header, writes full payload to `{serial}/{date}/{snippet_id}.bin`. ~720 invocations/month; cost negligible.
 
 ### Medium-Term (Phase 2–3)
 - [ ] **WAF rule tuning:** AWS Managed Rules baseline vs. custom rules for portal API
@@ -1381,10 +1463,12 @@ Phase 3B (CI/CD)    ←── any time
 |-------|-------|-----------|--------|
 | 0A | Auth Stack (original) | [`phase-0a-auth.md`](phase-0a-auth.md) | ✅ Deployed |
 | 0A-rev | Auth Revision (multi-tenancy + RBAC + MFA) | [`phase-0a-revision.md`](phase-0a-revision.md) | 🔲 Planned |
-| 0B | Data Layer | [`phase-0b-data.md`](phase-0b-data.md) | 🔄 Revision pending |
+| 0B | Data Layer (original) | [`phase-0b-data.md`](phase-0b-data.md) | ✅ Deployed |
+| 0B-rev | Data Layer Revision (multi-tenant tables, hierarchy denorm, PK migration) | [`phase-0b-revision.md`](phase-0b-revision.md) | 🔲 Planned |
 | 1A | IoT Ingestion | [`phase-1a-ingestion.md`](phase-1a-ingestion.md) | ✅ Deployed |
-| 1A-rev | Ingestion Revision (snippet IoT Rule, downlink topic, pre-activation handling) | [`phase-1a-revision.md`](phase-1a-revision.md) | 🔲 Planned |
-| 1B | Processing Logic | [`phase-1b-processing.md`](phase-1b-processing.md) | 🔄 Revision pending |
+| 1A-rev | Ingestion Revision (snippet IoT Rule + parser Lambda, downlink topic, Shadow IoT-policy grants, OTA bucket CMK) | [`phase-1a-revision.md`](phase-1a-revision.md) | 🔲 Planned |
+| 1B | Processing Logic (original) | [`phase-1b-processing.md`](phase-1b-processing.md) | ✅ Deployed |
+| 1B-rev | Processing Logic Revision (Threshold Detector via Shadow, patient-centric handlers, ARM64 + Powertools, hierarchy snapshots) | [`phase-1b-revision.md`](phase-1b-revision.md) | 🔲 Planned |
 | 1C | Scheduled Jobs | — | 🔲 Planned |
 | 1.5 | Security Foundation | [`phase-1.5-security.md`](phase-1.5-security.md) | 🟡 Partially deployed — Security stack live; Org bootstrap + IAM audits + downstream CMK consumption pending |
 | 1.6 | Observability | — | 🔲 Planned (new) |

@@ -253,8 +253,9 @@ Tracking what changes from the original [`phase-0a-auth.md`](phase-0a-auth.md):
 
 ### Dependencies
 
-- **Phase 1.5 Security stack** must deploy first (provides IdentityKey CMK referenced by RoleAssignments table)
+- **Phase 1.5 Security stack** — already deployed 2026-04-17. `IdentityKey` CMK (alias `gosteady/dev/identity`) is live and exported; Auth stack imports the CMK ARN via cross-stack reference for RoleAssignments table encryption.
 - **Existing 0A deployment** is the starting state (additive changes only)
+- **Phase 0B revision** is **not** a dependency — 0A revision can deploy independently; RoleAssignments rows with `linkedPatientIds` will reference non-existent Patient IDs until 0B lands, which is acceptable (data resolves once 0B does).
 - No new NPM packages
 - Pre-Token Lambda uses `boto3` (already in Lambda runtime) — no requirements.txt entries
 
@@ -330,8 +331,8 @@ aws lambda invoke --function-name gosteady-dev-cognito-pre-token --region us-eas
 cd infra
 npm run build
 
-# Deploy order: Security must already be deployed (provides IdentityKey CMK)
-npx cdk deploy GoSteady-Dev-Security --context env=dev --require-approval never  # if not already
+# Phase 1.5 Security stack already deployed 2026-04-17 — IdentityKey CMK
+# is live and referenced by Auth stack via cross-stack import.
 npx cdk deploy GoSteady-Dev-Auth --context env=dev --require-approval never
 
 # Manually create test users post-deploy (no auto-migration)

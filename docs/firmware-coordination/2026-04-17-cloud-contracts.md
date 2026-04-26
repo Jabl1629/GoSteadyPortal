@@ -707,3 +707,387 @@ transit + S3 SSE at rest is the full posture. Yes/no?
 ---
 
 *Entry owner (firmware side): Jace. Questions / counter-proposals welcome.*
+
+---
+---
+
+# Cloud team response — 2026-04-26
+
+> **From:** GoSteady cloud team
+> **In response to:** firmware entry above (§F.1–§F.10, dated 2026-04-26).
+>
+> **TL;DR:** All six §F.9 questions answered with decisions in §C.4 below.
+> The big call is §F.9.4 — picked **Device Shadow** over MQTT-retained for
+> the re-check-on-wake mechanism, planning ahead for richer device-targeted
+> state (per-device thresholds, sampling rate, OTA flags) without standing
+> up a second mechanism later. Architecture spec updated to reflect §F.2
+> ack-matching breadth, §F.3 JSON-header snippet framing, §F.4 binary
+> layout, and the §F.9.4 Shadow decision — diff summary in §C.3. Three
+> small cloud-side asks back to firmware in §C.5.
+
+---
+
+## C.1 Acks of firmware §F.1 + §F.8 milestone
+
+**§F.1** — confirmed; all 2026-04-17 cloud contracts ack'd by firmware. No
+further negotiation on the activation, heartbeat-extras, activity-extras,
+snippet schema, time-sync, or pre-activation-handling tables.
+
+**§F.8 (M12.1a complete on bench)** — congrats on first-try cellular
+attach. Two things worth flagging from your bench output:
+
+- **Time-sync trust contract empirically validated** is exactly what we
+  hoped to see — closes one of the bigger "what if it doesn't work in
+  practice" risks on the v1 plan. We'll pin a §C.5 follow-up around clock
+  drift between heartbeats so we can characterize how big a window cloud
+  should tolerate before flagging anomalies.
+- **RSRP -100 dBm / SNR 2 dB on bench** is well above our cloud-side
+  `signal_lost` threshold (-120) and slightly worse than `signal_weak`
+  (-110). We'll watch the first heartbeat from the field unit closely;
+  if your real clinic site is worse than the bench, the synthetic
+  `signal_weak` alerts will fire on every heartbeat. Not a problem in
+  pre-activation (we suppress); will be in active monitoring. May need
+  the per-walker threshold overrides referenced in our spec moved up
+  from Phase 2A. Tracking; not a blocker for site-survey unit.
+
+---
+
+## C.2 Acks of firmware §F.2–§F.7
+
+**§F.2 (last_cmd_id ack mechanism)** — accepted. The "always echo most
+recent received cmd_id" pattern is exactly what we want; idempotent and
+tolerant of packet loss in either direction.
+
+The edge case you flagged ("if portal retried provision, two cmd_ids
+issued in quick succession, firmware echoes only the most recent") is
+real and we've folded it into the ack-matching logic: cloud's heartbeat
+handler matches `last_cmd_id` against any `cmd_id` issued to the serial
+**within the last 24 h**, not just the most recent one. The 24 h window
+mirrors our planned "stuck in `provisioned`" ops alarm; if no echo
+arrives within the same window we'd be alarming on, the matching
+shouldn't be tighter than that.
+
+This is locked in `ARCHITECTURE.md` §4 (Activation message section,
+"Ack-matching breadth" subsection) and as cumulative requirement DL14a
+in §14.
+
+**§F.3 (NCS MQTT 3.1.1 / JSON-header fallback)** — accepted, and
+expected — we'd assumed v3.1.1 too once we looked at NCS 3.2.4. Your
+proposed framing is locked in:
+
+```
+[4-byte big-endian uint32: header_len_bytes][header_len_bytes JSON][binary samples]
+```
+
+To your two asks:
+
+1. **Confirm fallback acceptable** — yes.
+2. **S3 stores full payload (header + binary) or binary-only?** —
+   **full payload, header included.** The file stays
+   self-describing for offline analytics tooling, and your future
+   Python tool can read both the JSON header and the binary body
+   from a single S3 object without needing a sidecar metadata
+   lookup.
+
+One implication on our side worth flagging back to you: **the
+"no Lambda in the snippet ingestion path" claim from our 2026-04-17
+doc no longer holds.** IoT Rule SQL alone cannot extract `snippet_id`
+from a binary preamble to construct the S3 key. We'll add a thin
+Python Lambda that parses the 4-byte length-prefix + JSON header and
+writes the full payload to
+`s3://gosteady-{env}-snippets/{serial}/{date}/{snippet_id}.bin`. This
+lands in the Phase 1A revision deploy. Cost impact is negligible
+(~720 invocations/month at expected v1 cadence). No firmware-side
+change required from this; flagging for visibility.
+
+**§F.4 (snippet binary byte layout)** — accepted as v1 spec. 16-byte
+payload header + 28-byte sample records, little-endian. We've pinned
+this in `ARCHITECTURE.md` §7 alongside the framing change. Cloud-side
+parser (Python `struct`): `<BBHIQ` for the 16-byte header, `<Iffffff`
+per record. Will mirror in the firmware-side
+`docs/snippet-payload-v1.md` per your plan when M12.1f lands.
+
+**§F.5 (site-survey unit timeline)** — acknowledged. Soft target
+~2026-05-15 is consistent with our cloud-side readiness. Phase 1A
+revision (which adds the snippet IoT Rule + cmd-topic policy + the
+new snippet-parser Lambda) lands this week or next on our side, well
+before your M12.1f.
+
+**§F.6 (LED is firmware-side; re-check on wake)** — confirmed: blue
+LED is purely firmware-driven, no cloud "show LED" command.
+
+The re-check refinement you raised is a real concern (flash bit-flips
++ cloud-side de-provisioning). Our answer is in §C.4.4 below — we
+picked **Device Shadow `desired.activated_at`** over MQTT-retained.
+Reasoning: Shadow gives us a forward-compatible state channel for
+richer device-targeted state we'll inevitably want later (per-device
+thresholds, sampling-rate adjustments, OTA gating, calibration
+baselines). Standing up Shadow now and adding new `desired.*` keys
+later is cheaper than running two mechanisms in parallel.
+
+**§F.7 (manufacturer-side enrollment)** — answer in §C.4.5 below. Two-
+step: private companion repo for first ≤10 units, `POST /admin/devices`
+endpoint for the long term.
+
+---
+
+## C.3 Architecture-spec changes that landed in response to §F.1–§F.7
+
+For your reference (don't need to read these unless you're curious):
+
+| `ARCHITECTURE.md` section | Change |
+|---|---|
+| §4 Activation message | Replaced "TBD" re-check prose with the §F.9.4 Shadow decision (full mechanism description); added §F.2 ack-matching-breadth subsection; locked the invariant `desired.activated_at` non-null **iff** Device Registry status ∈ {`provisioned`, `active_monitoring`} |
+| §7 Snippet | Replaced MQTT user-properties table with the JSON-header framing per §F.3, plus the binary byte layout per §F.4. Noted the no-Lambda-in-path constraint is dropped |
+| §14 Cumulative requirements | Updated D14 (snippet framing); added D14a (ack-matching breadth); added DL14 (Shadow re-check) |
+| §16 Open Questions | Added then closed all six §F.9 entries with the decisions below |
+
+Phase 1A revision spec (`docs/specs/phase-1a-revision.md`) hasn't been
+updated yet — that's our next pass on the cloud side. Flagging because
+the snippet IoT Rule design changes (Lambda in the path) will land
+there along with the new Shadow `desired.activated_at` write hooks
+spread across §provision, §end-assignment, §decommission, §force-reset,
+§ownership-move, §discharge-cascade.
+
+---
+
+## C.4 Answers to §F.9 — decisions
+
+### C.4.1 → §F.9.1 — Per-device cert + key delivery flow
+
+**Option (a): cloud-generates-and-sends.**
+
+For the first ≤3 manually-flashed units, cloud team will:
+
+1. Run `aws iot create-keys-and-certificate --set-as-active` once per device
+2. Create a per-thing IoT Thing (`GS0000000001`, etc.) and attach the cert
+3. Attach a per-thing IoT policy authorizing **only**:
+   - `iot:Connect` on `client/${iot:Connection.Thing.ThingName}`
+   - `iot:Publish` on `topic/gs/${iot:Connection.Thing.ThingName}/heartbeat`
+   - `iot:Publish` on `topic/gs/${iot:Connection.Thing.ThingName}/activity`
+   - `iot:Publish` on `topic/gs/${iot:Connection.Thing.ThingName}/snippet`
+   - `iot:Subscribe` + `iot:Receive` on `topicfilter/gs/${iot:Connection.Thing.ThingName}/cmd` and the corresponding topic ARN
+   - `iot:GetThingShadow` + `iot:UpdateThingShadow` on `thing/${iot:Connection.Thing.ThingName}` (added per the §F.9.4 Shadow decision — see C.4.4)
+4. Hand off cert PEM + private key PEM via **1Password shared item, one per device, named by serial, 7-day expiry.**
+
+**AWS IoT root CA pin:** Amazon Root CA 1. Public download URL:
+`https://www.amazontrust.com/repository/AmazonRootCA1.pem`. Pin this
+as the trusted root in your TLS config; we won't rotate it without
+flagging here first.
+
+**Operational expectation:** I'll generate the three cert sets and DM
+you the 1Password shares within ~1 working day of this entry posting.
+Reply here when each set has been successfully flashed so I can mark
+the 1Password items for deletion.
+
+**Long-term:** firmware-CSR-cloud-signs flow rolls into Phase 5A fleet
+provisioning, not a separate near-term track.
+
+### C.4.2 → §F.9.2 — AWS IoT MQTT endpoint + dev/prod separation
+
+- **Dev endpoint:** `a2dl73jkjzv6h5-ats.iot.us-east-1.amazonaws.com`
+- **Port:** `8883` (standard MQTT-over-TLS — confirm)
+- **Prod endpoint:** TBD; will land as a separate AWS account per the Phase 1.5 multi-account plan, so each environment will have its own endpoint hostname
+
+**Separation strategy: separate Kconfig per env, separate firmware
+builds.** This matches the AWS account boundary cleanly and avoids
+embedding multiple endpoints in a single binary. When prod account
+provisions, we'll publish the prod endpoint here as a follow-up entry,
+and you'll add a `CONFIG_GOSTEADY_IOT_ENDPOINT_PROD` Kconfig with a
+build-time switch.
+
+### C.4.3 → §F.9.3 — Starting serial range
+
+- First 3 units: **`GS0000000001`, `GS0000000002`, `GS0000000003`.**
+- Reserved for synthetic test/dev fixtures: **`GS9999999990–GS9999999999`** (visually distinct from low-range production serials, won't collide).
+- The `GS` + 10 digit format (`G1` in cloud cumulative reqs) is locked.
+
+I'll mint cert sets and (per C.4.5) pre-create Device Registry records
+against those three serials before the cert handoff, so your first
+heartbeat publish from each unit will land cleanly.
+
+### C.4.4 → §F.9.4 — Pre-activation re-check mechanism on each wake
+
+**Option (b): Device Shadow `desired.activated_at`.**
+
+Mechanism — full detail in `ARCHITECTURE.md` §4 (re-check subsection):
+
+1. **Cloud writes `desired.activated_at` = ISO 8601 UTC timestamp** at
+   provision time (in addition to publishing the existing `activate`
+   cmd to `gs/{serial}/cmd` — the cmd remains as the immediate-push
+   signal at provision; Shadow is the durable state-of-record
+   consulted on every wake).
+2. **Cloud invariant:** `desired.activated_at` is non-null **iff**
+   Device Registry status ∈ {`provisioned`, `active_monitoring`}.
+   Every transition out of those states writes `desired.activated_at = null` (or removes the key) — handled inside `device-api`
+   Lambda's transition handlers and the `discharge-cascade` Lambda.
+3. **Firmware on every cellular wake:** `GET` shadow, read
+   `desired.activated_at`. If non-null and matches its on-flash
+   value: normal operation. If null (or any mismatch versus
+   persisted value): re-enter pre-activation behavior, blue LED back
+   on, no session capture.
+4. **Firmware writes `reported.activated_at`** to confirm device-side
+   persistence after every state change. Cloud's heartbeat handler
+   (or a Shadow-delta handler) treats `reported.activated_at == desired.activated_at` as the durable activation ack — supplements
+   the existing `last_cmd_id` heartbeat echo (which we keep for the
+   per-cmd ack semantics, not just for activation).
+
+**Edge case you raised — "what if firmware receives an `activate` cmd
+that doesn't match a `cmd_id` it has heard of?"** — treat as
+authoritative + persist + ack normally via `last_cmd_id`. Our cloud
+side maintains the canonical `cmd_id` issuance log, so any cmd
+firmware receives over `gs/{serial}/cmd` was issued by us; firmware
+should not second-guess.
+
+**IoT policy implication for §F.9.1 cert handoff:** the per-thing
+policy now also authorizes `iot:GetThingShadow` and
+`iot:UpdateThingShadow` on the device's own thing. Already added in
+C.4.1 above.
+
+**NCS Shadow library check (request back to firmware):** the
+`aws_iot` lib in NCS 3.2.4 does support Shadow get/update via
+`AWS_IOT_SHADOW_TOPIC_GET` and the `aws_iot_shadow_update_accepted`
+event flow, but you'd know better than us — flagging in §C.5.1 below
+as a confirm-or-flag-blocker item.
+
+### C.4.5 → §F.9.5 — Manufacturer-side enrollment workflow
+
+**Two-step:**
+
+**Short-term (first ≤10 units, until Phase 2A `POST /admin/devices`
+ships): option (b) — private companion repo.** Suggested layout:
+
+- Firmware team creates a **private** GitHub repo (e.g.,
+  `gosteady-firmware-private` or similar — your call on naming)
+- File `device-registry.csv` with columns: `serial, cert_fingerprint, flash_date, firmware_version`
+- Cloud team gets read access on the repo
+- Per-shipment workflow:
+  1. Firmware engineer flashes the device (cert from §C.4.1
+     handoff)
+  2. Firmware engineer commits a row to `device-registry.csv` and
+     pushes
+  3. Firmware engineer pings cloud team in Slack: "shipping
+     `GS0000000001-3` by Friday"
+  4. Cloud team pulls latest CSV, runs CLI helper (we'll write a
+     ~10-line script) to write `ready_to_provision` Device Registry
+     records (NULL ownership, NULL `provisionedAt`)
+  5. Cloud team confirms back: "registry records created, safe to
+     ship"
+
+**Minimum data cloud needs:** `serial` (required, used as PK) + `cert_fingerprint` (recommended — used to verify the cert presented at first connect matches the one firmware flashed; defense in depth). Other fields (`flash_date`, `firmware_version`) are nice-to-have.
+
+**Long-term (after Phase 2A device-lifecycle endpoints ship): option (c) — `POST /admin/devices` endpoint.** Already specced in
+`docs/specs/phase-2a-device-lifecycle.md` for internal-admin
+manufacturer-side device record creation. Once it lands, your flash
+script calls it directly (auth via firmware-team service account
+JWT or shared API key, TBD when 2A nears completion). The CSV in
+private repo can stay as a backup record / audit trail if useful to
+firmware; cloud's source-of-truth migrates to the API.
+
+### C.4.6 → §F.9.6 — Snippet payload encryption posture
+
+**Confirmed: yes — TLS 1.2 in transit + AWS-managed S3 SSE at rest
+is the full v1 posture.** No device-side AES-GCM layer required.
+
+Snippets are non-PHI sensor data per our encryption-tier table
+(`ARCHITECTURE.md` §9). AWS-managed keys are appropriate for
+non-identity bulk data; we only escalate to CMK on identity-bearing
+or compliance-evidence resources. We'll revisit only if a customer
+specifically requires CMK on the snippet bucket.
+
+---
+
+## C.5 Cloud-side asks back to firmware
+
+### C.5.1 NCS Shadow library confirmation (gates §F.9.4 build path)
+
+The §F.9.4 decision (Shadow `desired.activated_at`) assumes the NCS
+3.2.4 `aws_iot` library supports Shadow get/update. Quick read of the
+NCS docs suggests yes — `aws_iot.h` exposes `aws_iot_application_topics_subscribe()` for shadow topics and the
+update flow goes through standard MQTT publish on
+`$aws/things/{thing}/shadow/update`. But you'd know firsthand
+whether this works cleanly in your build.
+
+**Need from firmware:** confirm Shadow get/update works in NCS 3.2.4
+on the bench, or flag as a blocker and we'll revisit (option a MQTT
+retained is the fallback if Shadow turns out to be a pain).
+
+### C.5.2 Heartbeat clock drift characterization (follow-up to §F.8)
+
+The empirical cellular-time validation in §F.8 is great. Given we've
+locked in "device-authoritative timestamps, no NTP fallback, no cloud
+correction" (D15), it'd be useful to characterize:
+
+- Drift between successive `AT+CCLK?` reads after PSM cycles (does
+  the modem maintain time across PSM, or does each wake reset it?)
+- Sub-second consistency — does `AT+CCLK?` give second-precision
+  only, or higher? (Cellular NITZ is typically second-precision but
+  varies by carrier.)
+
+**No blocker — just helpful for cloud-side anomaly detection.** When
+M12.1c is up and you have a few weeks of heartbeats, a one-paragraph
+note here on observed drift would let us tune the "out-of-order
+heartbeat" detection logic in our Threshold Detector revision (Phase
+1B revision).
+
+### C.5.3 Pre-activation heartbeat upload-attempt cost
+
+Pre-activation behavior (firmware §F.6 / cloud §6 in this doc) has
+firmware waking on motion, attaching to LTE-M, publishing a
+heartbeat, then waiting briefly for an activation message before
+returning to sleep. We've committed to suppressing synthetic alerts
+in this state (DL13).
+
+**Question:** what's the rough battery cost per pre-activation cycle
+(modem attach → heartbeat publish → optional Shadow get → sleep)? If
+it's high enough that a stuck-in-pre-activation device drains the
+battery in days, we may want to add a cloud-side alarm for "device
+in pre-activation > 7 days" that surfaces to ops, distinct from the
+24 h "stuck in `provisioned` post-activation-send" alarm. Not a
+spec change — just sizing the alarm threshold against real-world
+energy budget. Defer until M12.1c gives us empirical numbers.
+
+---
+
+## C.6 Cadence / next steps
+
+**Cloud team next actions (committing to within ~1 working day, by
+2026-04-27 EOD):**
+
+1. Mint cert + key for `GS0000000001`, `GS0000000002`,
+   `GS0000000003`; attach per-thing IoT policies per C.4.1
+2. DM firmware engineer the three 1Password shared items (one per
+   serial, 7-day expiry)
+3. Pre-create the three `ready_to_provision` Device Registry records
+   (NULL ownership, NULL `provisionedAt`) — this means even before
+   the private companion repo exists, the first heartbeats from
+   these specific serials will land cleanly
+4. Reply here once the three cert sets are ready
+
+**Cloud team next architectural work (within ~1 week, in parallel
+with firmware M12.1c):**
+
+5. Phase 1A revision spec update — incorporate the snippet IoT Rule
+   redesign (Lambda in path), the Shadow `desired.activated_at`
+   write hooks across state-machine transitions, and cumulative
+   requirement updates from this batch
+6. Phase 1A revision deploy — adds the cmd-topic IoT policy
+   statement, snippet S3 bucket, snippet parser Lambda, and the
+   pre-activation suppression logic in the heartbeat handler
+7. CLI helper script for bulk Device Registry record import from the
+   private companion repo CSV (per §C.4.5)
+
+**Firmware-side blockers cleared by this entry:** §F.9.1, §F.9.2,
+§F.9.3, §F.9.4 (mechanism decided; build-path subject to §C.5.1
+confirmation), §F.9.5, §F.9.6 — all six items have decisions.
+
+**Next coordination batch trigger** (per the cadence note in §9
+above, originally proposed by cloud): site-survey unit cellular
+shakedown (firmware M12.1c + first heartbeat in cloud). Either side
+posts here when first end-to-end traffic flows.
+
+---
+
+*Entry owner (cloud side): Jace + Claude. Counter-proposals, blocker
+flags, and milestone updates welcome below.*
+
