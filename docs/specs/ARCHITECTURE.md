@@ -1069,10 +1069,12 @@ Structured JSON via Lambda Powertools:
 - OTA S3 bucket (AWS-managed encryption — to be CMK-upgraded by revision)
 - Fleet provisioning template
 
-**Revisions specced (full detail in [`phase-1a-revision.md`](phase-1a-revision.md)):**
+**Partial 1A-revision slice already deployed (2026-04-27, commit `89801ae`):**
+- **Shadow IoT-policy grants** — `iot:GetThingShadow` + `iot:UpdateThingShadow` on the device's own Thing added to `gosteady-dev-device-policy` (per §F.9.4 Shadow re-check decision DL14). Pulled forward from full 1A revision so the first 4 dev certs (GS9999999999 bench + GS0000000001-3 shipping, minted 2026-04-27 per firmware-coord §C2) work end-to-end with Shadow without waiting for the rest of the 1A-revision deploy.
+
+**1A revision — remaining specced work (full detail in [`phase-1a-revision.md`](phase-1a-revision.md)):**
 - Snippet ingestion path: new `gs/+/snippet` IoT Rule + thin SnippetParser Python Lambda + `gosteady-{env}-snippets` S3 bucket. Binary payload framed `[4-byte BE length][JSON header][binary body]` per firmware §F.3 (NCS 3.2.4 = MQTT 3.1.1; user properties not viable). Lambda parses preamble, writes full payload to `{serial}/{date}/{snippet_id}.bin`.
 - Downlink topic `gs/{serial}/cmd` — IoT policy authorizes per-thing subscribe to own cmd topic only.
-- Shadow IoT-policy grants — adds `iot:GetThingShadow` + `iot:UpdateThingShadow` for the device's own thing (per the §F.9.4 Shadow re-check decision DL14). Cloud-side Shadow writes themselves live in Phase 2A.
 - OTA bucket FirmwareKey CMK wiring — encryption swap from AWS-managed to `gosteady/{env}/firmware` CMK (deferred from Phase 1.5; bucket is empty, in-place swap).
 - Pre-activation suppression and activation-ack via `last_cmd_id` heartbeat echo are **NOT** in 1A revision — those land in Phase 1B revision (per 1A revision D10, since 1B is doing a full handler refactor anyway).
 - Independent of 0B revision (no DDB schema dependency).
@@ -1454,6 +1456,7 @@ Path to portal-renders-real-data:
 - [ ] **Daily rollup scope:** Steps/distance/active-min by day? By hour? Both?
 - [ ] **Audit hot-path latency:** Acceptable to add ~10ms per mutation for synchronous audit write? Or fire-and-forget via SQS?
 - [ ] **Multi-facility caregiver UX:** Single facility selector, or unified inbox across all assigned facilities?
+- [ ] **Phase 1.6 alarm catalog must include log-pattern alarms, not just DLQ-depth.** Discovered 2026-04-27 via firmware-coord §C4.3 threshold-detector probe: heartbeat-processor's threshold-fired alert PutItems fail post-0B-revision (alerts table now `patientId`-keyed, OLD handler still writes `serialNumber`). Lambda catches the exception, logs `[HEARTBEAT][ALERT][ERROR] ...`, returns OK — IoT Rule sees a successful invocation, **DLQ stays empty.** Phase 1.6 needs CloudWatch Logs metric filters / alarms on `[ALERT][ERROR]` and similar swallowed-error patterns across all handlers, not just `ApproximateNumberOfMessagesVisible` on DLQs. Same pattern likely lurks in any handler that catches and logs. **Fix is implicit when 1B revision deploys** (heartbeat-processor stops generating alerts entirely; threshold-detector writes through patient-resolution path so PK matches), but the underlying observability gap is general: logged-and-swallowed errors are invisible to ops without explicit log alarms.
 
 ### Firmware-coordination items — RESOLVED (2026-04-26 batch)
 > All items below were raised in [`firmware-coordination/2026-04-17-cloud-contracts.md`](../firmware-coordination/2026-04-17-cloud-contracts.md) §F.9 and answered in §C.4 of the same doc. Kept here for searchability; firmware team's next batch will trigger a fresh "open items" subsection.
@@ -1639,6 +1642,29 @@ For any future revision that recreates DDB tables, modifies Cognito triggers, or
 5. **Manual prereqs** — for DDB PK migrations, delete tables via CLI; for Cognito attribute changes, verify additive-only (Cognito custom attributes can't be removed).
 6. **Two-pass when needed** — empty-stack pass via context flag, then full-state pass. Remove the flag in the final commit.
 7. **Verify with CLI** — describe each modified resource post-deploy; check encryption keys, GSI status, stream config, Lambda triggers actually rendered as expected (synth output isn't always reality — see 18.1).
+
+### 18.8 Silent-swallow risk during revision gaps
+
+**Discovered:** firmware-coord §C4.3 threshold-detector probe (2026-04-27).
+
+**Symptom:** Phase 1B revision wasn't yet deployed when 0B revision flipped Activity/Alerts to `patientId` PKs. The OLD heartbeat-processor handler tries to write threshold-triggered synthetic alerts with `serialNumber` PK → `ValidationException: Missing the key patientId in the item`. Handler **catches the exception, logs `[HEARTBEAT][ALERT][ERROR] ...`, returns success.** IoT Rule sees a successful Lambda invocation. **DLQ stays empty.** Only signal is CloudWatch log volume. Without an explicit log-pattern alarm, an ops dashboard watching DLQ depth and Lambda error rate looks completely green even though every threshold-firing alert is being silently dropped.
+
+**Cause:** classic try/except that catches too broadly + logs + returns OK. Reasonable defensive pattern in the original Phase 1B handler design (don't fail the IoT Rule for one bad write), but during a between-revisions gap it lets data quality issues hide.
+
+**Generalizable observation:** any handler that catches exceptions broadly + logs + continues will silently mask data-quality issues during schema migrations. The same pattern can hide:
+- PK-shape mismatches between writer and table (this case)
+- Failed sub-writes when a handler does multiple PutItems in sequence
+- KMS Decrypt failures on tables that just got CMK-encrypted (until handler IAM is updated)
+- DDB throttling that's quiet enough not to spike Lambda errors
+- Schema validation failures on freshly-migrated tables
+
+**Mitigations:**
+1. **Phase 1.6 alarm catalog must include log-pattern alarms**, not just DLQ-depth. CloudWatch Logs metric filters on `[ERROR]`, `Exception`, `ValidationException`, `AccessDenied`, `Throttling` patterns. Alarm at >0 occurrences in any 5-minute window during dev; tunable for prod.
+2. **Migration-window acceptance probes** — when a revision creates a between-state where a non-revised handler is talking to a revised table (or vice versa), run synthetic probes that exercise the failure-mode paths (e.g., trigger a threshold alert; trigger a schema-validation rejection) and verify failures are *visible*, not silent. The §C4.3 probe is the canonical example.
+3. **Don't catch broadly in handlers** — catch narrow exceptions where there's a known recovery path; let everything else propagate to the IoT Rule's error-action path (DLQ). This is a Phase 1B revision design choice baked into the new shared `_shared/observability.py` module spec.
+4. **Trust DLQ-depth alarms only when handlers don't catch broadly** — DLQ-depth as a health signal is meaningful only if errors actually propagate to the rule. With `try/except: log; return ok`, DLQ becomes a "manifest absence rather than presence" indicator.
+
+In this specific case the fix is implicit: Phase 1B revision rewrites the heartbeat handler entirely, threshold-fired writes go through the new threshold-detector Lambda which uses the patient-resolution path → PK matches → no exception → no swallow. But the general pattern is worth keeping in mind for any handler edits.
 
 ---
 
