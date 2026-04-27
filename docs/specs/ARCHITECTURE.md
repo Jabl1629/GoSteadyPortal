@@ -499,10 +499,10 @@ Deployed via CDK with `--context env=dev|prod`.
 
 | # | Stack Name | Phase | Status | Key Resources | Depends On |
 |---|-----------|-------|--------|---------------|------------|
-| 1 | `GoSteady-{Env}-Auth` | 0A | **Deployed** (revisions pending) | Cognito User Pool, Groups, SAML/OIDC config, RoleAssignments DDB | — |
-| 2 | `GoSteady-{Env}-Data` | 0B | **Deployed** (revisions pending) | Organizations, Patients, Device Registry, Device Assignments, Activity Series, Alert History, Users (DDB tables + GSIs) | — |
-| 3 | `GoSteady-{Env}-Processing` | 1A/1B | **Deployed** (revisions pending) | Activity Processor, Threshold Detector, Alert Handler (3 Lambdas, Python 3.12 ARM64) | Data |
-| 4 | `GoSteady-{Env}-Ingestion` | 1A | **Deployed** | IoT Thing Type, Device Policy, 3 Topic Rules, IoT Jobs config, SQS DLQ, S3 OTA Bucket, Fleet Provisioning Template | Processing |
+| 1 | `GoSteady-{Env}-Auth` | 0A | **Deployed** (revision deployed 2026-04-26) | Cognito User Pool, 9 groups (8 active + walker deprecated), 2 App Clients (Customer + Internal), Pre-Token Generation Lambda V2, RoleAssignments DDB (CMK-encrypted with IdentityKey) | Security |
+| 2 | `GoSteady-{Env}-Data` | 0B | **Deployed** (revision deployed 2026-04-27) | 7 DDB tables: 4 identity-bearing CMK-encrypted (Organizations, Patients with DDB Streams, Users, DeviceAssignments) + 3 telemetry AWS-managed (Device Registry, Activity Series, Alert History) | Security |
+| 3 | `GoSteady-{Env}-Processing` | 1A/1B | **Deployed** (1B revision pending) | Activity Processor, Heartbeat Processor, Alert Handler (Python 3.12; ARM64 migration in 1B revision); table refs via `Table.fromTableName` (no cross-stack imports — see Migration Patterns below) | — |
+| 4 | `GoSteady-{Env}-Ingestion` | 1A | **Deployed** (1A revision pending) | IoT Thing Type, Device Policy, 3 Topic Rules, IoT Jobs config, SQS DLQ, S3 OTA Bucket, Fleet Provisioning Template | Processing |
 | 5 | `GoSteady-{Env}-Security` | 1.5 | **Deployed** (2026-04-17) | 3 KMS CMKs (identity / firmware / audit), CloudTrail multi-region trail, KMS-encrypted S3 log bucket, SNS cost alarm topic, billing alarm | — |
 | 6 | `GoSteady-{Env}-Observability` | 1.6 | **New** | Powertools layer, X-Ray config, CloudWatch dashboards, alarm catalog | All |
 | 7 | `GoSteady-{Env}-Audit` | 1.7 | **New** | Audit log group (CloudWatch + S3 Object Lock), audit-writer Lambda | Auth, Data |
@@ -999,8 +999,8 @@ Structured JSON via Lambda Powertools:
 
 ### Phase 0: Foundation
 
-#### Phase 0A — Auth Stack 🔄
-**Spec:** [`phase-0a-auth.md`](phase-0a-auth.md) *(needs revision)*
+#### Phase 0A — Auth Stack ✅
+**Specs:** [`phase-0a-auth.md`](phase-0a-auth.md) (original, deployed) + [`phase-0a-revision.md`](phase-0a-revision.md) (revision, deployed 2026-04-26)
 
 **Originally deployed:**
 - Cognito User Pool with email/password
@@ -1008,35 +1008,52 @@ Structured JSON via Lambda Powertools:
 - DynamoDB Relationships table
 - Branded verification email
 
-**Revisions pending (Tier 1):**
-- Add SAML/OIDC federation support (reverses original A2)
-- Replace Relationships table with RoleAssignments table
-- Add custom JWT claims: `clientId`, `role`, `facilities`, `censuses`
-- Add Patients table (separate from Cognito Users)
-- Add Cognito groups for customer roles: `family_viewer`, `caregiver`, `facility_admin`, `client_admin`
-- Add Cognito groups for internal roles: `internal_support`, `internal_admin` (separate signup/provisioning flow, MFA enforced)
-- Configure 15-minute idle session timeout
+**Phase 0A revision — DEPLOYED 2026-04-26 (commit `01a0d8c`):**
+- 8 active Cognito Groups (`internal_admin`, `internal_support`, `client_admin`, `facility_admin`, `household_owner`, `caregiver`, `family_viewer`, `patient`) plus `walker` retained as inert deprecated cruft (Cognito can't delete groups)
+- New custom attributes: `clientId`, `facilities`, `censuses`, `mfa_enrolled`; legacy `linked_devices` left as cruft (Cognito can't delete custom attributes)
+- Two App Clients: Portal-Customer (`1q9l9ujtsomf3ugq2tnqvdg6d7` preserved, 15-min idle / 30-day refresh) + Portal-Internal (`gvc7n839vj4ppgioamknlk21c` new, 30-min idle / 4-hr absolute, with secret)
+- Pre-Token Generation Lambda V2 (`gosteady-dev-cognito-pre-token`, Python 3.12 ARM64) — validates role + tenancy invariants, enforces MFA for admin/internal roles, injects `custom:clientId`/`custom:role`/`custom:facilities`/`custom:censuses` claims into both ID + Access tokens. Custom error codes: `NO_ROLE_ASSIGNED`, `MFA_REQUIRED`, `TENANCY_VIOLATION`, `INVALID_ROLE`.
+- RoleAssignments table (`gosteady-dev-role-assignments`) replaces destroyed Relationships table; CMK-encrypted with IdentityKey from Phase 1.5; GSI `by-client-role`
+- MFA: pool-level OPTIONAL with TOTP only (SMS disabled); Pre-Token Lambda enforces per-role
+- Password policy tightened: 14 chars min, all classes including symbols
+- All three auth paths verified end-to-end via synthetic Pre-Token invocations: NO_ROLE_ASSIGNED denial, happy-path claim injection, TENANCY_VIOLATION denial
 
-**Key IDs:**
+**Key IDs (preserved across revision):**
 - User Pool: `us-east-1_ZHbhl19tQ`
-- Portal Client: `1q9l9ujtsomf3ugq2tnqvdg6d7`
+- Portal-Customer Client: `1q9l9ujtsomf3ugq2tnqvdg6d7`
+- Portal-Internal Client: `gvc7n839vj4ppgioamknlk21c` (new)
 
-#### Phase 0B — Data Layer 🔄
-**Specs:** [`phase-0b-data.md`](phase-0b-data.md) (original, deployed) + [`phase-0b-revision.md`](phase-0b-revision.md) (revision, planned)
+**CDK note (gotcha for Pre-Token V2 trigger):** CDK 2.250.0's `lambdaTriggers.preTokenGenerationV2` shorthand silently emits empty `LambdaConfig`. The working pattern is the explicit `userPool.addTrigger(UserPoolOperation.PRE_TOKEN_GENERATION_CONFIG, lambda, LambdaVersion.V2_0)`. See Migration Patterns subsection below.
+
+#### Phase 0B — Data Layer ✅
+**Specs:** [`phase-0b-data.md`](phase-0b-data.md) (original, deployed) + [`phase-0b-revision.md`](phase-0b-revision.md) (revision, deployed 2026-04-27)
 
 **Originally deployed:**
 - 4 DynamoDB tables (devices, activity, alerts, user-profiles)
 - 4 GSIs
 
-**Revisions specced (full detail in [`phase-0b-revision.md`](phase-0b-revision.md)):**
-- 4 new identity-bearing tables (Organizations, Patients, Users, DeviceAssignments) — CMK-encrypted with IdentityKey from Phase 1.5
-- Split Device Registry's assignment fields into the new DeviceAssignments table (PK: serial, SK: assignedAt; active = `validUntil == null`)
-- Activity Series and Alert History: PK migration `serialNumber → patientId`; hierarchy denormalization (`clientId`, `facilityId`, `censusId`); new GSIs `by-census-date`, `by-census-time`, `by-client-time`; DynamoDB TTL anchored on `expiresAt` (sessionEnd + 13mo / eventTimestamp + 24mo)
-- Device Registry adds optional `activated_at`, `firstHeartbeatAt`, `decommissionReason`; removes `walkerUserId`; new GSI `by-owning-client`
-- Patients table emits DDB Streams (NEW_AND_OLD_IMAGES) for the Phase 2A discharge-cascade Lambda
-- Old `user-profiles` table removed; replaced by `users`
-- **Destructive in dev** — PK migrations cannot be done in place; existing test data is reproducible via the Phase 1B 15-scenario suite
-- Independent of 0A revision; can deploy in either order or in parallel
+**Phase 0B revision — DEPLOYED 2026-04-27 (commit `a074b6e`):**
+
+7 DDB tables in two encryption tiers (8th table `role-assignments` lives on Auth stack):
+
+*Identity-bearing (CMK-encrypted with IdentityKey from Phase 1.5):*
+- `gosteady-dev-organizations` — single-table for Client/Facility/Census hierarchy. PK=clientId, SK=sk pattern (`META#client` / `facility#<id>` / `facility#<id>#census#<id>`). No GSIs in v1.
+- `gosteady-dev-patients` — PK=patientId. **DDB Streams NEW_AND_OLD_IMAGES** exported as `dev-PatientsStreamArn` for Phase 2A discharge-cascade. GSIs `by-client-status`, `by-census-status`.
+- `gosteady-dev-users` — PK=userId (Cognito sub). Replaces deprecated `user-profiles` table. GSI `by-client`.
+- `gosteady-dev-device-assignments` — PK=serialNumber, SK=assignedAt. Active assignment = `validUntil == null`. GSI `by-patient`.
+
+*Telemetry (AWS-managed encryption, per cost-vs-value tier):*
+- `gosteady-dev-devices` — PK=serialNumber. New attrs: `activated_at`, `firstHeartbeatAt`, `decommissionReason`, `owningClientId`, `owningFacilityId`. New GSI `by-owning-client` (replaced deprecated `by-walker`).
+- `gosteady-dev-activity` — **PK migrated `serialNumber → patientId`**. SK=timestamp (sessionEnd UTC). Hierarchy denorm (`clientId`/`facilityId`/`censusId`). DDB TTL on `expiresAt` (sessionEnd + 13 months, epoch seconds, set by writer). GSIs `by-date` (now patientId-keyed), `by-census-date`, `by-client-time`.
+- `gosteady-dev-alerts` — PK migrated to patientId. SK compound `{eventTimestamp}#{alertType}` (preserved). TTL on `expiresAt` (eventTimestamp + 24 months). GSIs `by-census-time`, `by-client-time`.
+
+**Removed:** `gosteady-dev-user-profiles` (replaced by `users`).
+
+**Reusable constructs:** `IdentityTable` (CMK-encrypted DDB) and `TelemetryTable` (AWS-managed with TTL) added under `infra/lib/constructs/`.
+
+**Coupling change worth noting:** Processing stack table refs were refactored from `dataStack.<table>` (cross-stack imports) to `Table.fromTableName` (no CFN cross-stack tracking). Broke a deadlock during the 0B PK-migration deploy and is also a simpler long-term coupling. CDK-level `addDependency` from Processing→Data was also removed; runtime ordering still holds via deploy sequence.
+
+**Currently broken downstream:** Processing handlers were not retargeted in this revision (per spec scope). Activity/Alerts now have `patientId` PKs but the handlers still try to write with `serialNumber` PK → ValidationException → DLQ. This is the expected post-0B-pre-1B state. **Phase 1B revision** is the fix.
 
 ---
 
@@ -1099,19 +1116,21 @@ Structured JSON via Lambda Powertools:
 - CloudTrail multi-region trail with KMS-encrypted S3 destination (`gosteady-dev-cloudtrail-logs-460223323193`), 90-day CloudWatch retention, log file validation enabled
 - SNS cost alarm topic + $100/mo billing alarm
 
+**✅ IdentityKey now consumed downstream:**
+- Auth stack RoleAssignments table → CMK-encrypted (deployed 2026-04-26 with 0A revision)
+- Data stack Organizations/Patients/Users/DeviceAssignments tables → CMK-encrypted (deployed 2026-04-27 with 0B revision)
+
 **🔲 Pending — same phase, not yet shipped:**
 - AWS Organizations bootstrap (manual runbook — create org, OU structure `Workloads/Dev`, `Workloads/Prod`, `Shared/Logging`, `Shared/Security`, draft SCPs but do NOT attach in 1.5 per spec D7)
-- IAM password policy (min 14 chars, all classes, 90-day max, no reuse of last 12)
+- IAM password policy applied at the IAM-account level (Phase 0A revision tightened the *Cognito* user password policy in-place; the IAM password policy for human IAM users still needs the same standard)
 - IAM least-privilege audit on existing Lambda execution roles
 - TLS 1.2 enforcement audit (verify IoT Core, API Gateway, Cognito)
 - S3 Object Lock on CloudTrail bucket (prod-only, not deployed in dev)
 - Cost anomaly detection monitor
 
-**🔲 Pending — depends on downstream stack revisions:**
-- Auth stack consuming IdentityKey CMK on RoleAssignments table → blocked on **Phase 0A revision**
-- Data stack consuming IdentityKey CMK on Patients/Users/Organizations/DeviceAssignments → blocked on **Phase 0B revision**
+**🔲 Pending — scoped into other revisions:**
 - Ingestion stack consuming FirmwareKey CMK on S3 OTA bucket → **scoped into [`phase-1a-revision.md`](phase-1a-revision.md) L10 / D14**; lands when 1A revision deploys
-- Processing stack Lambdas migrating to ARM64 + adding `kms:Decrypt` grants → blocked on **Phase 1B revision**
+- Processing stack Lambdas migrating to ARM64 + adding `kms:Decrypt` grants → **scoped into [`phase-1b-revision.md`](phase-1b-revision.md)**; lands when 1B revision deploys
 
 **Security stack itself does not need redeployment for these — they are downstream stack edits that will reference the already-published CMK ARNs via cross-stack imports.**
 
@@ -1269,13 +1288,15 @@ Phase 3B (CI/CD)    ←── any time
 ```
 Originals (deployed):           0A ✅   0B ✅   1A ✅   1B ✅   1.5 🟡
 
-Revisions (4 specs ready):       0A-rev 🔲   0B-rev 🔲   1A-rev 🔲   1B-rev 🔲
-                                 (independent — can deploy in parallel except 1B-rev needs 0B-rev)
+Revisions DEPLOYED:              0A-rev ✅ (2026-04-26)   0B-rev ✅ (2026-04-27)
+Revisions specced, ready:        1A-rev 🔲                 1B-rev 🔲
+                                 (1A-rev independent; 1B-rev consumes 0B-rev tables)
 
 New phases needed:               1.6 🔲   1.7 🔲   2A 🔲   2B 🔲
 
 Path to portal-renders-real-data:
-  [0A-rev + 0B-rev + 1A-rev parallel] → 1B-rev → 1.6 + 1.7 → 2A → 2B
+  [1A-rev || 1B-rev] → 1.6 + 1.7 → 2A → 2B
+                       (1.6 / 1.7 specs not yet written; gating for 2A)
 ```
 
 ---
@@ -1407,6 +1428,7 @@ Path to portal-renders-real-data:
 
 | Lambda | Stack | Phase | Status | Trigger | Architecture |
 |--------|-------|-------|--------|---------|--------------|
+| `gosteady-{env}-cognito-pre-token` | Auth | 0A-rev | ✅ Deployed (2026-04-26) | Cognito V2 trigger (PRE_TOKEN_GENERATION_CONFIG) | ARM64 |
 | `gosteady-{env}-activity-processor` | Processing | 1B | 🔄 Implemented (revision pending) | IoT Rule (`gs/+/activity`) | ARM64 (post-rev) |
 | `gosteady-{env}-heartbeat-processor` | Processing | 1B | 🔄 Implemented (revision slims to Shadow update + activation-ack) | IoT Rule (`gs/+/heartbeat`) | ARM64 (post-rev) |
 | `gosteady-{env}-threshold-detector` | Processing | 1B-rev | 🔲 New (replaces heartbeat-processor's threshold role) | IoT Rule on `$aws/things/+/shadow/update/accepted` | ARM64 |
@@ -1433,7 +1455,8 @@ Path to portal-renders-real-data:
 - [ ] **Audit hot-path latency:** Acceptable to add ~10ms per mutation for synchronous audit write? Or fire-and-forget via SQS?
 - [ ] **Multi-facility caregiver UX:** Single facility selector, or unified inbox across all assigned facilities?
 
-### Firmware-coordination open items (raised 2026-04-26 in [`firmware-coordination/2026-04-17-cloud-contracts.md`](../firmware-coordination/2026-04-17-cloud-contracts.md) §F.9; cloud response pending)
+### Firmware-coordination items — RESOLVED (2026-04-26 batch)
+> All items below were raised in [`firmware-coordination/2026-04-17-cloud-contracts.md`](../firmware-coordination/2026-04-17-cloud-contracts.md) §F.9 and answered in §C.4 of the same doc. Kept here for searchability; firmware team's next batch will trigger a fresh "open items" subsection.
 
 - [x] **§F.9.1 Per-device cert + key delivery flow** — **Decided 2026-04-26: option (a) cloud-generates-and-sends** for the first ≤3 manually-flashed units. Cloud runs `aws iot create-keys-and-certificate`, attaches per-thing IoT policy (subscribe `gs/{serial}/cmd`, publish `gs/{serial}/{heartbeat,activity,snippet}`), hands off cert PEM + private key PEM via 1Password shared item per device with 7-day expiry. AWS IoT root CA pin: **Amazon Root CA 1**. Long-term migration to firmware-CSR-cloud-signs is folded into Phase 5A fleet provisioning, not a separate near-term track.
 - [x] **§F.9.2 AWS IoT MQTT endpoint URL** — **Decided 2026-04-26.** Dev endpoint: `a2dl73jkjzv6h5-ats.iot.us-east-1.amazonaws.com`, port `8883` (standard MQTT-over-TLS). Prod endpoint will be a separate AWS account (per Phase 1.5 multi-account plan), so each environment gets its own endpoint hostname. Firmware separation strategy: **separate Kconfig per env, separate firmware builds.** Matches AWS account boundary cleanly; avoids embedding multiple endpoints in a single binary.
@@ -1462,15 +1485,15 @@ Path to portal-renders-real-data:
 | Phase | Title | Spec File | Status |
 |-------|-------|-----------|--------|
 | 0A | Auth Stack (original) | [`phase-0a-auth.md`](phase-0a-auth.md) | ✅ Deployed |
-| 0A-rev | Auth Revision (multi-tenancy + RBAC + MFA) | [`phase-0a-revision.md`](phase-0a-revision.md) | 🔲 Planned |
+| 0A-rev | Auth Revision (multi-tenancy + RBAC + MFA) | [`phase-0a-revision.md`](phase-0a-revision.md) | ✅ Deployed (2026-04-26) |
 | 0B | Data Layer (original) | [`phase-0b-data.md`](phase-0b-data.md) | ✅ Deployed |
-| 0B-rev | Data Layer Revision (multi-tenant tables, hierarchy denorm, PK migration) | [`phase-0b-revision.md`](phase-0b-revision.md) | 🔲 Planned |
+| 0B-rev | Data Layer Revision (multi-tenant tables, hierarchy denorm, PK migration) | [`phase-0b-revision.md`](phase-0b-revision.md) | ✅ Deployed (2026-04-27) |
 | 1A | IoT Ingestion | [`phase-1a-ingestion.md`](phase-1a-ingestion.md) | ✅ Deployed |
 | 1A-rev | Ingestion Revision (snippet IoT Rule + parser Lambda, downlink topic, Shadow IoT-policy grants, OTA bucket CMK) | [`phase-1a-revision.md`](phase-1a-revision.md) | 🔲 Planned |
 | 1B | Processing Logic (original) | [`phase-1b-processing.md`](phase-1b-processing.md) | ✅ Deployed |
 | 1B-rev | Processing Logic Revision (Threshold Detector via Shadow, patient-centric handlers, ARM64 + Powertools, hierarchy snapshots) | [`phase-1b-revision.md`](phase-1b-revision.md) | 🔲 Planned |
 | 1C | Scheduled Jobs | — | 🔲 Planned |
-| 1.5 | Security Foundation | [`phase-1.5-security.md`](phase-1.5-security.md) | 🟡 Partially deployed — Security stack live; Org bootstrap + IAM audits + downstream CMK consumption pending |
+| 1.5 | Security Foundation | [`phase-1.5-security.md`](phase-1.5-security.md) | 🟡 Partially deployed — Security stack live; IdentityKey CMK consumed by 0A-rev + 0B-rev; FirmwareKey CMK consumption scoped into 1A-rev; Org bootstrap + IAM audits still pending |
 | 1.6 | Observability | — | 🔲 Planned (new) |
 | 1.7 | Audit Logging | — | 🔲 Planned (new) |
 | 2A | Portal API | — | 🔲 Planned |
@@ -1483,6 +1506,139 @@ Path to portal-renders-real-data:
 | 5B | End-to-End Validation | — | ⬜ Future |
 
 > Phases 4A/4B/4C (FHIR, HL7v2, Bulk Export) are **cut from active roadmap**. See §12 for trigger criteria to reopen.
+
+---
+
+## 18. Migration Patterns & Lessons Learned
+
+> Operational patterns discovered during revision deploys. Future revisions
+> that touch the same surface (cross-stack imports, DDB PK migrations,
+> Cognito triggers) should consult this section before designing their
+> deploy plan.
+
+### 18.1 CDK Cognito Pre-Token V2 trigger — use `addTrigger`, not `lambdaTriggers`
+
+**Discovered:** Phase 0A revision deploy (2026-04-26).
+
+**Symptom:** Pool deployed cleanly with the property set, but `aws cognito-idp describe-user-pool` showed empty `LambdaConfig: {}`. Lambda was never invoked on auth.
+
+**Cause:** CDK 2.250.0's `lambdaTriggers.preTokenGenerationV2` shorthand silently drops the value during synth (the V1 `preTokenGeneration` is exposed via the L2 shorthand; V2 isn't yet in the type). The V2 path requires the explicit `addTrigger` method.
+
+**Fix pattern (ts):**
+```typescript
+this.userPool.addTrigger(
+  cognito.UserPoolOperation.PRE_TOKEN_GENERATION_CONFIG,
+  this.preTokenLambda,
+  cognito.LambdaVersion.V2_0,
+);
+```
+
+**Verify post-deploy:**
+```bash
+aws cognito-idp describe-user-pool --user-pool-id <id> --region us-east-1 \
+  --query "UserPool.LambdaConfig"
+# Must show PreTokenGenerationConfig.LambdaArn + LambdaVersion: V2_0
+```
+
+### 18.2 Cognito UserPoolGroup logical-ID stability
+
+**Discovered:** Phase 0A revision deploy (2026-04-26).
+
+**Symptom:** First diff showed deprecated `walker` group as `[-]` (destroy) + `[+]` (create) instead of `[~]` (modify). CFN deploy would have failed with "GroupName already exists" because two CFN resources can't share a Cognito group name.
+
+**Cause:** Renaming the CDK construct ID from `WalkerGroup` to `WalkerGroupDeprecated` (intending to signal deprecation in code) made CFN see it as a new resource. Cognito doesn't allow group deletion mid-update if the new resource has the same `groupName`.
+
+**Pattern:** Keep the construct ID stable when modifying an existing Cognito group's properties (description, precedence, etc.). The construct ID maps directly to the CFN logical ID and must not change for in-place updates. Use comments or property values to mark deprecation; not the construct path.
+
+### 18.3 DDB table-name collision during PK migrations
+
+**Discovered:** Phase 0B revision deploy (2026-04-27).
+
+**Symptom:** New tables (with new CFN logical IDs but same `tableName`) failed to create with `Resource of type 'AWS::DynamoDB::Table' with identifier 'gosteady-dev-X' already exists`.
+
+**Cause:** CFN's default update order is "create new resources before deleting old." DDB tables can't share names. PK migration → must drop and recreate → tables transiently coexist by name during a single changeset.
+
+**Fix:** Manually delete the legacy DDB tables via CLI before deploying the migration changeset. Test data must be reproducible (Phase 1B 15-scenario test suite generates synthetic data fresh).
+
+```bash
+for t in devices activity alerts user-profiles; do
+  aws dynamodb delete-table --region us-east-1 --table-name "gosteady-dev-$t"
+done
+# Wait for delete-completion before deploy
+until ! aws dynamodb describe-table --table-name "gosteady-dev-devices" \
+  --region us-east-1 >/dev/null 2>&1; do sleep 3; done
+```
+
+### 18.4 Cross-stack export deadlock during PK migrations
+
+**Discovered:** Phase 0B revision deploy (2026-04-27).
+
+**Symptom:** `Cannot delete export GoSteady-Dev-Data:ExportsOutputRefDeviceRegistryF3A73F4B8FE576C3 as it is in use by GoSteady-Dev-Processing.`
+
+**Cause:** Auto-generated CFN exports (created by CDK when one stack references another's resource) can't be deleted while still imported. When the producer (Data) destroys a resource, its auto-export goes away. But CFN refuses if any consumer still imports it. Locks both stacks.
+
+**Fix pattern:** Decouple the consumer from the producer at the CFN level *before* the producer changes shape. Two flavors:
+
+- **Refactor consumer to `<Resource>.fromName/fromArn` pattern.** Replaces cross-stack import with a synthesized ARN derived from naming convention. Deploy consumer alone first. Then producer is free to recreate.
+  - Used in 0B revision: Processing's `dataStack.deviceTable.tableName` → `dynamodb.Table.fromTableName(this, 'DeviceTableRef', \`gosteady-${p}-devices\`)`. No more CFN import.
+- **Temporary noop pass on consumer.** If the consumer can briefly run with no grants on the affected resource, deploy a stripped-down version, then producer, then restore.
+
+Check imports before any cross-stack-impacting deploy:
+```bash
+aws cloudformation list-imports --export-name <export> --region us-east-1
+```
+
+### 18.5 CFN stale logical-ID state after partial migration
+
+**Discovered:** Phase 0B revision deploy (2026-04-27).
+
+**Symptom:** After manually deleting legacy tables and trying to redeploy, CFN refused to create new tables because old logical IDs were still tracked as `CREATE_COMPLETE` in stack state, with the same `tableName`.
+
+**Cause:** CFN's stack state retains the resource record even when the physical resource has been deleted out-of-band. A new resource with the same `tableName` is treated as a duplicate.
+
+**Fix pattern: 2-pass deploy gated by a CDK context flag.**
+
+Pass 1 — empty the stack:
+```typescript
+const empty = this.node.tryGetContext('dataStackEmpty') === 'true';
+if (empty) {
+  return; // skip all resource creation; CFN deletes orphaned logical IDs
+}
+```
+```bash
+npx cdk deploy GoSteady-Dev-Data --context env=dev \
+  --context dataStackEmpty=true --require-approval never --exclusively
+```
+
+Pass 2 — restore the full template (without the flag):
+```bash
+npx cdk deploy GoSteady-Dev-Data --context env=dev \
+  --require-approval never --exclusively
+```
+
+Then **remove the transitional flag from CDK code** in the same migration commit so it's not lying around for future deploys. Document the migration steps in the commit message body.
+
+### 18.6 CDK `addDependency` blocks `--exclusively` deploys
+
+**Discovered:** Phase 0B revision deploy (2026-04-27).
+
+**Symptom:** Even with `--exclusively`, deploying Processing automatically tried to deploy Data (and failed because of the stuck exports above).
+
+**Cause:** CDK's `processing.addDependency(data)` makes Data an implicit deploy-time dependency of Processing, regardless of the `--exclusively` flag (which only suppresses dependent stacks below, not above).
+
+**Fix:** Remove the `addDependency` from `bin/<app>.ts` when the cross-stack relationship has been refactored to a runtime/naming relationship (rather than a CFN cross-stack reference). Real-world ordering still holds via deploy sequence — just isn't enforced by the CDK app graph anymore.
+
+### 18.7 Coordinated migration checklist
+
+For any future revision that recreates DDB tables, modifies Cognito triggers, or breaks cross-stack references, follow this order:
+
+1. **Inventory imports** — `aws cloudformation list-imports --export-name <each export>` on every export the upstream stack publishes that's about to change.
+2. **Decouple consumers** — refactor cross-stack refs to convention-based imports (`fromTableName`, `fromBucketName`, etc.) where it's a stable long-term improvement.
+3. **Diff first** — `cdk diff <stack>` before deploy; expect `[~]` modify in place; treat `[+]/[-]` create-and-destroy on the same resource name as a red flag.
+4. **Test data reproducibility** — confirm dev data is regenerable (e.g., Phase 1B 15-scenario suite) before destructive migrations.
+5. **Manual prereqs** — for DDB PK migrations, delete tables via CLI; for Cognito attribute changes, verify additive-only (Cognito custom attributes can't be removed).
+6. **Two-pass when needed** — empty-stack pass via context flag, then full-state pass. Remove the flag in the final commit.
+7. **Verify with CLI** — describe each modified resource post-deploy; check encryption keys, GSI status, stream config, Lambda triggers actually rendered as expected (synth output isn't always reality — see 18.1).
 
 ---
 
