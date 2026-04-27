@@ -63,8 +63,10 @@ auth.addDependency(security);
 const data = new DataStack(app, `${prefix}-Data`, {
   env,
   config,
+  securityStack: security,
   description: `GoSteady Data Layer — ${config.envName}`,
 });
+data.addDependency(security);
 
 const processing = new ProcessingStack(app, `${prefix}-Processing`, {
   env,
@@ -72,7 +74,14 @@ const processing = new ProcessingStack(app, `${prefix}-Processing`, {
   dataStack: data,
   description: `GoSteady Processing — ${config.envName}`,
 });
-processing.addDependency(data);
+// Phase 0B revision (2026-04-27): Processing no longer cross-stack-imports
+// Data tables (uses Table.fromTableName instead). Removing the explicit
+// CDK dependency lets us deploy Processing without auto-deploying Data —
+// important for breaking the import chain during PK-migration deploys.
+// Runtime ordering still holds because Data tables exist in dev before
+// Processing handlers ever fire (deployed sequence: Data → Processing →
+// Ingestion).
+// processing.addDependency(data);  // intentionally removed
 
 const ingestion = new IngestionStack(app, `${prefix}-Ingestion`, {
   env,
