@@ -1218,3 +1218,88 @@ cellular shakedown + first heartbeat in cloud (firmware M12.1c).
 
 *Entry owner (cloud side): Jace + Claude.*
 
+---
+---
+
+# Cloud team follow-up — 2026-04-27 (handoff path correction)
+
+> **Updates §C2.5** ("1Password handoff — pending human step") and
+> §C2.7 cleanup language.
+
+The 1Password handoff described in §C2.5 is **not happening** —
+single-developer setup means cloud team and firmware team share the
+same Mac and home directory. The cert+key bundle lives at a known
+filesystem path; firmware reads files directly from disk when flashing
+or running bench-level validation. No cross-machine transfer needed.
+
+## C3.1 Bundle path
+
+```
+/Users/jaceblackburn/Desktop/gosteady-firmware-cert-handoff-2026-04-27/
+```
+
+Layout:
+```
+├── README.txt                 — top-level overview (updated to reflect single-dev setup)
+├── MANIFEST.csv               — serial → cert_fingerprint_sha256 mapping
+├── AmazonRootCA1.pem          — server-cert chain anchor; pin device-side
+├── GS9999999999/              — bench/test cert (never ships)
+│   ├── GS9999999999.cert.pem
+│   ├── GS9999999999.private.key   (mode 0600)
+│   ├── GS9999999999.public.key
+│   └── GS9999999999.README.txt    — flashing instructions
+├── GS0000000001/              — first shipping unit
+├── GS0000000002/              — second shipping unit
+└── GS0000000003/              — third shipping unit
+```
+
+Per-device READMEs cover the AT%CMNG=0,<sec_tag>,... CryptoCell-312
+flashing pattern + Root CA pinning.
+
+## C3.2 What's unchanged from §C2
+
+All cloud-side state from §C2.2 (IoT Things, certs ACTIVE, policy
+attachments, principal attachments, Device Registry rows
+`ready_to_provision`) is unchanged. Cert SHA-256 fingerprints from
+§C2.1 are still the device-registry CSV values for §C.4.5.
+
+The Shadow grants added to `gosteady-dev-device-policy` per §C2.3 are
+also unchanged — committed in the cloud repo at
+`infra/lib/stacks/ingestion-stack.ts` and deployed to dev. Firmware
+can use Shadow `desired.activated_at` on every wake per the §F.9.4
+decision.
+
+## C3.3 Cleanup adjustments
+
+§C2.7 said "delete the 1Password shared items after first-heartbeat
+ack." That step is moot — there are no 1Password items. Local bundle
+cleanup rules apply:
+
+- **GS9999999999 (bench cert):** keep the bundle entry as long as the
+  bench unit is in use (reflashable, reusable forever)
+- **GS0000000001/2/3 (shipping certs):** delete each subdirectory
+  after the corresponding unit is permanently flashed and confirmed
+  working in the field (private keys aren't cloud-recoverable;
+  bundle is the last copy until cert is baked into nRF9151)
+
+If a private key is lost or compromised before flash:
+```bash
+aws iot update-certificate --certificate-id <id> --new-status INACTIVE --region us-east-1
+aws iot delete-certificate --certificate-id <id> --region us-east-1 --force-delete
+aws iot delete-thing --thing-name <serial> --region us-east-1   # if recreating fresh
+aws dynamodb delete-item --region us-east-1 \
+  --table-name gosteady-dev-devices \
+  --key "{\"serialNumber\":{\"S\":\"<serial>\"}}"
+```
+Then re-mint via the §C2.1 pattern.
+
+## C3.4 No firmware action required
+
+Bundle is in place; no human handoff step pending. Firmware proceeds
+with M12.1c (first heartbeat publish from bench unit using
+`GS9999999999` cert) when ready.
+
+---
+
+*Entry owner (cloud side): Jace + Claude. Counter-proposals welcome.*
+
