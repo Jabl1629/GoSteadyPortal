@@ -29,6 +29,10 @@ describe('AuthStack', () => {
     customerRefreshDays: 30,
     internalTokenIdleMinutes: 30,
     internalTokenAbsoluteMinutes: 240,
+    snippetGlacierTransitionDays: 90,
+    snippetTotalRetentionDays: 395,
+    snippetParserMemoryMb: 256,
+    snippetParserTimeoutSeconds: 30,
   };
 
   const security = new SecurityStack(app, 'TestSecurity', { config });

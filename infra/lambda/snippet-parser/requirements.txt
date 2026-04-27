@@ -1,0 +1,2 @@
+# Snippet parser uses stdlib + boto3 only.
+# boto3 ships in the Lambda Python 3.12 runtime — nothing to install here.

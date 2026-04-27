@@ -87,9 +87,11 @@ const ingestion = new IngestionStack(app, `${prefix}-Ingestion`, {
   env,
   config,
   processingStack: processing,
+  securityStack: security,
   description: `GoSteady IoT Ingestion — ${config.envName}`,
 });
 ingestion.addDependency(processing);
+ingestion.addDependency(security); // Phase 1A revision: OTA bucket consumes FirmwareKey CMK
 
 const notification = new NotificationStack(app, `${prefix}-Notification`, {
   env,

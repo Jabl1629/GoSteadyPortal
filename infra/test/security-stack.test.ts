@@ -22,6 +22,10 @@ describe('SecurityStack (dev profile)', () => {
       customerRefreshDays: 30,
       internalTokenIdleMinutes: 30,
       internalTokenAbsoluteMinutes: 240,
+      snippetGlacierTransitionDays: 90,
+      snippetTotalRetentionDays: 395,
+      snippetParserMemoryMb: 256,
+      snippetParserTimeoutSeconds: 30,
     },
   });
   const template = Template.fromStack(stack);
@@ -115,6 +119,10 @@ describe('SecurityStack (prod profile — Object Lock enabled)', () => {
       customerRefreshDays: 30,
       internalTokenIdleMinutes: 30,
       internalTokenAbsoluteMinutes: 240,
+      snippetGlacierTransitionDays: 90,
+      snippetTotalRetentionDays: 395,
+      snippetParserMemoryMb: 256,
+      snippetParserTimeoutSeconds: 30,
     },
   });
   const template = Template.fromStack(stack);

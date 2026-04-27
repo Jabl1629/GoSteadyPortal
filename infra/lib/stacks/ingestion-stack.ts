@@ -3,18 +3,24 @@ import * as iot from 'aws-cdk-lib/aws-iot';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
 import { GoSteadyEnvConfig } from '../config.js';
 import { ProcessingStack } from './processing-stack.js';
+import { SecurityStack } from './security-stack.js';
+import { SnippetBucket } from '../constructs/snippet-bucket.js';
+import { SnippetParserLambda } from '../constructs/snippet-parser-lambda.js';
 
 export interface IngestionStackProps extends cdk.StackProps {
   readonly config: GoSteadyEnvConfig;
   readonly processingStack: ProcessingStack;
+  readonly securityStack: SecurityStack;
 }
 
 /**
- * Device Ingestion — IoT Core MQTT broker, topic rules, device policies.
+ * Device Ingestion — IoT Core MQTT broker, topic rules, device policies,
+ * snippet ingestion path, OTA firmware artifact bucket.
  *
  * Serial format: GS + 10 digits (e.g. GS0000001234)
  *
@@ -22,16 +28,27 @@ export interface IngestionStackProps extends cdk.StackProps {
  *   gs/{serial}/activity   → session-based activity data
  *   gs/{serial}/heartbeat  → hourly device health
  *   gs/{serial}/alert      → urgent events (tip-over)
- *   gs/{serial}/cmd        → reserved for cloud → device commands (future)
+ *   gs/{serial}/snippet    → opportunistic raw-IMU windows (Phase 1A revision)
+ *   gs/{serial}/cmd        → cloud → device commands (Phase 1A revision; v1 cmd: activate)
+ *
+ * Phase 1A revision additions (per docs/specs/phase-1a-revision.md):
+ *   - SnippetRule + SnippetParser Lambda + snippet S3 bucket
+ *   - cmd downlink topic granted via per-thing IoT policy
+ *   - Shadow get/update granted on the device's own thing
+ *   - OTA bucket migrated from AWS-managed SSE → FirmwareKey CMK
+ *   - Per-thing IoT policy refactored from gs/<thing>/* wildcard to an
+ *     explicit topic list (defense in depth, easier to audit)
  */
 export class IngestionStack extends cdk.Stack {
   public readonly deadLetterQueue: sqs.Queue;
   public readonly otaBucket: s3.Bucket;
+  public readonly snippetBucket: s3.Bucket;
+  public readonly snippetParser: lambda.Function;
 
   constructor(scope: Construct, id: string, props: IngestionStackProps) {
     super(scope, id, props);
 
-    const { config, processingStack } = props;
+    const { config, processingStack, securityStack } = props;
     const p = config.prefix;
     const account = cdk.Stack.of(this).account;
     const region = cdk.Stack.of(this).region;
@@ -46,42 +63,52 @@ export class IngestionStack extends cdk.Stack {
     });
 
     // ── IoT Policy (per-device topic restriction) ────────────────
-    // Uses IoT policy variables — ${iot:Connection.Thing.ThingName}
-    // resolves to the Thing Name from the device certificate.
+    // Phase 1A revision: refactored from gs/<thing>/* wildcard to explicit
+    // topic list per spec L7 + Open Question (defense in depth, easier to
+    // audit). Authorized topics:
+    //   Publish (uplink):  heartbeat, activity, alert, snippet
+    //   Subscribe/Receive: cmd                        (downlink only)
+    //   Shadow API:        Get/UpdateThingShadow on own thing (DL14)
+    const ownTopic = (suffix: string) =>
+      `arn:aws:iot:${region}:${account}:topic/gs/\${iot:Connection.Thing.ThingName}/${suffix}`;
+    const ownTopicFilter = (suffix: string) =>
+      `arn:aws:iot:${region}:${account}:topicfilter/gs/\${iot:Connection.Thing.ThingName}/${suffix}`;
+
     new iot.CfnPolicy(this, 'DevicePolicy', {
       policyName: `gosteady-${p}-device-policy`,
       policyDocument: {
         Version: '2012-10-17',
         Statement: [
           {
+            Sid: 'Connect',
             Effect: 'Allow',
             Action: 'iot:Connect',
             Resource: `arn:aws:iot:${region}:${account}:client/\${iot:Connection.Thing.ThingName}`,
           },
           {
+            Sid: 'PublishUplinks',
             Effect: 'Allow',
             Action: 'iot:Publish',
-            Resource: `arn:aws:iot:${region}:${account}:topic/gs/\${iot:Connection.Thing.ThingName}/*`,
+            Resource: [
+              ownTopic('heartbeat'),
+              ownTopic('activity'),
+              ownTopic('alert'),
+              ownTopic('snippet'),
+            ],
           },
           {
+            Sid: 'SubscribeOwnCmd',
             Effect: 'Allow',
-            Action: ['iot:Subscribe'],
-            Resource: `arn:aws:iot:${region}:${account}:topicfilter/gs/\${iot:Connection.Thing.ThingName}/*`,
+            Action: ['iot:Subscribe', 'iot:Receive'],
+            Resource: [ownTopicFilter('cmd'), ownTopic('cmd')],
           },
+          // Shadow re-check on every cellular wake (DL14, firmware coord
+          // §F.9.4 decision 2026-04-26): firmware reads desired.activated_at
+          // and writes reported.activated_at. Cloud's transition handlers
+          // (Phase 2A) maintain the invariant that desired.activated_at is
+          // non-null iff Device Registry status ∈ {provisioned, active_monitoring}.
           {
-            Effect: 'Allow',
-            Action: 'iot:Receive',
-            Resource: `arn:aws:iot:${region}:${account}:topic/gs/\${iot:Connection.Thing.ThingName}/*`,
-          },
-          // Phase 0A→0B→firmware coord progression added Shadow as the
-          // pre-activation re-check mechanism (DL14, §F.9.4 decided
-          // 2026-04-26). Devices read desired.activated_at on every wake
-          // and write reported.activated_at to confirm device-side persist.
-          // 1A-rev spec §IoT-policy-update Statement B documents this.
-          // Adding here ahead of full 1A-rev deploy so the first 4 dev
-          // certs (GS9999999999 bench + GS0000000001-3 shipping) work
-          // end-to-end with Shadow without waiting for 1A-rev.
-          {
+            Sid: 'OwnShadowApi',
             Effect: 'Allow',
             Action: ['iot:GetThingShadow', 'iot:UpdateThingShadow'],
             Resource: `arn:aws:iot:${region}:${account}:thing/\${iot:Connection.Thing.ThingName}`,
@@ -198,16 +225,86 @@ export class IngestionStack extends cdk.Stack {
       },
     });
 
+    // ── Snippet ingestion path (Phase 1A revision) ───────────────
+    const snippetBucketConstruct = new SnippetBucket(this, 'SnippetBucketConstruct', { config });
+    this.snippetBucket = snippetBucketConstruct.bucket;
+
+    const snippetParserConstruct = new SnippetParserLambda(this, 'SnippetParserConstruct', {
+      config,
+      snippetBucket: this.snippetBucket,
+    });
+    this.snippetParser = snippetParserConstruct.function;
+
+    // Allow IoT Rules in this stack (gosteady_<env>_*) to invoke the parser
+    this.snippetParser.addPermission('IotInvoke', {
+      principal: new iam.ServicePrincipal('iot.amazonaws.com'),
+      sourceArn: `arn:aws:iot:${region}:${account}:rule/gosteady_${p}_*`,
+    });
+    this.snippetParser.grantInvoke(ruleRole);
+
+    // ── Topic Rule: Snippet (Phase 1A revision) ──────────────────
+    // Binary payload (length-prefixed JSON header + IMU samples) is
+    // base64-encoded by the rule for transport into the Lambda event.
+    // The Lambda parses the preamble, extracts snippet_id, and writes
+    // the full payload to S3.
+    new iot.CfnTopicRule(this, 'SnippetRule', {
+      ruleName: `gosteady_${p}_snippet`,
+      topicRulePayload: {
+        description: 'Routes snippet binary payloads to SnippetParser Lambda',
+        sql:
+          "SELECT encode(*, 'base64') AS payload_b64, " +
+          "topic(2) AS thingName, " +
+          "timestamp() AS rule_ts_ms " +
+          "FROM 'gs/+/snippet'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        actions: [
+          {
+            lambda: {
+              functionArn: this.snippetParser.functionArn,
+            },
+          },
+        ],
+        errorAction,
+      },
+    });
+
     // ── S3 bucket for firmware OTA ───────────────────────────────
+    // Phase 1A revision (L10 / D14): swap from AWS-managed SSE to
+    // FirmwareKey CMK. The bucket is empty pre-Phase-5A so the
+    // in-place encryption change has zero data-migration cost.
+    // The CMK is imported via cross-stack ref from Security stack.
+    const firmwareKey = kms.Key.fromKeyArn(this, 'FirmwareKeyRef', securityStack.firmwareKey.keyArn);
+
     this.otaBucket = new s3.Bucket(this, 'OtaBucket', {
       bucketName: `gosteady-${p}-firmware-ota`,
       versioned: true,
-      encryption: s3.BucketEncryption.S3_MANAGED,
+      encryption: s3.BucketEncryption.KMS,
+      encryptionKey: firmwareKey,
+      bucketKeyEnabled: true, // amortizes KMS calls; expected for OTA artifact downloads
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
       removalPolicy:
         p === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: p !== 'prod',
     });
+
+    // Allow the IoT service principal to encrypt/decrypt with the FirmwareKey
+    // when delivering OTA artifacts via IoT Jobs (Phase 5A). Restricted to
+    // calls originating from this account + the OTA bucket ARN.
+    firmwareKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: `AllowIotOtaUseOf${p[0].toUpperCase()}${p.slice(1)}FirmwareKey`,
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.ServicePrincipal('iot.amazonaws.com')],
+        actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': account },
+          StringLike: { 'kms:EncryptionContext:aws:s3:arn': `${this.otaBucket.bucketArn}/*` },
+        },
+      }),
+    );
 
     // ── Fleet Provisioning ───────────────────────────────────────
     // IAM role that IoT Core assumes during fleet provisioning
@@ -283,6 +380,14 @@ export class IngestionStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'OtaBucketName', {
       value: this.otaBucket.bucketName,
       exportName: `${p}-OtaBucket`,
+    });
+    new cdk.CfnOutput(this, 'SnippetBucketName', {
+      value: this.snippetBucket.bucketName,
+      exportName: `${p}-SnippetBucket`,
+    });
+    new cdk.CfnOutput(this, 'SnippetParserArn', {
+      value: this.snippetParser.functionArn,
+      exportName: `${p}-SnippetParserArn`,
     });
     new cdk.CfnOutput(this, 'IoTEndpoint', {
       value: `See: aws iot describe-endpoint --endpoint-type iot:Data-ATS --region ${region}`,

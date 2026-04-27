@@ -77,6 +77,23 @@ export interface GoSteadyEnvConfig {
    * Defaults to localhost:8090 in dev when unset.
    */
   readonly internalCallbackUrl?: string;
+  /**
+   * Snippet bucket Standard → Glacier transition (Phase 1A revision L4).
+   */
+  readonly snippetGlacierTransitionDays: number;
+  /**
+   * Snippet bucket total retention before delete (~13 months, aligned with
+   * v1.5 algorithm-retrain horizon — Phase 1A revision L4).
+   */
+  readonly snippetTotalRetentionDays: number;
+  /**
+   * SnippetParser Lambda memory (Phase 1A revision §Configuration).
+   */
+  readonly snippetParserMemoryMb: number;
+  /**
+   * SnippetParser Lambda timeout (Phase 1A revision §Configuration).
+   */
+  readonly snippetParserTimeoutSeconds: number;
 }
 
 /**
@@ -102,6 +119,10 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     internalTokenIdleMinutes: 30,
     internalTokenAbsoluteMinutes: 240,
     internalCallbackUrl: 'http://localhost:8090/callback',
+    snippetGlacierTransitionDays: 90,
+    snippetTotalRetentionDays: 395,
+    snippetParserMemoryMb: 256,
+    snippetParserTimeoutSeconds: 30,
   },
   prod: {
     envName: 'Production',
@@ -122,5 +143,9 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     internalTokenIdleMinutes: 30,
     internalTokenAbsoluteMinutes: 240,
     // internalCallbackUrl: 'https://internal.gosteady.co/callback',  // set when internal tool is hosted
+    snippetGlacierTransitionDays: 90,
+    snippetTotalRetentionDays: 395,
+    snippetParserMemoryMb: 256,
+    snippetParserTimeoutSeconds: 30,
   },
 };

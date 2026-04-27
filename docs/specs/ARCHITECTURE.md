@@ -1,6 +1,6 @@
 # GoSteady Portal — Master Architecture & Phase Plan
 
-> **Last updated:** 2026-04-16 | **Branch:** `feature/infra-scaffold`
+> **Last updated:** 2026-04-27 | **Branch:** `feature/infra-scaffold`
 > **Repository:** [GoSteadyPortal](https://github.com/Jabl1629/GoSteadyPortal)
 
 ---
@@ -502,7 +502,7 @@ Deployed via CDK with `--context env=dev|prod`.
 | 1 | `GoSteady-{Env}-Auth` | 0A | **Deployed** (revision deployed 2026-04-26) | Cognito User Pool, 9 groups (8 active + walker deprecated), 2 App Clients (Customer + Internal), Pre-Token Generation Lambda V2, RoleAssignments DDB (CMK-encrypted with IdentityKey) | Security |
 | 2 | `GoSteady-{Env}-Data` | 0B | **Deployed** (revision deployed 2026-04-27) | 7 DDB tables: 4 identity-bearing CMK-encrypted (Organizations, Patients with DDB Streams, Users, DeviceAssignments) + 3 telemetry AWS-managed (Device Registry, Activity Series, Alert History) | Security |
 | 3 | `GoSteady-{Env}-Processing` | 1A/1B | **Deployed** (1B revision pending) | Activity Processor, Heartbeat Processor, Alert Handler (Python 3.12; ARM64 migration in 1B revision); table refs via `Table.fromTableName` (no cross-stack imports — see Migration Patterns below) | — |
-| 4 | `GoSteady-{Env}-Ingestion` | 1A | **Deployed** (1A revision pending) | IoT Thing Type, Device Policy, 3 Topic Rules, IoT Jobs config, SQS DLQ, S3 OTA Bucket, Fleet Provisioning Template | Processing |
+| 4 | `GoSteady-{Env}-Ingestion` | 1A / 1A-rev | **Deployed** (1A-rev deployed 2026-04-27) | IoT Thing Type, Device Policy (refactored to explicit topic list + Shadow grants + cmd subscribe), 4 Topic Rules (activity / heartbeat / alert / **snippet**), SnippetParser Lambda (Python 3.12 ARM64), Snippet S3 bucket (Standard→Glacier@90d→delete@395d), IoT Jobs config, SQS DLQ, S3 OTA Bucket (now FirmwareKey CMK-encrypted), Fleet Provisioning Template | Processing, Security |
 | 5 | `GoSteady-{Env}-Security` | 1.5 | **Deployed** (2026-04-17) | 3 KMS CMKs (identity / firmware / audit), CloudTrail multi-region trail, KMS-encrypted S3 log bucket, SNS cost alarm topic, billing alarm | — |
 | 6 | `GoSteady-{Env}-Observability` | 1.6 | **New** | Powertools layer, X-Ray config, CloudWatch dashboards, alarm catalog | All |
 | 7 | `GoSteady-{Env}-Audit` | 1.7 | **New** | Audit log group (CloudWatch + S3 Object Lock), audit-writer Lambda | Auth, Data |
@@ -1060,24 +1060,28 @@ Structured JSON via Lambda Powertools:
 ### Phase 1: Data In (device → cloud)
 
 #### Phase 1A — IoT Core + Ingestion ✅
-**Specs:** [`phase-1a-ingestion.md`](phase-1a-ingestion.md) (original, deployed) + [`phase-1a-revision.md`](phase-1a-revision.md) (revision, planned)
+**Specs:** [`phase-1a-ingestion.md`](phase-1a-ingestion.md) (original, deployed) + [`phase-1a-revision.md`](phase-1a-revision.md) (revision, deployed 2026-04-27)
 
 **Originally deployed:**
 - 3 IoT Topic Rules (`gs/+/{activity, heartbeat, alert}`)
 - Per-thing IoT policy with topic restrictions (`${iot:Connection.Thing.ThingName}`)
 - SQS DLQ
-- OTA S3 bucket (AWS-managed encryption — to be CMK-upgraded by revision)
+- OTA S3 bucket (AWS-managed encryption — CMK-upgraded by 1A revision)
 - Fleet provisioning template
 
-**Partial 1A-revision slice already deployed (2026-04-27, commit `89801ae`):**
-- **Shadow IoT-policy grants** — `iot:GetThingShadow` + `iot:UpdateThingShadow` on the device's own Thing added to `gosteady-dev-device-policy` (per §F.9.4 Shadow re-check decision DL14). Pulled forward from full 1A revision so the first 4 dev certs (GS9999999999 bench + GS0000000001-3 shipping, minted 2026-04-27 per firmware-coord §C2) work end-to-end with Shadow without waiting for the rest of the 1A-revision deploy.
-
-**1A revision — remaining specced work (full detail in [`phase-1a-revision.md`](phase-1a-revision.md)):**
-- Snippet ingestion path: new `gs/+/snippet` IoT Rule + thin SnippetParser Python Lambda + `gosteady-{env}-snippets` S3 bucket. Binary payload framed `[4-byte BE length][JSON header][binary body]` per firmware §F.3 (NCS 3.2.4 = MQTT 3.1.1; user properties not viable). Lambda parses preamble, writes full payload to `{serial}/{date}/{snippet_id}.bin`.
-- Downlink topic `gs/{serial}/cmd` — IoT policy authorizes per-thing subscribe to own cmd topic only.
-- OTA bucket FirmwareKey CMK wiring — encryption swap from AWS-managed to `gosteady/{env}/firmware` CMK (deferred from Phase 1.5; bucket is empty, in-place swap).
+**Phase 1A revision — DEPLOYED 2026-04-27:**
+- Snippet ingestion path: new `gs/+/snippet` IoT Rule (`gosteady_dev_snippet`) + thin Python Lambda (`gosteady-dev-snippet-parser`, Python 3.12 ARM64, 256 MB) + `gosteady-dev-snippets` S3 bucket. Rule SQL `SELECT encode(*, 'base64') AS payload_b64, topic(2) AS thingName, timestamp() AS rule_ts_ms FROM 'gs/+/snippet'`. Binary payload framed `[4-byte BE uint32 length][UTF-8 JSON header][binary body]` per firmware §F.3 (NCS 3.2.4 = MQTT 3.1.1; user properties not viable). Lambda parses preamble, validates `format_version==1`, writes full payload to `{serial}/{date}/{snippet_id}.bin`. Snippet bucket: AWS-managed SSE, lifecycle Standard→Glacier@90d→delete@395d, all public access blocked, TLS-only enforced.
+- Downlink topic `gs/{serial}/cmd` — per-thing IoT policy authorizes subscribe + receive to own cmd topic only.
+- **Per-thing IoT policy refactored** from `gs/<thing>/*` wildcard to an explicit topic list (defense in depth, easier to audit). Authorized: Publish on `heartbeat`, `activity`, `alert`, `snippet`; Subscribe + Receive on `cmd`; `iot:GetThingShadow` + `iot:UpdateThingShadow` on own thing.
+- OTA bucket (`gosteady-dev-firmware-ota`) encryption swapped from AWS-managed to FirmwareKey CMK (`gosteady/dev/firmware`, alias arn `…/c3118767-…`), bucket-key enabled, TLS-only enforced. Bucket was empty pre-Phase-5A so in-place swap had zero migration cost. KMS resource policy grants the IoT service principal `kms:Decrypt` + `kms:GenerateDataKey` scoped via `aws:SourceAccount` + `kms:EncryptionContext:aws:s3:arn` for future Phase 5A OTA Jobs delivery.
 - Pre-activation suppression and activation-ack via `last_cmd_id` heartbeat echo are **NOT** in 1A revision — those land in Phase 1B revision (per 1A revision D10, since 1B is doing a full handler refactor anyway).
 - Independent of 0B revision (no DDB schema dependency).
+
+**Acceptance results (2026-04-27 deploy):**
+- T2 (happy path): synthetic 84,127-byte snippet → S3 object byte-equal to input within ~3s; structured `device.snippet_uploaded` log present (cold-start 510 ms init + 202 ms exec; warm path is faster).
+- T12–T15 (malformed payloads): bad length prefix, invalid JSON header, missing `snippet_id`, wrong `format_version` — each raises `SnippetValidationError` with a structured CloudWatch log line.
+- T20 (regression): existing heartbeat publish → heartbeat-processor → DDB row update verified end-to-end.
+- **DLQ-routing nuance:** AWS IoT Rule Lambda actions are async by default — Lambda exceptions don't trip the IoT-side error action's SQS DLQ. They produce structured CloudWatch error logs (which is what ops actually wants); the SQS DLQ continues to catch IoT-side rule failures (auth, throttling, malformed SQL). Spec assumption A7 is technically more nuanced than originally written; revisit if a snippet-side ops alarm is later required (Phase 1.6).
 
 #### Phase 1B — Processing Logic 🔄
 **Specs:** [`phase-1b-processing.md`](phase-1b-processing.md) (original, deployed) + [`phase-1b-revision.md`](phase-1b-revision.md) (revision, planned)
@@ -1130,11 +1134,13 @@ Structured JSON via Lambda Powertools:
 - S3 Object Lock on CloudTrail bucket (prod-only, not deployed in dev)
 - Cost anomaly detection monitor
 
+**✅ FirmwareKey CMK now consumed downstream (deployed 2026-04-27 with 1A-rev):**
+- Ingestion stack: OTA bucket (`gosteady-dev-firmware-ota`) encryption migrated from AWS-managed to FirmwareKey CMK; bucket-key enabled; TLS-only enforced. KMS resource policy grants the IoT service principal scoped use for Phase 5A OTA delivery.
+
 **🔲 Pending — scoped into other revisions:**
-- Ingestion stack consuming FirmwareKey CMK on S3 OTA bucket → **scoped into [`phase-1a-revision.md`](phase-1a-revision.md) L10 / D14**; lands when 1A revision deploys
 - Processing stack Lambdas migrating to ARM64 + adding `kms:Decrypt` grants → **scoped into [`phase-1b-revision.md`](phase-1b-revision.md)**; lands when 1B revision deploys
 
-**Security stack itself does not need redeployment for these — they are downstream stack edits that will reference the already-published CMK ARNs via cross-stack imports.**
+**Security stack itself does not need redeployment for these — they are downstream stack edits that reference the already-published CMK ARNs via cross-stack imports.**
 
 ---
 
@@ -1290,15 +1296,15 @@ Phase 3B (CI/CD)    ←── any time
 ```
 Originals (deployed):           0A ✅   0B ✅   1A ✅   1B ✅   1.5 🟡
 
-Revisions DEPLOYED:              0A-rev ✅ (2026-04-26)   0B-rev ✅ (2026-04-27)
-Revisions specced, ready:        1A-rev 🔲                 1B-rev 🔲
-                                 (1A-rev independent; 1B-rev consumes 0B-rev tables)
+Revisions DEPLOYED:              0A-rev ✅ (2026-04-26)   0B-rev ✅ (2026-04-27)   1A-rev ✅ (2026-04-27)
+Revisions specced, ready:        1B-rev 🔲
+                                 (1B-rev consumes 0B-rev tables; gates firmware M12.1e.2)
 
 New phases needed:               1.6 🔲   1.7 🔲   2A 🔲   2B 🔲
 
 Path to portal-renders-real-data:
-  [1A-rev || 1B-rev] → 1.6 + 1.7 → 2A → 2B
-                       (1.6 / 1.7 specs not yet written; gating for 2A)
+  1B-rev → 1.6 + 1.7 → 2A → 2B
+  (1A-rev landed 2026-04-27; 1.6 / 1.7 specs not yet written; both gate 2A)
 ```
 
 ---
@@ -1435,7 +1441,7 @@ Path to portal-renders-real-data:
 | `gosteady-{env}-heartbeat-processor` | Processing | 1B | 🔄 Implemented (revision slims to Shadow update + activation-ack) | IoT Rule (`gs/+/heartbeat`) | ARM64 (post-rev) |
 | `gosteady-{env}-threshold-detector` | Processing | 1B-rev | 🔲 New (replaces heartbeat-processor's threshold role) | IoT Rule on `$aws/things/+/shadow/update/accepted` | ARM64 |
 | `gosteady-{env}-alert-handler` | Processing | 1B | 🔄 Implemented (revision pending) | IoT Rule (`gs/+/alert`) | ARM64 (post-rev) |
-| `gosteady-{env}-snippet-parser` | Ingestion | 1A-rev | 🔲 New | IoT Rule (`gs/+/snippet`) | ARM64 |
+| `gosteady-{env}-snippet-parser` | Ingestion | 1A-rev | ✅ Deployed (2026-04-27) | IoT Rule (`gs/+/snippet`) | ARM64 |
 | `gosteady-{env}-device-api` | Api | 2A | 🔲 New | API Gateway (`/devices/*`) | ARM64 |
 | `gosteady-{env}-discharge-cascade` | Api | 2A | 🔲 New | DDB Stream on Patients | ARM64 |
 | `gosteady-{env}-device-shadow-handler` | Api | 2A | 🔲 New | IoT Shadow Δ (reset_complete + reported.activated_at) | ARM64 |
@@ -1457,6 +1463,7 @@ Path to portal-renders-real-data:
 - [ ] **Audit hot-path latency:** Acceptable to add ~10ms per mutation for synchronous audit write? Or fire-and-forget via SQS?
 - [ ] **Multi-facility caregiver UX:** Single facility selector, or unified inbox across all assigned facilities?
 - [ ] **Phase 1.6 alarm catalog must include log-pattern alarms, not just DLQ-depth.** Discovered 2026-04-27 via firmware-coord §C4.3 threshold-detector probe: heartbeat-processor's threshold-fired alert PutItems fail post-0B-revision (alerts table now `patientId`-keyed, OLD handler still writes `serialNumber`). Lambda catches the exception, logs `[HEARTBEAT][ALERT][ERROR] ...`, returns OK — IoT Rule sees a successful invocation, **DLQ stays empty.** Phase 1.6 needs CloudWatch Logs metric filters / alarms on `[ALERT][ERROR]` and similar swallowed-error patterns across all handlers, not just `ApproximateNumberOfMessagesVisible` on DLQs. Same pattern likely lurks in any handler that catches and logs. **Fix is implicit when 1B revision deploys** (heartbeat-processor stops generating alerts entirely; threshold-detector writes through patient-resolution path so PK matches), but the underlying observability gap is general: logged-and-swallowed errors are invisible to ops without explicit log alarms.
+- [ ] **IoT Rule Lambda actions are async — Lambda-raised exceptions don't trip the IoT-side error action.** Discovered 2026-04-27 during 1A-rev SnippetParser malformed-payload acceptance tests (T12–T15): SnippetParser raised `SnippetValidationError` on each malformed input, but the IoT-side SQS DLQ stayed empty. AWS IoT Rule Lambda actions invoke Lambda asynchronously by default; the rule succeeds the moment the Lambda is invoked, regardless of whether the function later raises. Exceptions show up in CloudWatch logs (which is what ops actually wants for visibility) and as Lambda Errors metric — but NOT in the IoT Rule's SQS error-action queue. The IoT DLQ continues to catch IoT-side failures (auth, throttling, malformed SQL, missing Lambda permission). Spec assumption A7 in [`phase-1a-revision.md`](phase-1a-revision.md) is more nuanced than originally written. Implication for Phase 1.6: alarm on Lambda Errors metric + log-pattern filters per handler; do not rely on DLQ depth alone for handler-internal failure detection.
 
 ### Firmware-coordination items — RESOLVED (2026-04-26 batch)
 > All items below were raised in [`firmware-coordination/2026-04-17-cloud-contracts.md`](../firmware-coordination/2026-04-17-cloud-contracts.md) §F.9 and answered in §C.4 of the same doc. Kept here for searchability; firmware team's next batch will trigger a fresh "open items" subsection.
@@ -1492,7 +1499,7 @@ Path to portal-renders-real-data:
 | 0B | Data Layer (original) | [`phase-0b-data.md`](phase-0b-data.md) | ✅ Deployed |
 | 0B-rev | Data Layer Revision (multi-tenant tables, hierarchy denorm, PK migration) | [`phase-0b-revision.md`](phase-0b-revision.md) | ✅ Deployed (2026-04-27) |
 | 1A | IoT Ingestion | [`phase-1a-ingestion.md`](phase-1a-ingestion.md) | ✅ Deployed |
-| 1A-rev | Ingestion Revision (snippet IoT Rule + parser Lambda, downlink topic, Shadow IoT-policy grants, OTA bucket CMK) | [`phase-1a-revision.md`](phase-1a-revision.md) | 🔲 Planned |
+| 1A-rev | Ingestion Revision (snippet IoT Rule + parser Lambda, downlink topic, Shadow IoT-policy grants, OTA bucket CMK, policy refactor) | [`phase-1a-revision.md`](phase-1a-revision.md) | ✅ Deployed (2026-04-27) |
 | 1B | Processing Logic (original) | [`phase-1b-processing.md`](phase-1b-processing.md) | ✅ Deployed |
 | 1B-rev | Processing Logic Revision (Threshold Detector via Shadow, patient-centric handlers, ARM64 + Powertools, hierarchy snapshots) | [`phase-1b-revision.md`](phase-1b-revision.md) | 🔲 Planned |
 | 1C | Scheduled Jobs | — | 🔲 Planned |
