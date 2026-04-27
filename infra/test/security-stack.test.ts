@@ -18,6 +18,10 @@ describe('SecurityStack (dev profile)', () => {
       cloudTrailEnabled: true,
       cloudTrailObjectLockEnabled: false,
       costAlarmThresholdUsd: 100,
+      customerTokenIdleMinutes: 15,
+      customerRefreshDays: 30,
+      internalTokenIdleMinutes: 30,
+      internalTokenAbsoluteMinutes: 240,
     },
   });
   const template = Template.fromStack(stack);
@@ -107,6 +111,10 @@ describe('SecurityStack (prod profile — Object Lock enabled)', () => {
       cloudTrailEnabled: true,
       cloudTrailObjectLockEnabled: true,
       costAlarmThresholdUsd: 500,
+      customerTokenIdleMinutes: 15,
+      customerRefreshDays: 30,
+      internalTokenIdleMinutes: 30,
+      internalTokenAbsoluteMinutes: 240,
     },
   });
   const template = Template.fromStack(stack);

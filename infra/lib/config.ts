@@ -52,6 +52,31 @@ export interface GoSteadyEnvConfig {
    * If not set, the topic is created but no subscription is attached (attach manually).
    */
   readonly costAlarmEmail?: string;
+  /**
+   * Customer-tier (Portal-Customer App Client) idle access-token validity in minutes.
+   * Phase 0A revision L7 / Phase 1.5 L7 — 15 min for healthcare-norm session timeout.
+   */
+  readonly customerTokenIdleMinutes: number;
+  /**
+   * Customer-tier refresh-token validity in days.
+   * Phase 0A revision — 30 days, matches original Phase 0A.
+   */
+  readonly customerRefreshDays: number;
+  /**
+   * Internal-tier (Portal-Internal App Client) idle access-token validity in minutes.
+   * Phase 0A revision L8 / Phase 1.5 L8 — 30 min for tighter blast-radius cap.
+   */
+  readonly internalTokenIdleMinutes: number;
+  /**
+   * Internal-tier absolute session lifetime in minutes (refresh-token validity).
+   * Phase 0A revision L8 — 4 hr (240 min).
+   */
+  readonly internalTokenAbsoluteMinutes: number;
+  /**
+   * Optional callback URL for the Portal-Internal App Client (internal admin tool).
+   * Defaults to localhost:8090 in dev when unset.
+   */
+  readonly internalCallbackUrl?: string;
 }
 
 /**
@@ -72,6 +97,11 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     cloudTrailObjectLockEnabled: false, // compliance-mode lock makes bucket non-destroyable; prod only
     costAlarmThresholdUsd: 100,
     costAlarmEmail: process.env.GOSTEADY_COST_ALARM_EMAIL,
+    customerTokenIdleMinutes: 15,
+    customerRefreshDays: 30,
+    internalTokenIdleMinutes: 30,
+    internalTokenAbsoluteMinutes: 240,
+    internalCallbackUrl: 'http://localhost:8090/callback',
   },
   prod: {
     envName: 'Production',
@@ -87,5 +117,10 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     cloudTrailObjectLockEnabled: true,
     costAlarmThresholdUsd: 500,
     costAlarmEmail: process.env.GOSTEADY_COST_ALARM_EMAIL,
+    customerTokenIdleMinutes: 15,
+    customerRefreshDays: 30,
+    internalTokenIdleMinutes: 30,
+    internalTokenAbsoluteMinutes: 240,
+    // internalCallbackUrl: 'https://internal.gosteady.co/callback',  // set when internal tool is hosted
   },
 };

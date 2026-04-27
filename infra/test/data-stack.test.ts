@@ -17,6 +17,10 @@ describe('DataStack', () => {
       cloudTrailEnabled: false,
       cloudTrailObjectLockEnabled: false,
       costAlarmThresholdUsd: 100,
+      customerTokenIdleMinutes: 15,
+      customerRefreshDays: 30,
+      internalTokenIdleMinutes: 30,
+      internalTokenAbsoluteMinutes: 240,
     },
   });
   const template = Template.fromStack(stack);

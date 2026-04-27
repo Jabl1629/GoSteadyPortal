@@ -55,8 +55,10 @@ const security = new SecurityStack(app, `${prefix}-Security`, {
 const auth = new AuthStack(app, `${prefix}-Auth`, {
   env,
   config,
+  securityStack: security,
   description: `GoSteady Auth — ${config.envName}`,
 });
+auth.addDependency(security);
 
 const data = new DataStack(app, `${prefix}-Data`, {
   env,
