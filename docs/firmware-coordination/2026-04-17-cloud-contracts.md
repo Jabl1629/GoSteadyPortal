@@ -1481,3 +1481,200 @@ in which case the §F2.2 baseline gives us a clean half of the bisect).
 
 *Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
 
+---
+---
+
+# Cloud team response — 2026-04-27 (heartbeat storage drift resolved + probe results)
+
+> **In response to:** firmware §F2 entry above (sub-task 0 acceptance probe).
+>
+> **TL;DR:** Drift is resolved — answer is **option 2** (Lambda is
+> pre-revision; spec describes the post-Phase 1B revision target).
+> Phase 1B revision is fully specced in `docs/specs/phase-1b-revision.md`
+> and is the next major dev-path item; commits to deploying it before
+> firmware needs M12.1e.2 unblocked. Cloud-side battery + signal probes
+> complete (§C4.3 below) — confirms threshold detection logic fires on
+> the OLD handler but the alert PutItem fails post-0B-revision
+> (`patientId`-keyed alerts table vs OLD handler's `serialNumber` PK
+> writes); 1B revision is the fix. Acks §F2.4 minor observations and
+> §F2.5 milestone renumbering.
+
+---
+
+## C4.1 Heartbeat storage drift — option 2
+
+The drift §F2.3 surfaced is real and the answer is **option 2: spec
+describes the target post-revision design; deployed Lambda is
+pre-revision and needs the 1B revision to come into compliance.**
+
+Where the post-revision design lives:
+- `ARCHITECTURE.md §7` ("Heartbeat (hourly) — written to Device Shadow")
+  and the trailing note "Heartbeat updates Device Shadow `reported`
+  state. Threshold detection runs on shadow delta, not on every
+  heartbeat Lambda invocation." This is the canonical target.
+- `ARCHITECTURE.md §14` cumulative requirement P5 ("Heartbeat → Device
+  Shadow (not Lambda → DDB); threshold detection via shadow delta")
+  marked **"Revised"** — this is the tag that means "post-revision
+  design, not yet implemented."
+- `docs/specs/phase-1b-revision.md` ("Lambda 4: heartbeat-processor")
+  explicitly slims the heartbeat-processor to "Shadow update +
+  activation-ack only" with no DDB telemetry writes.
+- `docs/specs/phase-1b-revision.md` ("Lambda 2: threshold-detector")
+  is the **NEW Lambda** triggered by an IoT Rule on
+  `$aws/things/+/shadow/update/accepted`; it consumes shadow-delta
+  events and generates synthetic alerts.
+- `ARCHITECTURE.md §15` (Lambda Inventory) annotates
+  `gosteady-{env}-heartbeat-processor` as
+  "🔄 Implemented (revision slims to Shadow update + activation-ack)"
+  and adds `gosteady-{env}-threshold-detector` as
+  "🔲 New (replaces heartbeat-processor's threshold role)".
+
+The OLD heartbeat handler that's deployed today is the original
+Phase 1B implementation (predates the firmware-coord §F.9.4 Shadow
+re-check decision and predates the P5 revision). Its design choice
+to write DDB directly was correct for original Phase 1B; the
+revision flips it.
+
+**Cloud team commits:** Phase 1B revision is the next major
+dev-path implementation item, before firmware reaches M12.1e.2.
+Realistic timing: 1-2 focused dev sessions. The spec is fully
+written + ready to implement; no open design questions blocking it.
+
+## C4.2 Implications for firmware milestone sequencing
+
+Firmware's read in §F2.3 is correct. To restate cleanly:
+
+| Firmware milestone | Cloud dependency | Status |
+|---|---|---|
+| M12.1c.1 (bench-cert minimum-viable heartbeat) | None — firmware just publishes; cloud handler shape doesn't matter | Cloud-ready (verified §F2.2 + §C4.3 below) |
+| M12.1c.2 (production-shaped heartbeat) | None — same as .1 | Cloud-ready |
+| M12.1e.1 (NCS Shadow lib bench check) | None — pure firmware-side mechanics + maybe a stub Thing call | Cloud-ready (Shadow grants are live in `gosteady-dev-device-policy` per §C2.3) |
+| **M12.1e.2 (pre-activation gate + Shadow re-check)** | **Phase 1B revision deployed** — needs heartbeat handler writing `reported.{...}` to Shadow + threshold-detector consuming shadow-delta + the activation-ack path operational | **Blocked on cloud team's 1B revision deploy** |
+
+The activation-ack path specifically: per §F.9.4 / DL14, firmware
+writes `reported.activated_at` directly via `iot:UpdateThingShadow`
+on its own Thing (Shadow grants in policy support this). Cloud-side
+threshold-detector / device-shadow-handler consumes the
+`reported.activated_at` shadow-delta event and marks Device Registry
+`activated_at` accordingly. That cloud-side consumer **doesn't
+exist** until 1B revision deploys; until then, M12.1e.2's Shadow
+write from device side will succeed at the Shadow layer but won't
+trigger any cloud-side state change.
+
+So firmware sequencing: M12.1c.1 → M12.1c.2 → M12.1e.1 → **wait for
+1B revision deploy** → M12.1e.2.
+
+## C4.3 Cloud-side threshold-detector probe (per §F2.4b suggestion)
+
+Ran three synthetic heartbeats against `gs/GS9999999999/heartbeat` to
+characterize the threshold-detection path under the current OLD
+handler:
+
+| Probe | Payload | Threshold logic fires? | Alert lands in DDB? | Lambda outcome |
+|---|---|---|---|---|
+| 1 — battery_critical solo | `battery_pct=0.04, rsrp_dbm=-100` | ✅ (`battery_critical`) | ❌ ValidationException | Lambda returns OK; error logged |
+| 2 — signal_lost solo | `battery_pct=0.5, rsrp_dbm=-125` | ✅ (`signal_lost`) | ❌ ValidationException | Lambda returns OK; error logged |
+| 3 — combined breach | `battery_pct=0.03, rsrp_dbm=-125` | ✅ both (`battery_critical` + `signal_lost`) | ❌ both ValidationException | Lambda returns OK; both errors logged |
+
+CloudWatch log evidence:
+```
+[HEARTBEAT][OK]    serial=GS9999999999 ts=...22:30 battery=0.04 rsrp=-100.0 ...
+[HEARTBEAT][ALERT][ERROR] serial=GS9999999999 type=battery_critical:
+  An error occurred (ValidationException) when calling the PutItem
+  operation: One or more parameter values were invalid: Missing the
+  key patientId in the item
+```
+... same shape for signal_lost and the combined-breach run.
+
+What this shows:
+- ✅ **Threshold detection logic is intact** — fires on all three
+  expected paths. Suppression rules work too (combined probe at
+  battery=0.03 / rsrp=-125 fires `battery_critical` not `battery_low`,
+  and `signal_lost` not `signal_weak` — Phase 1B D7 mutual-exclusivity).
+- ❌ **Alert PutItem fails post-0B-revision** because alerts table is
+  now `patientId`-keyed and the OLD handler still writes with
+  `serialNumber`. Lambda swallows the error, logs it, returns success
+  — so the **DLQ stays empty** (the IoT Rule sees a successful Lambda
+  invocation). This is exactly the post-0B-pre-1B broken state the
+  0B revision spec called out.
+- ⚠️ **Operational visibility caveat:** these alert-write failures
+  are visible only in CloudWatch logs. There's no CloudWatch alarm on
+  the error pattern yet (Phase 1.6 territory). If we ran with real
+  devices in this state, threshold-triggered alerts would silently
+  not generate, and the only signal would be log volume.
+
+Net for firmware: cloud-side acceptance for M12.1c.1 / M12.1c.2 is
+clean (heartbeat publish → device registry update works). Threshold
+alerts are a 1B-revision deliverable; firmware's anti-feature list
+already excludes generating alerts, so this isn't a firmware concern,
+just a cloud-team to-do.
+
+## C4.4 §F2.4 minor observations — responses
+
+**(a) uptimeS=0 default-fill.** Confirmed: OLD handler default-fills
+missing optional fields with 0. **Phase 1B revision Lambda 4 spec
+explicitly inverts this** per D16 ("All uplink schemas tolerate extra
+fields gracefully — heartbeat extras → Shadow"). New behavior:
+firmware sends what it sends; what arrives lands in `reported.{...}`
+exactly as-given; missing fields stay missing in shadow (no
+default-fill, no sentinel zeros). So §F2.4a is also a "1B revision
+fixes it" item — no separate change needed.
+
+**(b) Threshold detector probe.** Done — see §C4.3 above. Closes the
+"threshold detector live but unverified" gap.
+
+**(c) Lambda cold-start floor.** Acknowledged. ~512 ms cold + ~308 ms
+warm execution is consistent with Python 3.12 ARM64 init. With ~3
+units × 1 heartbeat/hr the handler will be cold most invocations.
+Phase 1B revision Lambda 4 (slimmed to Shadow update + ack) will be
+faster — fewer validations, fewer DDB writes, less code path. Not a
+firmware concern; flagged for Phase 1.6 observability work to decide
+whether provisioned concurrency is worth it. Likely no, at MVP scale.
+
+## C4.5 §F2.5 milestone renumbering — acknowledged
+
+Cloud-side will use the dotted form (`M12.1c.1`, `M12.1c.2`,
+`M12.1e.1`, `M12.1e.2`, `M11.1`, `M11.2`, `M10.7`, `M14.5`) in future
+entries. Specifically, future §C-prefixed entries will reference:
+
+- **M12.1c.1** when discussing "first cloud↔firmware connection moment"
+- **M12.1e.2** when discussing the pre-activation gate / Shadow
+  re-check, since that's the milestone with cloud-side Shadow
+  dependencies
+- **M14.5** as the trigger for the next major firmware-cloud
+  coordination batch (site-survey unit shakedown)
+
+The driving priority firmware mentioned ("see the cloud↔firmware
+connection ASAP so cloud-side speculatively-built work gets concrete
+acceptance testing earliest") is mirrored on the cloud side — every
+revision deploy this past week was a speculative implementation
+against the post-coord-batch design. Concrete acceptance testing
+is genuinely valuable. §F2 is a great example of the model working.
+
+## C4.6 Cloud-side cleanup item
+
+The probe runs in §C4.3 left the Device Registry row for
+`GS9999999999` showing `batteryPct=0.03` and `rsrpDbm=-125` (the
+combined-breach probe). That's stale state for the bench cert — when
+firmware actually starts publishing heartbeats from the bench unit
+at M12.1c.1, fresh values will overwrite. No cleanup needed; flagging
+because it'll show up in any incidental verification queries until
+M12.1c.1 lands.
+
+## C4.7 Cadence
+
+This entry resolves §F2.3 + addresses §F2.4 + acks §F2.5. No
+firmware action required on the doc itself.
+
+Cloud team's next coordination-doc-affecting work: implementing
+Phase 1B revision (target: next focused dev session, before firmware
+reaches M12.1e.2). Will post a §C5 implementation milestone update
+when that ships.
+
+Next firmware coord batch trigger: M14.5 site-survey unit shakedown,
+unchanged from the original §9 cadence note.
+
+---
+
+*Entry owner (cloud side): Jace + Claude. Counter-proposals welcome.*
+
