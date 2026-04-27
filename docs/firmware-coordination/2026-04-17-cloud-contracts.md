@@ -1303,3 +1303,181 @@ with M12.1c (first heartbeat publish from bench unit using
 
 *Entry owner (cloud side): Jace + Claude. Counter-proposals welcome.*
 
+---
+---
+
+# Firmware team milestone update — 2026-04-27 (M12.1c.1 sub-task 0 — cloud-side path validated end-to-end without firmware)
+
+> **Closes:** the §C3.4 "firmware proceeds with M12.1c when ready" handoff
+> on the cloud-side acceptance angle.
+>
+> **Raises:** new question §F2.3 about heartbeat-storage spec drift —
+> coord doc / firmware-side mirror say Device Shadow `reported`; the
+> actual cloud-side Lambda writes DynamoDB only. Architectural ambiguity
+> firmware would like resolved before sinking design into M12.1e.2
+> (pre-activation gate + Shadow re-check).
+>
+> **TL;DR:** Cloud↔firmware contract is more validated than expected at
+> this stage — exercised the heartbeat path end-to-end with `aws iot-data
+> publish` (synthetic payload to `gs/GS9999999999/heartbeat`), Lambda
+> fired, DDB row updated cleanly, DLQ empty. But the storage location
+> doesn't match what the firmware-side mirror in `GOSTEADY_CONTEXT.md`
+> (and `ARCHITECTURE.md §7`) says — they say Device Shadow `reported`;
+> Lambda actually writes `gosteady-dev-devices` directly via `UpdateItem`.
+> Three small follow-up nits in §F2.4. Renumbering heads-up in §F2.5.
+
+---
+
+## F2.1 What just happened
+
+Per the firmware-side milestone arc renumbering (see §F2.5 below),
+M12.1c was sliced into M12.1c.1 (bench-cert minimum-viable heartbeat
+from `GS9999999999`) and M12.1c.2 (production-shaped heartbeat).
+M12.1c.1 has a "sub-task 0" cloud-side acceptance probe step — its job
+is to validate the cloud-side path independently of firmware so any
+later firmware-side debugging starts with a known-clean cloud target.
+
+Sub-task 0 ran today and surfaced what we hoped it would surface:
+cloud is functionally ready, but with one spec-vs-implementation drift
+worth resolving before sub-task 1 starts.
+
+## F2.2 What we proved (cloud-side acceptance results)
+
+| Check | Result | Notes |
+|---|---|---|
+| Cert bundle at `~/Desktop/gosteady-firmware-cert-handoff-2026-04-27/` | ✅ | All 4 subdirs + `AmazonRootCA1.pem` + `MANIFEST.csv` + READMEs present. Per-device README documents `AT%CMNG=0,<sec_tag>,...` flashing pattern. |
+| Re-ran §C2.2 verification block (4 serials × Thing principal + DDB row) | ✅ | All 4 cert fingerprints match between disk + AWS; all 4 DDB rows = `ready_to_provision`. |
+| IoT Rule `gosteady_dev_heartbeat` deployed + enabled on `gs/+/heartbeat` | ✅ | Also confirmed: `gosteady_dev_activity` + `gosteady_dev_alert` rules deployed. |
+| Synthetic heartbeat via `aws iot-data publish` | ✅ | Topic `gs/GS9999999999/heartbeat`; payload `{"serial":"GS9999999999","ts":"2026-04-27T21:19:39Z","battery_pct":0.5,"rsrp_dbm":-100,"snr_db":5}`. |
+| `gosteady-dev-heartbeat-processor` Lambda fired | ✅ | 512 ms cold start; 821 ms billed total; 308 ms execution. |
+| Lambda logged validated heartbeat | ✅ | `[HEARTBEAT][OK] serial=GS9999999999 ts=2026-04-27T21:19:39Z battery=0.50 rsrp=-100.0 snr=5.0 fw=None walker=None` |
+| DDB row updated with our exact values | ✅ | `batteryPct=0.5`, `rsrpDbm=-100`, `snrDb=5`, `lastHeartbeatAt=2026-04-27T21:19:39Z`, `lastSeen=2026-04-27T21:19:39Z`. Other attributes (`certFingerprint`, `status`, `manufacturedBy`, `notes`) preserved by partial `UpdateItem`. |
+| DLQ message count | ✅ 0 | Zero failed Lambda invocations from this probe. |
+
+Net: cloud heartbeat handler is live and works end-to-end with the
+synthetic payload firmware will produce. Nothing on cloud side blocks
+firmware bring-up.
+
+## F2.3 Heartbeat storage spec drift (please resolve before M12.1e.2)
+
+`gosteady-portal/docs/specs/ARCHITECTURE.md §7` and the locked-table
+mirror in `gosteady-firmware/GOSTEADY_CONTEXT.md` (Portal Scope Impact
+§Heartbeat uplink, "Storage in cloud" row) both say:
+
+> "Storage in cloud | AWS IoT Device Shadow `reported` state (not
+> DynamoDB direct write) | Locked by portal spec"
+
+The actual `gosteady-dev-heartbeat-processor` Lambda code writes
+directly to DynamoDB `gosteady-dev-devices` via `UpdateItem` — no
+Shadow write anywhere in the handler. The Lambda's own docstring
+describes itself as "Phase 1B" and explicitly documents the DDB
+`UpdateItem` flow as the design (preserves walkerUserId, provisionedAt,
+etc.).
+
+Three options for resolving the drift:
+
+1. **Lambda is right, spec is stale.** Update the spec table to record
+   DDB-direct-write as the canonical storage. Firmware-side mirror in
+   `GOSTEADY_CONTEXT.md` follows.
+2. **Spec is right, Lambda is incomplete.** Phase 1B is "MVP just-DDB"
+   with Shadow write planned for Phase 2; firmware should not lean on
+   Shadow `reported` for heartbeat data until that lands. Cloud-side
+   roadmap entry would be helpful.
+3. **Both write paths intended.** Lambda needs a Shadow update path
+   alongside the DDB write. Firmware-side mirror clarifies "Shadow
+   `reported` mirrors DDB `lastSeen` / `battery` / etc."
+
+**Functionally for M12.1c.1 / M12.1c.2: no impact.** Firmware just
+publishes to the topic; cloud handler is whatever it is. But this DOES
+affect M12.1e.2 design — that path is supposed to **write**
+`reported.activated_at` from device side and **read**
+`desired.activated_at` per §C.4.4. If Shadow isn't actually wired up
+at all in cloud yet, M12.1e.1's bench check needs to verify cloud-side
+Shadow read/write end-to-end (not just NCS lib mechanics on a stub
+Thing), and the §C.4.4 fallback path (MQTT-retained `activate` cmd)
+becomes more relevant than the §C.4.4 main paragraph implies.
+
+**Question for cloud team:** which of (1), (2), (3)? And if (2), what's
+the rough Phase-2 window? Firmware can move forward on M12.1c.1 +
+M12.1c.2 (no Shadow dependency) without an answer, but wants the answer
+before sinking design into M12.1e.2.
+
+## F2.4 Other small notes from the probe
+
+Three minor observations, none blocking:
+
+a. **`uptimeS=0` got persisted** even though our synthetic payload
+   didn't send `uptime_s`. Lambda appears to default-fill missing
+   optional fields with 0. Acceptable but worth being explicit: when
+   M12.1c.2 sends the real `uptime_s`, the value will replace the
+   default 0 in DDB; if firmware skips a field intentionally (field not
+   yet wired), 0 will still land in DDB. Recommend either (a) skip
+   default-fill for unsent optional fields (cleaner — DDB attribute is
+   absent until firmware sends it), or (b) document the default-fill
+   behavior so firmware doesn't accidentally race a "0 = not yet
+   measured" sentinel against a real 0. Minor.
+
+b. **Threshold detector is live** — Lambda includes battery + RSRP
+   threshold logic with synthetic alert writes to `gosteady-dev-alerts`
+   (battery_critical < 0.05, battery_low < 0.10, signal_lost ≤ -120,
+   signal_weak ≤ -110). Our synthetic values were healthy so no alert
+   fired, but the path is wired. Worth a cloud-side follow-up probe
+   with `battery_pct=0.04` to confirm `battery_critical` lands in the
+   alert table. Not a firmware action item — firmware doesn't generate
+   alerts in v1 per the locked anti-feature list.
+
+c. **Lambda cold-start floor.** 512 ms cold start; ~308 ms warm
+   execution. With ~1 heartbeat/hr × 3 devices the Lambda will mostly
+   be cold during clinic deployment (long inter-invocation gaps); not a
+   firmware concern but a heads-up that the heartbeat handler will pay
+   the cold-start tax most of the time, and any Phase-2 fan-out work
+   (EventBridge, etc.) inherits the floor.
+
+## F2.5 Heads-up on firmware-side milestone arc renumbering (2026-04-27)
+
+For cloud-side Claude's reference when reading future firmware entries,
+the firmware-side `GOSTEADY_CONTEXT.md` 15-Step Arc was refactored
+2026-04-27 — driving priority is **see the cloud↔firmware connection
+ASAP** so cloud-side speculatively-built work gets concrete acceptance
+testing earliest.
+
+- **M12.1c → M12.1c.1 / M12.1c.2.** `.1` is bench-cert minimum-viable
+  heartbeat (one publish from `GS9999999999` with placeholder battery —
+  the "first cloud↔firmware connection" moment). `.2` is
+  production-shaped heartbeat (hourly cadence + all extras + real
+  battery). Sliced this way to surface findings like §F2.3 ASAP.
+- **M12.1e → M12.1e.1 / M12.1e.2.** `.1` is the micro-milestone NCS
+  Shadow lib bench check (resolves §C.5.1). `.2` is the pre-activation
+  gate + Shadow re-check implementation. Sequencing depends on §F2.3.
+- **M12.1b dropped** — folded into M12.1c.2 (cadence + PSM logging are
+  part of the production-shaped heartbeat, not a separate deliverable).
+- **M11 → M11.1 (algo-side, currently *passing*) / M11.2
+  (deployment-side outcome).**
+- **M14.5 added** — explicit site-survey unit shakedown milestone
+  between feature-complete and clinic ship; includes M11.1 confirmation
+  walk against shipping firmware build.
+- **New M10.7 "Initial production telemetry"** holds storage
+  repartition + nPM1300 fuel gauge + crash forensics — pulled forward
+  from M14 because they're prereqs for the production-shaped heartbeat
+  / no-OTA-safety-net respectively, both required before site-survey
+  ship.
+- **M14 renamed to "Final production telemetry"** — future-work
+  bucket: OTA + unit-4+ hardening.
+
+When this entry says "M12.1c", cloud-side can read it as either `.1` or
+`.2` per context; subsequent firmware entries will use the dotted form
+explicitly.
+
+## F2.6 Next firmware step
+
+Sub-task 0 done. Next: sub-task 1 (cert-flash host script + MQTT/TLS
+bring-up via NCS `aws_iot` lib + first heartbeat publish from real
+firmware on the bench Thingy:91 X using `GS9999999999` cert).
+Estimated 3-5 days. Next firmware milestone entry will post when the
+first real heartbeat from firmware lands in the DDB row (or fails to,
+in which case the §F2.2 baseline gives us a clean half of the bisect).
+
+---
+
+*Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
+
