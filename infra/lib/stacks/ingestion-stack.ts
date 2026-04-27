@@ -73,6 +73,19 @@ export class IngestionStack extends cdk.Stack {
             Action: 'iot:Receive',
             Resource: `arn:aws:iot:${region}:${account}:topic/gs/\${iot:Connection.Thing.ThingName}/*`,
           },
+          // Phase 0A→0B→firmware coord progression added Shadow as the
+          // pre-activation re-check mechanism (DL14, §F.9.4 decided
+          // 2026-04-26). Devices read desired.activated_at on every wake
+          // and write reported.activated_at to confirm device-side persist.
+          // 1A-rev spec §IoT-policy-update Statement B documents this.
+          // Adding here ahead of full 1A-rev deploy so the first 4 dev
+          // certs (GS9999999999 bench + GS0000000001-3 shipping) work
+          // end-to-end with Shadow without waiting for 1A-rev.
+          {
+            Effect: 'Allow',
+            Action: ['iot:GetThingShadow', 'iot:UpdateThingShadow'],
+            Resource: `arn:aws:iot:${region}:${account}:thing/\${iot:Connection.Thing.ThingName}`,
+          },
         ],
       },
     });

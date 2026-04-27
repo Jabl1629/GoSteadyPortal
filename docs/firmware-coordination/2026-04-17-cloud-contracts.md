@@ -1091,3 +1091,130 @@ posts here when first end-to-end traffic flows.
 *Entry owner (cloud side): Jace + Claude. Counter-proposals, blocker
 flags, and milestone updates welcome below.*
 
+---
+---
+
+# Cloud team milestone update — 2026-04-27
+
+> **From:** GoSteady cloud team
+> **Status update on:** §C.4.1 (cert + key delivery) and §C.4.5
+> (manufacturer-side enrollment) commitments from the 2026-04-26 batch.
+>
+> **TL;DR:** Cert + key handoff is **READY** for the firmware engineer.
+> Four cert+key pairs minted, IoT Things created, policies attached,
+> Device Registry rows pre-created. All cloud-side wiring done. Bundle
+> staged locally on Jace's machine; 1Password upload pending (one-time
+> human step). Firmware can plan to receive the 1Password shares
+> shortly.
+
+---
+
+## C2.1 What was minted
+
+Four cert+key pairs, each with its own AWS IoT Thing, all attached to
+the standard `gosteady-dev-device-policy` (per-thing scope via
+`${iot:Connection.Thing.ThingName}`):
+
+| Serial | Purpose | Cert SHA-256 fingerprint (= AWS IoT cert ID) |
+|---|---|---|
+| `GS9999999999` | Bench/test cert — never ships; reusable on firmware-team bench unit forever; from reserved test/dev range | `a17ed9f8c6d1c6365d97fdd9ef774915bd2c0d4fe0bbca90666661fd497bd613` |
+| `GS0000000001` | First site-survey shipping unit | `8351197b8a9d5548853b5031881bf87b9b3339ab38a7c3ca4abadb5366d1ada6` |
+| `GS0000000002` | Second site-survey shipping unit | `21bb9173c8656056a5d26463267caa80e057ac7b99814092c7add77449808186` |
+| `GS0000000003` | Third site-survey shipping unit | `b0d2ef3fe3eb22b0f6b3f8b7c2a201d05a1fb9dc7ffb3de248e03bd4ca321cc9` |
+
+Cert ID = SHA-256 fingerprint (AWS IoT convention). These fingerprints
+are also the values for the firmware-team device-registry CSV's
+`cert_fingerprint` column (per §C.4.5).
+
+## C2.2 Cloud-side wiring verified end-to-end
+
+For each of the 4 serials:
+- IoT Thing created (type `GoSteadyWalkerCap-dev`)
+- Cert + private key minted via `aws iot create-keys-and-certificate`, status ACTIVE
+- `gosteady-dev-device-policy` attached to cert
+- Cert attached to Thing as principal
+- Device Registry row pre-created in `gosteady-dev-devices` with `status: ready_to_provision`, NULL ownership, `certFingerprint` set
+
+Verification command (re-runnable):
+```bash
+for s in GS9999999999 GS0000000001 GS0000000002 GS0000000003; do
+  cert_arn=$(aws iot list-thing-principals --thing-name "$s" \
+    --region us-east-1 --query "principals[0]" --output text)
+  echo "$s -> ${cert_arn##*/}"
+  aws dynamodb get-item --region us-east-1 \
+    --table-name gosteady-dev-devices \
+    --key "{\"serialNumber\":{\"S\":\"$s\"}}" \
+    --query "Item.{status:status.S,fp:certFingerprint.S}"
+done
+```
+
+## C2.3 Policy update worth flagging
+
+The `gosteady-dev-device-policy` was extended with `iot:GetThingShadow`
+and `iot:UpdateThingShadow` on the device's own Thing (per the §F.9.4
+Shadow re-check decision DL14 in `ARCHITECTURE.md`). This was a slice
+of the 1A-revision policy update done early so these 4 dev certs have
+Shadow access from day one without waiting for the full 1A-rev deploy.
+Existing policy permissions (Connect, Publish/Subscribe/Receive on
+`gs/<thing>/*`) are unchanged.
+
+## C2.4 What firmware will receive
+
+Each cert subdirectory in the handoff bundle contains:
+- `<serial>.cert.pem` — public certificate (PEM)
+- `<serial>.private.key` — private key (PEM, mode 0600)
+- `<serial>.public.key` — public key (PEM, reference only)
+- `<serial>.README.txt` — per-device handoff notes
+
+Plus at the bundle root:
+- `AmazonRootCA1.pem` — AWS IoT Core server-cert chain anchor
+- `MANIFEST.csv` — `serial,cert_fingerprint_sha256,flash_date,firmware_version,notes` rows ready to drop into the firmware-team device-registry CSV (per §C.4.5)
+- `README.txt` — top-level bundle summary
+
+## C2.5 1Password handoff — pending human step
+
+The bundle is staged at `~/Desktop/gosteady-firmware-cert-handoff-2026-04-27/` on Jace's machine. Next step is a one-time human action (cloud team can't automate 1Password upload):
+
+1. Upload each of the 4 subdirectories to a separate 1Password shared item, named by serial (e.g. "GoSteady cert / GS0000000001"), 7-day expiry
+2. Share each item with the firmware engineer
+3. Notify firmware via Slack with the share links
+
+Once delivered, firmware is unblocked on M12.1c (first heartbeat publish from the bench unit using `GS9999999999` cert).
+
+## C2.6 Endpoint + Root CA reminders (already in §C.4.2 / §C.4.1)
+
+For convenience (firmware engineer can paste these into their Kconfig / build):
+
+- **IoT MQTT endpoint:** `a2dl73jkjzv6h5-ats.iot.us-east-1.amazonaws.com`
+- **Port:** `8883` (MQTT-over-TLS)
+- **Pinned root CA:** Amazon Root CA 1
+  (`https://www.amazontrust.com/repository/AmazonRootCA1.pem` — also bundled as `AmazonRootCA1.pem` in this handoff)
+- **AWS account:** `460223323193` (dev)
+- **Region:** `us-east-1`
+
+## C2.7 Cleanup / lifecycle
+
+Once firmware confirms successful flash + first heartbeat for each cert:
+- 1Password shared items get deleted (they auto-expire at 7 days regardless)
+- Local bundle on Jace's machine deleted (private keys are NOT recoverable from cloud — they only exist on-device after flash)
+- Cert + Thing + Device Registry rows on AWS side persist (these are the operational records)
+
+If a private key is lost or compromised before flash:
+- Mark cert INACTIVE: `aws iot update-certificate --certificate-id <id> --new-status INACTIVE`
+- Detach + delete cert + Thing + DDB row
+- Mint a fresh cert pair using the same serial
+- Re-share via 1Password
+
+## C2.8 Cadence note
+
+This is a milestone update inside the existing 2026-04-26 conversation
+batch — no firmware-side action expected on the doc itself. Firmware
+engineer just acks the 1Password share when they receive it via Slack.
+
+Next coordination batch trigger remains the same: site-survey unit
+cellular shakedown + first heartbeat in cloud (firmware M12.1c).
+
+---
+
+*Entry owner (cloud side): Jace + Claude.*
+
