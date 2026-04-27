@@ -150,6 +150,7 @@ export class IngestionStack extends cdk.Stack {
     processingStack.activityProcessor.grantInvoke(ruleRole);
     processingStack.heartbeatProcessor.grantInvoke(ruleRole);
     processingStack.alertHandler.grantInvoke(ruleRole);
+    processingStack.thresholdDetector.grantInvoke(ruleRole);
 
     // Also grant Lambda resource-based policy for IoT invocation
     processingStack.activityProcessor.addPermission('IotInvoke', {
@@ -161,6 +162,10 @@ export class IngestionStack extends cdk.Stack {
       sourceArn: `arn:aws:iot:${region}:${account}:rule/gosteady_${p}_*`,
     });
     processingStack.alertHandler.addPermission('IotInvoke', {
+      principal: new iam.ServicePrincipal('iot.amazonaws.com'),
+      sourceArn: `arn:aws:iot:${region}:${account}:rule/gosteady_${p}_*`,
+    });
+    processingStack.thresholdDetector.addPermission('IotInvoke', {
       principal: new iam.ServicePrincipal('iot.amazonaws.com'),
       sourceArn: `arn:aws:iot:${region}:${account}:rule/gosteady_${p}_*`,
     });
@@ -218,6 +223,40 @@ export class IngestionStack extends cdk.Stack {
           {
             lambda: {
               functionArn: processingStack.alertHandler.functionArn,
+            },
+          },
+        ],
+        errorAction,
+      },
+    });
+
+    // ── Topic Rule: Shadow Update (Phase 1B revision) ────────────
+    // Triggers Threshold Detector on every Shadow update.
+    //
+    // Topic note: subscribes to `update/documents` (not `update/accepted`).
+    // `update/documents` carries both `current` and `previous` full-state
+    // documents, which is what the SQL projects. The phase-1b-revision
+    // spec's SQL block paired `current.*`/`previous.*` with the
+    // `update/accepted` topic — that's an internal inconsistency in the
+    // spec; `update/accepted` only carries the merged delta as a flat
+    // `state.reported` object, not the `current`/`previous` shape.
+    // Resolved 2026-04-27 during deploy verification.
+    new iot.CfnTopicRule(this, 'ShadowUpdateRule', {
+      ruleName: `gosteady_${p}_shadow_update`,
+      topicRulePayload: {
+        description: 'Routes Shadow update/documents events to Threshold Detector',
+        sql:
+          'SELECT current.state.reported AS reported, ' +
+          'previous.state.reported AS previous_reported, ' +
+          'topic(3) AS thingName, ' +
+          'timestamp() AS rule_ts_ms ' +
+          "FROM '$aws/things/+/shadow/update/documents'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        actions: [
+          {
+            lambda: {
+              functionArn: processingStack.thresholdDetector.functionArn,
             },
           },
         ],

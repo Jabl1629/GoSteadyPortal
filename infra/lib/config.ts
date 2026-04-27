@@ -94,6 +94,26 @@ export interface GoSteadyEnvConfig {
    * SnippetParser Lambda timeout (Phase 1A revision §Configuration).
    */
   readonly snippetParserTimeoutSeconds: number;
+  /**
+   * Activity / threshold-detector / alert-handler memory (Phase 1B revision §Configuration).
+   */
+  readonly processingLambdaMemoryMb: number;
+  /**
+   * Heartbeat-processor memory — slimmed handler, less memory needed (Phase 1B revision).
+   */
+  readonly processingHeartbeatMemoryMb: number;
+  /**
+   * Common timeout for processing handlers (Phase 1B revision).
+   */
+  readonly processingLambdaTimeoutSeconds: number;
+  /**
+   * Activation-ack `last_cmd_id` matching window in hours (DL14a / firmware coord §F.2).
+   */
+  readonly activationAckWindowHours: number;
+  /**
+   * Pre-activation audit log sampling cadence in hours per serial (Phase 1B revision L8).
+   */
+  readonly preActivationAuditSampleHours: number;
 }
 
 /**
@@ -123,6 +143,11 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     snippetTotalRetentionDays: 395,
     snippetParserMemoryMb: 256,
     snippetParserTimeoutSeconds: 30,
+    processingLambdaMemoryMb: 256,
+    processingHeartbeatMemoryMb: 128,
+    processingLambdaTimeoutSeconds: 30,
+    activationAckWindowHours: 24,
+    preActivationAuditSampleHours: 1,
   },
   prod: {
     envName: 'Production',
@@ -147,5 +172,10 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     snippetTotalRetentionDays: 395,
     snippetParserMemoryMb: 256,
     snippetParserTimeoutSeconds: 30,
+    processingLambdaMemoryMb: 256,
+    processingHeartbeatMemoryMb: 128,
+    processingLambdaTimeoutSeconds: 30,
+    activationAckWindowHours: 24,
+    preActivationAuditSampleHours: 1,
   },
 };

@@ -1,61 +1,56 @@
 """
-Alert Handler Lambda — Phase 1B
+Alert Handler Lambda — Phase 1B revision
 
 Triggered by: IoT Rule on gs/+/alert
-IoT Rule SQL:  SELECT *, topic(2) AS thingName FROM 'gs/+/alert'
+IoT Rule SQL: SELECT *, topic(2) AS thingName FROM 'gs/+/alert'
 
-Expected payload (event-driven):
-{
-    "serial": "GS0000001234",
-    "ts": "2026-04-15T14:10:32Z",
-    "alert_type": "tipover",
-    "severity": "critical",
-    "data": {
-        "accel_g": 2.3,
-        "orientation": "horizontal",
-        "duration_s": 5
-    },
-    "thingName": "GS0000001234"    <-- injected by IoT Rule SQL
-}
-
-Responsibilities (Phase 1B):
-  1. Validate payload (alert_type + severity enum, ts parse).
-  2. Look up walkerUserId on the device registry (may be null
-     pre-activation — alert still recorded, just not routable yet).
-  3. Conditional PutItem with compound SK ({ts}#{alert_type}) so
-     two alerts in the same second don't overwrite each other, and
-     MQTT retries remain idempotent.
-  4. source="device" (vs "cloud" for synthetic threshold alerts).
-
-Non-goals (deferred):
-  - EventBridge fan-out / SNS / SMS dispatch → Phase 2C.
-  - Caregiver relationship lookup + notification → Phase 2C.
+Phase 1B revision changes (vs deployed Phase 1B original):
+  - Patient-centric PK on Alert table (PK=patientId, SK=`{eventTs}#{alertType}`).
+  - Hierarchy snapshot (clientId/facilityId/censusId) frozen at write time
+    per S6 / T4.
+  - `expiresAt` TTL column (epoch seconds, eventTimestamp + 24 months).
+  - Powertools structured logging + metrics + audit emission.
+  - ARM64 runtime per G7.
+  - source="device" (synthetic alerts go through threshold-detector with
+    source="cloud").
 """
 
-import json
+from __future__ import annotations
+
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
 
+from _shared import (
+    PatientContext,
+    emit_audit,
+    get_logger,
+    get_metrics,
+    resolve_patient,
+)
+from aws_lambda_powertools.metrics import MetricUnit
+
 # ── Configuration ────────────────────────────────────────────────
 ALERT_TABLE = os.environ["ALERT_TABLE"]
-DEVICE_TABLE = os.environ["DEVICE_TABLE"]
+
+# 24 months on Alerts (L5 / 0B-rev D2).
+ALERT_TTL_SECONDS = 24 * 30 * 86_400
 
 VALID_ALERT_TYPES = {"tipover", "fall", "impact"}
 VALID_SEVERITIES = {"critical", "warning", "info"}
-
 REQUIRED_FIELDS = ("ts", "alert_type", "severity")
 
-# ── AWS clients ──────────────────────────────────────────────────
+logger = get_logger()
+metrics = get_metrics()
+
 _ddb = boto3.resource("dynamodb")
 _alert_tbl = _ddb.Table(ALERT_TABLE)
-_device_tbl = _ddb.Table(DEVICE_TABLE)
 
 
-# ── Helpers ──────────────────────────────────────────────────────
 def _parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
@@ -75,22 +70,8 @@ def _validate(event: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _lookup_walker(serial: str) -> str | None:
-    try:
-        dev = _device_tbl.get_item(Key={"serialNumber": serial}).get("Item") or {}
-        return dev.get("walkerUserId")
-    except ClientError as e:
-        print(f"[ALERT] walker lookup failed for {serial}: {e}")
-        return None
-
-
-def _to_ddb_safe(value):
-    """
-    Recursively convert Python floats to Decimal for DynamoDB.
-    boto3's high-level resource rejects raw floats but accepts Decimal.
-    Devices send arbitrary nested `data` dicts, so we sanitise here
-    rather than forcing the firmware team to be Decimal-aware.
-    """
+def _to_ddb_safe(value: Any) -> Any:
+    """Recursive float→Decimal sanitization for DynamoDB."""
     if isinstance(value, float):
         return Decimal(str(value))
     if isinstance(value, dict):
@@ -100,58 +81,102 @@ def _to_ddb_safe(value):
     return value
 
 
-# ── Handler ──────────────────────────────────────────────────────
-def handler(event, context):
+@logger.inject_lambda_context(log_event=False, correlation_id_path="thingName")
+@metrics.log_metrics(capture_cold_start_metric=True)
+def handler(event: dict, _context):
     serial = event.get("serial") or event.get("thingName") or "UNKNOWN"
 
     ok, reason = _validate(event)
     if not ok:
-        print(f"[ALERT][REJECT] serial={serial} reason={reason} event={json.dumps(event)}")
+        logger.warning("alert_reject", extra={"serial": serial, "reason": reason})
+        metrics.add_metric(name="alert_reject_count", unit=MetricUnit.Count, value=1)
         return {"statusCode": 400, "body": f"invalid payload: {reason}"}
+
+    patient: PatientContext | None = resolve_patient(serial)
+    if patient is None:
+        logger.warning(
+            "unmapped_serial",
+            extra={"serial": serial, "stage": "alert-handler"},
+        )
+        metrics.add_metric(name="unmapped_serial_count", unit=MetricUnit.Count, value=1)
+        return {"statusCode": 200, "body": "no active assignment; dropped"}
 
     ts = _parse_iso(event["ts"])
     ts_iso = ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     alert_type = event["alert_type"]
     severity = event["severity"]
-
-    walker_id = _lookup_walker(serial)
-
     sk = f"{ts_iso}#{alert_type}"
-    item: dict = {
-        "serialNumber": serial,
+    expires_at = int(ts.astimezone(timezone.utc).timestamp()) + ALERT_TTL_SECONDS
+
+    item: dict[str, Any] = {
+        "patientId": patient.patientId,
         "timestamp": sk,
+        "deviceSerial": serial,
+        "clientId": patient.clientId,
+        "facilityId": patient.facilityId,
+        "censusId": patient.censusId,
         "eventTimestamp": ts_iso,
         "alertType": alert_type,
         "severity": severity,
         "source": "device",
         "acknowledged": False,
         "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "expiresAt": expires_at,
     }
-    if walker_id:
-        item["walkerUserId"] = walker_id
+
     if isinstance(event.get("data"), dict):
-        # Pass-through — frontend/caregiver app decides how to render.
-        # Floats in nested dicts must become Decimal for DynamoDB.
         item["data"] = _to_ddb_safe(event["data"])
 
     try:
         _alert_tbl.put_item(
             Item=item,
-            ConditionExpression="attribute_not_exists(serialNumber) AND attribute_not_exists(#ts)",
+            ConditionExpression="attribute_not_exists(patientId) AND attribute_not_exists(#ts)",
             ExpressionAttributeNames={"#ts": "timestamp"},
-        )
-        print(
-            f"[ALERT][OK] serial={serial} type={alert_type} sev={severity} "
-            f"ts={ts_iso} walker={walker_id}"
         )
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            print(f"[ALERT][DUP] serial={serial} sk={sk} — already recorded")
+            logger.info(
+                "alert_duplicate",
+                extra={
+                    "serial": serial,
+                    "patientId": patient.patientId,
+                    "alertType": alert_type,
+                    "sk": sk,
+                },
+            )
             return {"statusCode": 200, "body": "duplicate alert ignored"}
-        print(f"[ALERT][ERROR] serial={serial} {e}")
+        logger.exception("alert_write_failed", extra={"serial": serial, "alertType": alert_type})
+        metrics.add_metric(name="alert_write_error_count", unit=MetricUnit.Count, value=1)
         raise
 
+    metrics.add_metric(name="device_alert_count", unit=MetricUnit.Count, value=1)
+    metrics.add_metadata(key="alert_type", value=alert_type)
+    emit_audit(
+        "alert.device.create",
+        subject={
+            "patientId": patient.patientId,
+            "clientId": patient.clientId,
+            "censusId": patient.censusId,
+            "deviceSerial": serial,
+        },
+        action="create",
+        after={
+            "alertType": alert_type,
+            "severity": severity,
+            "eventTimestamp": ts_iso,
+        },
+    )
+
+    logger.info(
+        "alert_ok",
+        extra={
+            "serial": serial,
+            "patientId": patient.patientId,
+            "alertType": alert_type,
+            "severity": severity,
+        },
+    )
     return {
         "statusCode": 200,
-        "body": f"Alert recorded for {serial}: {alert_type} ({severity})",
+        "body": f"alert recorded for patient={patient.patientId} type={alert_type}",
     }

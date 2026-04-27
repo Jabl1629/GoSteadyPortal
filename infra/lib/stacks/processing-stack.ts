@@ -1,13 +1,14 @@
 import * as cdk from 'aws-cdk-lib/core';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as logs from 'aws-cdk-lib/aws-logs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as kms from 'aws-cdk-lib/aws-kms';
 import * as path from 'path';
 import { Construct } from 'constructs';
 import { GoSteadyEnvConfig } from '../config.js';
 import { DataStack } from './data-stack.js';
-// Note: @aws-cdk/aws-lambda:useCdkManagedLogGroup is true in cdk.json
-// so CDK auto-creates log groups — we use logRetention instead of explicit LogGroup
+import { SecurityStack } from './security-stack.js';
+import { ProcessingLambda } from '../constructs/processing-lambda.js';
 
 export interface ProcessingStackProps extends cdk.StackProps {
   readonly config: GoSteadyEnvConfig;
@@ -20,115 +21,177 @@ export interface ProcessingStackProps extends cdk.StackProps {
    * Phase 0B revision §Implementation note.
    */
   readonly dataStack: DataStack;
+  /**
+   * SecurityStack provides the IdentityKey CMK ARN (via cross-stack output)
+   * so handlers that read CMK-encrypted Patients / DeviceAssignments can
+   * be granted `kms:Decrypt` + `kms:GenerateDataKey`. Phase 1B revision L15
+   * narrowed to actual readers (heartbeat-processor doesn't read those tables).
+   */
+  readonly securityStack: SecurityStack;
 }
 
 /**
  * Processing — Lambda functions that validate, transform, and react
  * to incoming device data.
  *
- * Deployed before Ingestion so IoT Rules can reference these Lambdas.
+ * Phase 1B revision (2026-04-27): patient-centric refactor.
+ *   - activity-processor: ARM64 + Powertools + patient resolution + hierarchy snapshot
+ *   - heartbeat-processor: slimmed to Shadow update + activation-ack only
+ *   - threshold-detector: NEW Lambda triggered by Shadow update/accepted IoT Rule
+ *     (replaces heartbeat-processor's threshold-checking role)
+ *   - alert-handler: ARM64 + Powertools + patient resolution + hierarchy snapshot
  *
- * Phase 0B revision (2026-04-27): table references switched from
- * `dataStack.<table>` (cross-stack imports) to `Table.fromTableName`
- * (synthesized ARNs from env-prefix conventions). This decouples
- * Processing from DataStack at the CFN level — Data can recreate
- * tables without orphaning Processing's imports.
+ * Deployed before Ingestion so IoT Rules can reference these Lambdas.
  */
 export class ProcessingStack extends cdk.Stack {
   public readonly activityProcessor: lambda.Function;
   public readonly heartbeatProcessor: lambda.Function;
+  public readonly thresholdDetector: lambda.Function;
   public readonly alertHandler: lambda.Function;
 
   constructor(scope: Construct, id: string, props: ProcessingStackProps) {
     super(scope, id, props);
 
-    const { config } = props;
+    const { config, securityStack } = props;
     const p = config.prefix;
+    const account = cdk.Stack.of(this).account;
+    const region = cdk.Stack.of(this).region;
 
     const lambdaDir = path.join(__dirname, '..', '..', 'lambda');
 
     // ── Table references via fromTableName ────────────────────────
-    // Decouples Processing from DataStack at the CFN level. Table names
-    // follow the env-prefix convention `gosteady-${p}-<suffix>`.
+    // Phase 0B revision: refs decoupled from DataStack at the CFN level.
     const deviceTable = dynamodb.Table.fromTableName(this, 'DeviceTableRef', `gosteady-${p}-devices`);
     const activityTable = dynamodb.Table.fromTableName(this, 'ActivityTableRef', `gosteady-${p}-activity`);
     const alertTable = dynamodb.Table.fromTableName(this, 'AlertTableRef', `gosteady-${p}-alerts`);
+    const patientsTable = dynamodb.Table.fromTableName(this, 'PatientsTableRef', `gosteady-${p}-patients`);
+    const deviceAssignmentsTable = dynamodb.Table.fromTableName(
+      this,
+      'DeviceAssignmentsTableRef',
+      `gosteady-${p}-device-assignments`,
+    );
 
-    // ── Shared Lambda config ─────────────────────────────────────
-    // Phase 0B revision (2026-04-27): user-profiles table dropped.
-    // The legacy USER_PROFILE_TABLE env var is removed. Old handlers
-    // that read USER_PROFILE_TABLE will fail at runtime — this is
-    // expected and intentional per the spec dependency note: handlers
-    // are retargeted at the new tables (Patients, DeviceAssignments,
-    // Organizations) in Phase 1B revision. New env vars below are
-    // forward-looking for the 1B revision retargeting.
-    const commonEnv: Record<string, string> = {
+    // ── IdentityKey CMK reference ─────────────────────────────────
+    // Imported by ARN so handlers that read CMK-encrypted Patients /
+    // DeviceAssignments tables can be granted Decrypt + GenerateDataKey.
+    const identityKey = kms.Key.fromKeyArn(
+      this,
+      'IdentityKeyRef',
+      securityStack.identityKey.keyArn,
+    );
+
+    // ── Shared Lambda environment ─────────────────────────────────
+    const commonEnv = {
       DEVICE_TABLE: deviceTable.tableName,
       ACTIVITY_TABLE: activityTable.tableName,
       ALERT_TABLE: alertTable.tableName,
-      // Forward-looking for Phase 1B revision (post-0B):
-      PATIENTS_TABLE: `gosteady-${p}-patients`,
-      USERS_TABLE: `gosteady-${p}-users`,
-      ORGANIZATIONS_TABLE: `gosteady-${p}-organizations`,
-      DEVICE_ASSIGNMENTS_TABLE: `gosteady-${p}-device-assignments`,
+      PATIENTS_TABLE: patientsTable.tableName,
+      DEVICE_ASSIGNMENTS_TABLE: deviceAssignmentsTable.tableName,
       ENVIRONMENT: p,
     };
 
-    // ── Activity Processor Lambda ────────────────────────────────
-    this.activityProcessor = new lambda.Function(this, 'ActivityProcessor', {
+    // ── Activity Processor (refactored) ──────────────────────────
+    const activityProc = new ProcessingLambda(this, 'ActivityProcessor', {
+      config,
       functionName: `gosteady-${p}-activity-processor`,
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'handler.handler',
-      code: lambda.Code.fromAsset(path.join(lambdaDir, 'activity-processor')),
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 256,
+      handlerDir: path.join(lambdaDir, 'activity-processor'),
+      description: 'Phase 1B revision: patient-centric activity ingest with hierarchy snapshot',
+      memoryMb: config.processingLambdaMemoryMb,
+      timeoutSeconds: config.processingLambdaTimeoutSeconds,
       environment: commonEnv,
-      description: 'Processes activity session payloads from IoT Core',
-      logRetention: logs.RetentionDays.ONE_MONTH,
     });
+    this.activityProcessor = activityProc.function;
+    // Preserve pre-1B-revision CFN logical ID so CFN does an in-place
+    // UPDATE rather than CREATE+DELETE (Lambda names are region-unique
+    // and the CREATE-new-before-DELETE-old order would otherwise collide).
+    (this.activityProcessor.node.defaultChild as cdk.CfnResource).overrideLogicalId(
+      'ActivityProcessor38C14121',
+    );
 
-    // Grant DynamoDB access (Phase 0B revision adjustments):
-    // - activity table: write sessions
-    // - device table: look up serial → assignment chain
-    // - user-profile table: REMOVED (table no longer exists post-0B revision)
-    // Phase 1B revision will add: kms:Decrypt on IdentityKey + read on
-    // Patients + Query on DeviceAssignments for the patient-resolution path.
-    activityTable.grantReadWriteData(this.activityProcessor);
-    deviceTable.grantReadData(this.activityProcessor);
+    activityTable.grantWriteData(this.activityProcessor);
+    deviceAssignmentsTable.grantReadData(this.activityProcessor);
+    patientsTable.grantReadData(this.activityProcessor);
+    identityKey.grantDecrypt(this.activityProcessor);
+    identityKey.grant(this.activityProcessor, 'kms:GenerateDataKey');
 
-    // ── Heartbeat Processor Lambda ───────────────────────────────
-    this.heartbeatProcessor = new lambda.Function(this, 'HeartbeatProcessor', {
+    // ── Heartbeat Processor (slimmed) ────────────────────────────
+    const heartbeatProc = new ProcessingLambda(this, 'HeartbeatProcessor', {
+      config,
       functionName: `gosteady-${p}-heartbeat-processor`,
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'handler.handler',
-      code: lambda.Code.fromAsset(path.join(lambdaDir, 'heartbeat-processor')),
-      timeout: cdk.Duration.seconds(15),
-      memorySize: 128,
-      environment: commonEnv,
-      description: 'Processes device heartbeat payloads from IoT Core',
-      logRetention: logs.RetentionDays.ONE_MONTH,
+      handlerDir: path.join(lambdaDir, 'heartbeat-processor'),
+      description: 'Phase 1B revision: Shadow update + activation-ack only (slim)',
+      memoryMb: config.processingHeartbeatMemoryMb,
+      timeoutSeconds: config.processingLambdaTimeoutSeconds,
+      environment: {
+        ...commonEnv,
+        ACTIVATION_ACK_WINDOW_HOURS: String(config.activationAckWindowHours),
+      },
     });
+    this.heartbeatProcessor = heartbeatProc.function;
 
-    // - device table: update battery/signal/last_seen
-    // - alert table: write synthetic alerts (battery/signal thresholds)
+    (this.heartbeatProcessor.node.defaultChild as cdk.CfnResource).overrideLogicalId(
+      'HeartbeatProcessorCDD753A4',
+    );
+
     deviceTable.grantReadWriteData(this.heartbeatProcessor);
-    alertTable.grantWriteData(this.heartbeatProcessor);
+    // Shadow update for Shadow.reported writes; targets the device's own thing
+    this.heartbeatProcessor.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ShadowUpdateOnAnyThing',
+        actions: ['iot:UpdateThingShadow'],
+        resources: [`arn:aws:iot:${region}:${account}:thing/*`],
+      }),
+    );
 
-    // ── Alert Handler Lambda ─────────────────────────────────────
-    this.alertHandler = new lambda.Function(this, 'AlertHandler', {
-      functionName: `gosteady-${p}-alert-handler`,
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'handler.handler',
-      code: lambda.Code.fromAsset(path.join(lambdaDir, 'alert-handler')),
-      timeout: cdk.Duration.seconds(15),
-      memorySize: 128,
-      environment: commonEnv,
-      description: 'Processes alert events (tip-over, fall) from IoT Core',
-      logRetention: logs.RetentionDays.ONE_MONTH,
+    // ── Threshold Detector (NEW) ─────────────────────────────────
+    const thresholdDet = new ProcessingLambda(this, 'ThresholdDetector', {
+      config,
+      functionName: `gosteady-${p}-threshold-detector`,
+      handlerDir: path.join(lambdaDir, 'threshold-detector'),
+      description: 'Phase 1B revision: synthetic alerts from Shadow update/accepted',
+      memoryMb: config.processingLambdaMemoryMb,
+      timeoutSeconds: config.processingLambdaTimeoutSeconds,
+      environment: {
+        ...commonEnv,
+        PRE_ACTIVATION_AUDIT_SAMPLE_HOURS: String(config.preActivationAuditSampleHours),
+      },
     });
+    this.thresholdDetector = thresholdDet.function;
 
-    alertTable.grantReadWriteData(this.alertHandler);
-    deviceTable.grantReadData(this.alertHandler);
+    deviceTable.grantReadData(this.thresholdDetector);
+    alertTable.grantWriteData(this.thresholdDetector);
+    deviceAssignmentsTable.grantReadData(this.thresholdDetector);
+    patientsTable.grantReadData(this.thresholdDetector);
+    identityKey.grantDecrypt(this.thresholdDetector);
+    identityKey.grant(this.thresholdDetector, 'kms:GenerateDataKey');
+    this.thresholdDetector.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ShadowGetAndUpdateOnAnyThing',
+        actions: ['iot:GetThingShadow', 'iot:UpdateThingShadow'],
+        resources: [`arn:aws:iot:${region}:${account}:thing/*`],
+      }),
+    );
+
+    // ── Alert Handler (refactored) ───────────────────────────────
+    const alertHand = new ProcessingLambda(this, 'AlertHandler', {
+      config,
+      functionName: `gosteady-${p}-alert-handler`,
+      handlerDir: path.join(lambdaDir, 'alert-handler'),
+      description: 'Phase 1B revision: patient-centric device alert ingest with hierarchy snapshot',
+      memoryMb: config.processingLambdaMemoryMb,
+      timeoutSeconds: config.processingLambdaTimeoutSeconds,
+      environment: commonEnv,
+    });
+    this.alertHandler = alertHand.function;
+    (this.alertHandler.node.defaultChild as cdk.CfnResource).overrideLogicalId(
+      'AlertHandler13C27ADA',
+    );
+
+    alertTable.grantWriteData(this.alertHandler);
+    deviceAssignmentsTable.grantReadData(this.alertHandler);
+    patientsTable.grantReadData(this.alertHandler);
+    identityKey.grantDecrypt(this.alertHandler);
+    identityKey.grant(this.alertHandler, 'kms:GenerateDataKey');
 
     // ── Outputs ──────────────────────────────────────────────────
     new cdk.CfnOutput(this, 'ActivityProcessorArn', {
@@ -138,6 +201,10 @@ export class ProcessingStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'HeartbeatProcessorArn', {
       value: this.heartbeatProcessor.functionArn,
       exportName: `${p}-HeartbeatProcessorArn`,
+    });
+    new cdk.CfnOutput(this, 'ThresholdDetectorArn', {
+      value: this.thresholdDetector.functionArn,
+      exportName: `${p}-ThresholdDetectorArn`,
     });
     new cdk.CfnOutput(this, 'AlertHandlerArn', {
       value: this.alertHandler.functionArn,

@@ -1,71 +1,54 @@
 """
-Heartbeat Processor Lambda — Phase 1B
+Heartbeat Processor Lambda — Phase 1B revision (slim)
 
 Triggered by: IoT Rule on gs/+/heartbeat
-IoT Rule SQL:  SELECT *, topic(2) AS thingName FROM 'gs/+/heartbeat'
+IoT Rule SQL: SELECT *, topic(2) AS thingName FROM 'gs/+/heartbeat'
 
-Expected payload (~hourly):
-{
-    "serial": "GS0000001234",
-    "ts": "2026-04-15T14:00:00Z",
-    "battery_mv": 3850,
-    "battery_pct": 0.72,
-    "rsrp_dbm": -87,
-    "snr_db": 12.5,
-    "firmware": "1.2.0",
-    "uptime_s": 86400,
-    "thingName": "GS0000001234"    <-- injected by IoT Rule SQL
-}
-
-Responsibilities (Phase 1B):
-  1. Validate payload (reject + log if malformed).
-  2. Partial UpdateItem on the device registry:
-       lastSeen, batteryPct, batteryMv, rsrpDbm, snrDb,
-       firmwareVersion, uptimeS, lastHeartbeatAt.
-     UpdateItem (not PutItem) preserves walkerUserId, provisionedAt,
-     and any other attributes set by other flows.
-  3. Threshold checks — write synthetic alerts to the alert table:
-       batteryPct < 0.05                → battery_critical / critical
-       batteryPct < 0.10                → battery_low      / warning
-       rsrp_dbm  <= -120                → signal_lost      / warning
-       rsrp_dbm  <= -110                → signal_weak      / info
-     Synthetic alerts have source="cloud" (device-generated use "device").
-     Compound SK ({ts}#{alert_type}) prevents collisions when a single
-     heartbeat trips multiple thresholds.
-
-Non-goals (deferred):
-  - Offline / no-heartbeat detection → scheduled sweep in Phase 2.
-  - EventBridge fan-out              → Phase 2C.
+Phase 1B revision changes (vs deployed Phase 1B original):
+  - NO DDB writes on routine heartbeat — Shadow.reported is the canonical
+    live-state store per architecture P5.
+  - NO threshold detection — moved to the new threshold-detector Lambda
+    triggered by Shadow update/accepted (D1).
+  - NO synthetic alerts here.
+  - Activation-ack path: when the heartbeat carries `last_cmd_id`, look
+    up Device Registry's `outstandingActivationCmds` map (populated by
+    Phase 2A device-api Lambda); if a non-expired entry matches within
+    the 24 h window (DL14a / L9), set `Device Registry.activated_at` via
+    conditional UpdateItem and emit a `device.activated` audit event.
+    Until Phase 2A lands, the map is empty and this path is dormant.
+  - All extras (reset_reason, fault_counters, watchdog_hits, etc.) flow
+    into Shadow.reported as-given per D14 / D16 accept-all contract.
 """
+
+from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
 
+from _shared import audit_logger, emit_audit, get_logger, get_metrics
+from aws_lambda_powertools.metrics import MetricUnit
+
 # ── Configuration ────────────────────────────────────────────────
 DEVICE_TABLE = os.environ["DEVICE_TABLE"]
-ALERT_TABLE = os.environ["ALERT_TABLE"]
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "dev")
+ACK_WINDOW_HOURS = int(os.environ.get("ACTIVATION_ACK_WINDOW_HOURS", "24"))
 
-# Thresholds — see Phase 1B spec decision log.
-BATTERY_CRITICAL = 0.05
-BATTERY_LOW = 0.10
-RSRP_LOST = -120
-RSRP_WEAK = -110
-
-# Validation bounds chosen from nRF9151 datasheet + chemistry limits.
 REQUIRED_FIELDS = ("ts", "battery_pct", "rsrp_dbm", "snr_db")
 
-# ── AWS clients ──────────────────────────────────────────────────
+logger = get_logger()
+metrics = get_metrics()
+
+_iot_data = boto3.client("iot-data")
 _ddb = boto3.resource("dynamodb")
 _device_tbl = _ddb.Table(DEVICE_TABLE)
-_alert_tbl = _ddb.Table(ALERT_TABLE)
 
 
-# ── Helpers ──────────────────────────────────────────────────────
 def _parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
@@ -93,141 +76,141 @@ def _validate(event: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _determine_alerts(battery_pct: float, rsrp: float) -> list[tuple[str, str]]:
+def _shadow_reported(event: dict) -> dict[str, Any]:
     """
-    Return list of (alert_type, severity) to emit for this heartbeat.
-    Only the most severe tier per dimension fires (critical suppresses low).
+    Build the Shadow.reported payload from the heartbeat — accept all fields
+    per D16. JSON-serializable types only (no Decimal); Shadow stores numbers
+    natively.
     """
-    alerts: list[tuple[str, str]] = []
-    if battery_pct < BATTERY_CRITICAL:
-        alerts.append(("battery_critical", "critical"))
-    elif battery_pct < BATTERY_LOW:
-        alerts.append(("battery_low", "warning"))
-    if rsrp <= RSRP_LOST:
-        alerts.append(("signal_lost", "warning"))
-    elif rsrp <= RSRP_WEAK:
-        alerts.append(("signal_weak", "info"))
-    return alerts
-
-
-def _write_synthetic_alert(
-    serial: str,
-    walker_id: str | None,
-    ts_iso: str,
-    alert_type: str,
-    severity: str,
-    snapshot: dict,
-) -> None:
-    """
-    Best-effort write — conditional on the compound SK not existing.
-    Failures are logged but NEVER re-raised: a DDB hiccup on an alert
-    must not cause the heartbeat Lambda to retry and double-update
-    the device registry.
-    """
-    sk = f"{ts_iso}#{alert_type}"
-    item = {
-        "serialNumber": serial,
-        "timestamp": sk,
-        "eventTimestamp": ts_iso,
-        "alertType": alert_type,
-        "severity": severity,
-        "source": "cloud",
-        "acknowledged": False,
-        "data": snapshot,
-        "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    SKIP = {"thingName"}
+    reported: dict[str, Any] = {
+        k: v for k, v in event.items() if k not in SKIP
     }
-    if walker_id:
-        item["walkerUserId"] = walker_id
+    reported["lastSeen"] = event["ts"]
+    return reported
+
+
+def _try_activation_ack(serial: str, last_cmd_id: str, heartbeat_ts: datetime) -> bool:
+    """
+    Look up Device Registry's `outstandingActivationCmds` map; if any entry
+    matches `last_cmd_id` within the last ACK_WINDOW_HOURS, set
+    `activated_at` via conditional UpdateItem (idempotent — only succeeds
+    on first ack). Returns True if activation was recorded this invocation.
+
+    Until Phase 2A `device-api` Lambda starts populating the map, this path
+    is dormant. Heartbeats with `last_cmd_id` set but no matching cmd land
+    a structured warning so ops sees the discrepancy if it ever happens
+    in a real device flow.
+    """
     try:
-        _alert_tbl.put_item(
-            Item=item,
-            ConditionExpression="attribute_not_exists(serialNumber) AND attribute_not_exists(#ts)",
-            ExpressionAttributeNames={"#ts": "timestamp"},
+        item = _device_tbl.get_item(Key={"serialNumber": serial}).get("Item") or {}
+    except ClientError as e:
+        logger.exception("activation_ack_lookup_failed", extra={"serial": serial, "error": str(e)})
+        return False
+
+    outstanding: dict[str, str] = item.get("outstandingActivationCmds") or {}
+    cutoff = heartbeat_ts - timedelta(hours=ACK_WINDOW_HOURS)
+
+    matched_issued_at: str | None = None
+    for cmd_id, issued_iso in outstanding.items():
+        if cmd_id != last_cmd_id:
+            continue
+        try:
+            issued_at = _parse_iso(str(issued_iso))
+        except (TypeError, ValueError):
+            continue
+        if issued_at >= cutoff:
+            matched_issued_at = str(issued_iso)
+            break
+
+    if matched_issued_at is None:
+        if outstanding:
+            logger.warning(
+                "activation_ack_no_match",
+                extra={
+                    "serial": serial,
+                    "last_cmd_id": last_cmd_id,
+                    "outstanding_count": len(outstanding),
+                },
+            )
+        else:
+            # Phase 2A hasn't shipped yet — this is the expected dormant state.
+            logger.info(
+                "heartbeat_with_unknown_cmd_id",
+                extra={"serial": serial, "last_cmd_id": last_cmd_id},
+            )
+        return False
+
+    activated_iso = heartbeat_ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        _device_tbl.update_item(
+            Key={"serialNumber": serial},
+            UpdateExpression=(
+                "SET activated_at = :a "
+                "REMOVE outstandingActivationCmds.#cid"
+            ),
+            ConditionExpression="attribute_not_exists(activated_at)",
+            ExpressionAttributeNames={"#cid": last_cmd_id},
+            ExpressionAttributeValues={":a": activated_iso},
         )
-        print(f"[HEARTBEAT][ALERT] serial={serial} type={alert_type} sev={severity}")
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            # Same alert already recorded for this exact ts — idempotent.
-            print(f"[HEARTBEAT][ALERT][DUP] serial={serial} sk={sk}")
-            return
-        print(f"[HEARTBEAT][ALERT][ERROR] serial={serial} type={alert_type}: {e}")
+            logger.info(
+                "activation_ack_already_set",
+                extra={"serial": serial, "last_cmd_id": last_cmd_id},
+            )
+            return False
+        logger.exception("activation_ack_write_failed", extra={"serial": serial})
+        raise
+
+    emit_audit(
+        "device.activated",
+        subject={"deviceSerial": serial},
+        action="update",
+        after={"activated_at": activated_iso, "matched_cmd_id": last_cmd_id},
+        extra={"cmd_issued_at": matched_issued_at},
+    )
+    metrics.add_metric(name="device_activated_count", unit=MetricUnit.Count, value=1)
+    return True
 
 
-# ── Handler ──────────────────────────────────────────────────────
-def handler(event, context):
+@logger.inject_lambda_context(log_event=False, correlation_id_path="thingName")
+@metrics.log_metrics(capture_cold_start_metric=True)
+def handler(event: dict, _context):
     serial = event.get("serial") or event.get("thingName") or "UNKNOWN"
 
     ok, reason = _validate(event)
     if not ok:
-        print(f"[HEARTBEAT][REJECT] serial={serial} reason={reason} event={json.dumps(event)}")
+        logger.warning("heartbeat_reject", extra={"serial": serial, "reason": reason})
+        metrics.add_metric(name="heartbeat_reject_count", unit=MetricUnit.Count, value=1)
         return {"statusCode": 400, "body": f"invalid payload: {reason}"}
 
-    ts = _parse_iso(event["ts"])
-    ts_iso = ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    battery_pct = float(event["battery_pct"])
-    rsrp = float(event["rsrp_dbm"])
-    snr = float(event["snr_db"])
+    heartbeat_ts = _parse_iso(event["ts"])
+    reported = _shadow_reported(event)
 
-    # 1. Partial update on device registry.
-    #    SET expressions preserve walkerUserId and anything else written
-    #    by other flows (provisioning, device-linking).
-    update_expr_parts = [
-        "lastSeen = :ts",
-        "lastHeartbeatAt = :ts",
-        "batteryPct = :bpct",
-        "batteryMv = :bmv",
-        "rsrpDbm = :rsrp",
-        "snrDb = :snr",
-        "uptimeS = :up",
-    ]
-    eav: dict = {
-        ":ts": ts_iso,
-        ":bpct": Decimal(str(battery_pct)),
-        ":bmv": int(event.get("battery_mv", 0)) or None,
-        ":rsrp": Decimal(str(rsrp)),
-        ":snr": Decimal(str(snr)),
-        ":up": int(event.get("uptime_s", 0)),
-    }
-    # battery_mv is optional — strip if the firmware didn't send it.
-    if eav[":bmv"] is None:
-        update_expr_parts = [p for p in update_expr_parts if not p.startswith("batteryMv")]
-        eav.pop(":bmv")
-
-    firmware = event.get("firmware")
-    if firmware:
-        update_expr_parts.append("firmwareVersion = :fw")
-        eav[":fw"] = str(firmware)
-
-    update_expression = "SET " + ", ".join(update_expr_parts)
-
-    walker_id: str | None = None
     try:
-        resp = _device_tbl.update_item(
-            Key={"serialNumber": serial},
-            UpdateExpression=update_expression,
-            ExpressionAttributeValues=eav,
-            ReturnValues="ALL_NEW",
+        _iot_data.update_thing_shadow(
+            thingName=serial,
+            payload=json.dumps({"state": {"reported": reported}}).encode("utf-8"),
         )
-        walker_id = resp.get("Attributes", {}).get("walkerUserId")
     except ClientError as e:
-        print(f"[HEARTBEAT][ERROR] device update failed for {serial}: {e}")
+        logger.exception("shadow_update_failed", extra={"serial": serial, "error": str(e)})
+        metrics.add_metric(name="shadow_update_error_count", unit=MetricUnit.Count, value=1)
         raise
 
-    print(
-        f"[HEARTBEAT][OK] serial={serial} ts={ts_iso} battery={battery_pct:.2f} "
-        f"rsrp={rsrp} snr={snr} fw={firmware} walker={walker_id}"
+    metrics.add_metric(name="heartbeat_count", unit=MetricUnit.Count, value=1)
+
+    last_cmd_id = event.get("last_cmd_id")
+    if isinstance(last_cmd_id, str) and last_cmd_id:
+        _try_activation_ack(serial, last_cmd_id, heartbeat_ts)
+
+    logger.info(
+        "heartbeat_ok",
+        extra={
+            "serial": serial,
+            "ts": event["ts"],
+            "battery_pct": event.get("battery_pct"),
+            "rsrp_dbm": event.get("rsrp_dbm"),
+        },
     )
-
-    # 2. Threshold checks → synthetic alerts.
-    snapshot = {
-        "batteryPct": Decimal(str(battery_pct)),
-        "batteryMv": int(event.get("battery_mv", 0)) or None,
-        "rsrpDbm": Decimal(str(rsrp)),
-        "snrDb": Decimal(str(snr)),
-    }
-    snapshot = {k: v for k, v in snapshot.items() if v is not None}
-
-    for alert_type, severity in _determine_alerts(battery_pct, rsrp):
-        _write_synthetic_alert(serial, walker_id, ts_iso, alert_type, severity, snapshot)
-
-    return {"statusCode": 200, "body": f"Heartbeat recorded for {serial}"}
+    return {"statusCode": 200, "body": f"heartbeat accepted for {serial}"}

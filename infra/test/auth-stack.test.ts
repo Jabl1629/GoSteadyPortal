@@ -33,6 +33,11 @@ describe('AuthStack', () => {
     snippetTotalRetentionDays: 395,
     snippetParserMemoryMb: 256,
     snippetParserTimeoutSeconds: 30,
+    processingLambdaMemoryMb: 256,
+    processingHeartbeatMemoryMb: 128,
+    processingLambdaTimeoutSeconds: 30,
+    activationAckWindowHours: 24,
+    preActivationAuditSampleHours: 1,
   };
 
   const security = new SecurityStack(app, 'TestSecurity', { config });

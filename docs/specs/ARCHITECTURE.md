@@ -501,8 +501,8 @@ Deployed via CDK with `--context env=dev|prod`.
 |---|-----------|-------|--------|---------------|------------|
 | 1 | `GoSteady-{Env}-Auth` | 0A | **Deployed** (revision deployed 2026-04-26) | Cognito User Pool, 9 groups (8 active + walker deprecated), 2 App Clients (Customer + Internal), Pre-Token Generation Lambda V2, RoleAssignments DDB (CMK-encrypted with IdentityKey) | Security |
 | 2 | `GoSteady-{Env}-Data` | 0B | **Deployed** (revision deployed 2026-04-27) | 7 DDB tables: 4 identity-bearing CMK-encrypted (Organizations, Patients with DDB Streams, Users, DeviceAssignments) + 3 telemetry AWS-managed (Device Registry, Activity Series, Alert History) | Security |
-| 3 | `GoSteady-{Env}-Processing` | 1A/1B | **Deployed** (1B revision pending) | Activity Processor, Heartbeat Processor, Alert Handler (Python 3.12; ARM64 migration in 1B revision); table refs via `Table.fromTableName` (no cross-stack imports — see Migration Patterns below) | — |
-| 4 | `GoSteady-{Env}-Ingestion` | 1A / 1A-rev | **Deployed** (1A-rev deployed 2026-04-27) | IoT Thing Type, Device Policy (refactored to explicit topic list + Shadow grants + cmd subscribe), 4 Topic Rules (activity / heartbeat / alert / **snippet**), SnippetParser Lambda (Python 3.12 ARM64), Snippet S3 bucket (Standard→Glacier@90d→delete@395d), IoT Jobs config, SQS DLQ, S3 OTA Bucket (now FirmwareKey CMK-encrypted), Fleet Provisioning Template | Processing, Security |
+| 3 | `GoSteady-{Env}-Processing` | 1A/1B / 1B-rev | **Deployed** (1B-rev deployed 2026-04-27) | Activity Processor (patient-centric + hierarchy snapshot), Heartbeat Processor (slim: Shadow update + activation-ack only), **Threshold Detector (NEW, Shadow-delta-driven)**, Alert Handler (patient-centric); all four Python 3.12 ARM64 with Lambda Powertools; KMS Decrypt grants on IdentityKey for the three patient-readers; table refs via `Table.fromTableName` | Security |
+| 4 | `GoSteady-{Env}-Ingestion` | 1A / 1A-rev / 1B-rev | **Deployed** (1A-rev + 1B-rev ShadowUpdateRule deployed 2026-04-27) | IoT Thing Type, Device Policy (refactored to explicit topic list + Shadow grants + cmd subscribe), **5 Topic Rules** (activity / heartbeat / alert / snippet / **shadow_update on `$aws/things/+/shadow/update/documents` → Threshold Detector**), SnippetParser Lambda (Python 3.12 ARM64), Snippet S3 bucket (Standard→Glacier@90d→delete@395d), IoT Jobs config, SQS DLQ, S3 OTA Bucket (FirmwareKey CMK-encrypted), Fleet Provisioning Template | Processing, Security |
 | 5 | `GoSteady-{Env}-Security` | 1.5 | **Deployed** (2026-04-17) | 3 KMS CMKs (identity / firmware / audit), CloudTrail multi-region trail, KMS-encrypted S3 log bucket, SNS cost alarm topic, billing alarm | — |
 | 6 | `GoSteady-{Env}-Observability` | 1.6 | **New** | Powertools layer, X-Ray config, CloudWatch dashboards, alarm catalog | All |
 | 7 | `GoSteady-{Env}-Audit` | 1.7 | **New** | Audit log group (CloudWatch + S3 Object Lock), audit-writer Lambda | Auth, Data |
@@ -1083,23 +1083,39 @@ Structured JSON via Lambda Powertools:
 - T20 (regression): existing heartbeat publish → heartbeat-processor → DDB row update verified end-to-end.
 - **DLQ-routing nuance:** AWS IoT Rule Lambda actions are async by default — Lambda exceptions don't trip the IoT-side error action's SQS DLQ. They produce structured CloudWatch error logs (which is what ops actually wants); the SQS DLQ continues to catch IoT-side rule failures (auth, throttling, malformed SQL). Spec assumption A7 is technically more nuanced than originally written; revisit if a snippet-side ops alarm is later required (Phase 1.6).
 
-#### Phase 1B — Processing Logic 🔄
-**Specs:** [`phase-1b-processing.md`](phase-1b-processing.md) (original, deployed) + [`phase-1b-revision.md`](phase-1b-revision.md) (revision, planned)
+#### Phase 1B — Processing Logic ✅
+**Specs:** [`phase-1b-processing.md`](phase-1b-processing.md) (original, deployed) + [`phase-1b-revision.md`](phase-1b-revision.md) (revision, deployed 2026-04-27)
 
 **Originally deployed:** Activity, Heartbeat, Alert handlers with idempotent writes against `serialNumber`-keyed tables.
 
-**Revisions specced (full detail in [`phase-1b-revision.md`](phase-1b-revision.md)):**
-- New `threshold-detector` Lambda triggered by Shadow `update/accepted` IoT Rule — replaces heartbeat-processor's threshold-checking role
-- Heartbeat-processor slimmed to Shadow update + activation-ack only (no DDB writes on routine heartbeat per Architecture P5)
-- Patient-resolution helper shared across activity / threshold-detector / alert handlers: `serial → DeviceAssignments active row → Patients row → hierarchy`
-- Hierarchy snapshot at write time on every telemetry row (against new 0B tables)
-- Pre-activation suppression: Threshold Detector skips synthetic alerts when Device Registry `activated_at` is unset; sampled audit at 1/hr/serial *(moved here from 1A revision per 1A-rev D10)*
-- Activation-ack via `last_cmd_id` heartbeat echo with 24 h matching breadth (DL14a); reads `Device Registry.outstandingActivationCmds` populated by Phase 2A `device-api` Lambda *(moved here from 1A revision per 1A-rev D10)*
-- All four Lambdas migrate to ARM64 (G7); Powertools as pip dependency for structured logging + tracing + metrics; log scrubber strips `displayName`/`dateOfBirth`/`email`
-- Structured audit-shape log entries on every write (Phase 1.7 will route via subscription filter)
-- KMS Decrypt grants on IdentityKey CMK for handlers that read CMK-encrypted Patients / DeviceAssignments
-- Out-of-order heartbeat handling resolved via Shadow built-in versioning (no longer needs DDB conditional UpdateItem)
-- Depends on Phase 0B revision (new tables); independent of 0A and 1A revisions; activation-ack path is dormant until Phase 2A device-api lands
+**Phase 1B revision — DEPLOYED 2026-04-27:**
+- New `gosteady-dev-threshold-detector` Lambda triggered by `$aws/things/+/shadow/update/documents` IoT Rule (`gosteady_dev_shadow_update`) — replaces heartbeat-processor's threshold-checking role. (Spec originally said `update/accepted` topic with `current.*`/`previous.*` SQL; that combination is internally inconsistent — `update/accepted` carries only the merged delta, `update/documents` carries `current` + `previous` full-state docs. Resolved during deploy verification 2026-04-27; ingestion-stack.ts has a comment.)
+- Heartbeat-processor slimmed: validates payload, writes `Shadow.reported` (battery / signal / firmware / extras like `reset_reason`/`fault_counters`/`watchdog_hits` per D16 accept-all), runs activation-ack path on `last_cmd_id` echo. **No DDB telemetry writes on routine heartbeat per P5.**
+- Activity-processor and alert-handler refactored to patient-centric PKs with hierarchy snapshot (clientId/facilityId/censusId frozen at write time) and `expiresAt` TTL; activity now persists optional firmware extras (`roughnessR`, `surfaceClass`, `firmwareVersion`).
+- Shared `_shared/` Python module (`patient_resolution.py`, `observability.py`, `thresholds.py`) bundled into each Lambda zip. Patient resolution: `serial → DeviceAssignments active row → patientId → Patients row → PatientContext`.
+- Pre-activation suppression: Threshold Detector skips synthetic alerts when Device Registry `activated_at` is unset; samples a `device.preactivation_heartbeat` audit at ≤1/hr/serial via Shadow `reported.lastPreactivationAuditAt` dedupe attribute. *(Moved here from 1A revision per 1A-rev D10.)*
+- Activation-ack via heartbeat `last_cmd_id` echo with 24 h matching window (DL14a); heartbeat-processor reads `Device Registry.outstandingActivationCmds` map populated by Phase 2A `device-api` Lambda (currently dormant — D6).
+- All four Lambdas Python 3.12 ARM64 (G7) with `aws-lambda-powertools` 3.x as pip dep, vendored at synth time via local CDK bundling (Docker not required). Phase 1.6 will refactor to a shared layer.
+- Powertools structured JSON logs across all four handlers (correlation_id from `thingName`, EMF metrics in `GoSteady/Processing/dev` namespace). PII scrubber strips `displayName`/`dateOfBirth`/`email` keys at any depth.
+- Structured audit-shape log entries (`patient.activity.create`, `alert.synthetic.create`, `alert.device.create`, `device.activated`, `device.preactivation_heartbeat`) — Phase 1.7 will subscription-filter to the dedicated audit log group.
+- KMS Decrypt + GenerateDataKey grants on `IdentityKey` CMK for the three patient-readers (activity-processor, threshold-detector, alert-handler). Heartbeat-processor narrowed to least-privilege (no IdentityKey grant; only Device Registry + Shadow).
+- Out-of-order heartbeat handling resolved via Shadow built-in versioning (no DDB conditional UpdateItem on lastSeen).
+- Pre-existing CFN logical IDs preserved on the three refactored Lambdas (`ActivityProcessor38C14121` / `HeartbeatProcessorCDD753A4` / `AlertHandler13C27ADA`) so CFN does in-place UPDATEs rather than CREATE+DELETE collisions on Lambda function names. Threshold Detector is new (`ThresholdDetectorFunction00465B93`).
+
+**Acceptance results (2026-04-27 deploy):**
+- T2/T4/T5: Activity row written with patient PK, hierarchy snapshot, all three optional extras (`roughnessR=1.23, surfaceClass=indoor, firmwareVersion=1.2.0`), `expiresAt` (epoch+13mo), TZ-localized `date`.
+- T3: Activity for unmapped `GS_ORPHAN_TEST` dropped with structured `unmapped_serial` warning + `unmapped_serial_count` metric (DLQ stays empty).
+- T6/T7: Heartbeat → Shadow.reported only; all named + extra fields visible in shadow including `reset_reason`/`fault_counters`/`watchdog_hits`.
+- T12: Pre-activation heartbeat → no synthetic alert; one `device.preactivation_heartbeat` audit emitted; `lastPreactivationAuditAt` written to shadow for dedupe.
+- T13/T15: Post-activation `battery_pct=0.03` → single `battery_critical` alert (suppresses `battery_low`).
+- T14: Combined `battery_pct=0.02, rsrp_dbm=-125` → both `battery_critical` and `signal_lost` written, compound SKs prevent collision.
+- T16: Replay same shadow update twice → 4 alert rows total (idempotent via conditional PutItem).
+- T18: Device tipover alert → row with `source: "device"`, hierarchy snapshot, compound SK, float→Decimal sanitized data dict.
+- T20: All four Lambdas confirmed `arm64` / `python3.12`.
+- T22: Powertools structured JSON logs verified — `correlation_id`, `function_request_id`, `audit:true` event lines, EMF metrics, `xray_trace_id` (X-Ray currently disabled by env flag pending Phase 1.6).
+- T23: Filter for `PII_DO_NOT_LOG` (the test patient's displayName) returned empty across all 4 log groups.
+- T21 (latency) ⚠️: cold start `Init Duration: 510–620 ms` + execution 290 ms; spec target was <250 ms cold. Powertools layer adds ~300–400 ms init. Not a snippet/activity-path concern (no real-time SLA); revisit only if a concrete latency budget appears.
+- T8/T9/T10/T11 ⏸: Activation-ack path verified via code structure only — fully dormant until Phase 2A `device-api` populates `Device Registry.outstandingActivationCmds`.
 
 #### Phase 1C — Scheduled Jobs 🔲
 
@@ -1137,8 +1153,9 @@ Structured JSON via Lambda Powertools:
 **✅ FirmwareKey CMK now consumed downstream (deployed 2026-04-27 with 1A-rev):**
 - Ingestion stack: OTA bucket (`gosteady-dev-firmware-ota`) encryption migrated from AWS-managed to FirmwareKey CMK; bucket-key enabled; TLS-only enforced. KMS resource policy grants the IoT service principal scoped use for Phase 5A OTA delivery.
 
-**🔲 Pending — scoped into other revisions:**
-- Processing stack Lambdas migrating to ARM64 + adding `kms:Decrypt` grants → **scoped into [`phase-1b-revision.md`](phase-1b-revision.md)**; lands when 1B revision deploys
+**✅ Processing stack consumed IdentityKey CMK (deployed 2026-04-27 with 1B-rev):**
+- All three patient-readers (activity-processor, threshold-detector, alert-handler) hold `kms:Decrypt` + `kms:GenerateDataKey` grants on IdentityKey for CMK-encrypted reads of Patients + DeviceAssignments. Heartbeat-processor stayed off the grant list (slim path; no CMK reads).
+- All four Lambdas migrated to ARM64 / Python 3.12.
 
 **Security stack itself does not need redeployment for these — they are downstream stack edits that reference the already-published CMK ARNs via cross-stack imports.**
 
@@ -1296,15 +1313,16 @@ Phase 3B (CI/CD)    ←── any time
 ```
 Originals (deployed):           0A ✅   0B ✅   1A ✅   1B ✅   1.5 🟡
 
-Revisions DEPLOYED:              0A-rev ✅ (2026-04-26)   0B-rev ✅ (2026-04-27)   1A-rev ✅ (2026-04-27)
-Revisions specced, ready:        1B-rev 🔲
-                                 (1B-rev consumes 0B-rev tables; gates firmware M12.1e.2)
+Revisions DEPLOYED:              0A-rev ✅ (2026-04-26)   0B-rev ✅ (2026-04-27)   1A-rev ✅ (2026-04-27)   1B-rev ✅ (2026-04-27)
+Firmware M12.1e.2 unblocked:     cloud-side Shadow consumer (Threshold Detector) live;
+                                 reported.activated_at consumer is dormant (handler-shape ready,
+                                 device-side write path lands with M12.1e.2 firmware itself).
 
 New phases needed:               1.6 🔲   1.7 🔲   2A 🔲   2B 🔲
 
 Path to portal-renders-real-data:
-  1B-rev → 1.6 + 1.7 → 2A → 2B
-  (1A-rev landed 2026-04-27; 1.6 / 1.7 specs not yet written; both gate 2A)
+  1.6 + 1.7 → 2A → 2B
+  (1A-rev + 1B-rev landed 2026-04-27; 1.6 / 1.7 specs not yet written; both gate 2A)
 ```
 
 ---
@@ -1437,10 +1455,10 @@ Path to portal-renders-real-data:
 | Lambda | Stack | Phase | Status | Trigger | Architecture |
 |--------|-------|-------|--------|---------|--------------|
 | `gosteady-{env}-cognito-pre-token` | Auth | 0A-rev | ✅ Deployed (2026-04-26) | Cognito V2 trigger (PRE_TOKEN_GENERATION_CONFIG) | ARM64 |
-| `gosteady-{env}-activity-processor` | Processing | 1B | 🔄 Implemented (revision pending) | IoT Rule (`gs/+/activity`) | ARM64 (post-rev) |
-| `gosteady-{env}-heartbeat-processor` | Processing | 1B | 🔄 Implemented (revision slims to Shadow update + activation-ack) | IoT Rule (`gs/+/heartbeat`) | ARM64 (post-rev) |
-| `gosteady-{env}-threshold-detector` | Processing | 1B-rev | 🔲 New (replaces heartbeat-processor's threshold role) | IoT Rule on `$aws/things/+/shadow/update/accepted` | ARM64 |
-| `gosteady-{env}-alert-handler` | Processing | 1B | 🔄 Implemented (revision pending) | IoT Rule (`gs/+/alert`) | ARM64 (post-rev) |
+| `gosteady-{env}-activity-processor` | Processing | 1B-rev | ✅ Deployed (2026-04-27) | IoT Rule (`gs/+/activity`) | ARM64 |
+| `gosteady-{env}-heartbeat-processor` | Processing | 1B-rev | ✅ Deployed (slim: Shadow update + activation-ack) (2026-04-27) | IoT Rule (`gs/+/heartbeat`) | ARM64 |
+| `gosteady-{env}-threshold-detector` | Processing | 1B-rev | ✅ Deployed (2026-04-27) | IoT Rule on `$aws/things/+/shadow/update/documents` | ARM64 |
+| `gosteady-{env}-alert-handler` | Processing | 1B-rev | ✅ Deployed (2026-04-27) | IoT Rule (`gs/+/alert`) | ARM64 |
 | `gosteady-{env}-snippet-parser` | Ingestion | 1A-rev | ✅ Deployed (2026-04-27) | IoT Rule (`gs/+/snippet`) | ARM64 |
 | `gosteady-{env}-device-api` | Api | 2A | 🔲 New | API Gateway (`/devices/*`) | ARM64 |
 | `gosteady-{env}-discharge-cascade` | Api | 2A | 🔲 New | DDB Stream on Patients | ARM64 |
@@ -1464,6 +1482,7 @@ Path to portal-renders-real-data:
 - [ ] **Multi-facility caregiver UX:** Single facility selector, or unified inbox across all assigned facilities?
 - [ ] **Phase 1.6 alarm catalog must include log-pattern alarms, not just DLQ-depth.** Discovered 2026-04-27 via firmware-coord §C4.3 threshold-detector probe: heartbeat-processor's threshold-fired alert PutItems fail post-0B-revision (alerts table now `patientId`-keyed, OLD handler still writes `serialNumber`). Lambda catches the exception, logs `[HEARTBEAT][ALERT][ERROR] ...`, returns OK — IoT Rule sees a successful invocation, **DLQ stays empty.** Phase 1.6 needs CloudWatch Logs metric filters / alarms on `[ALERT][ERROR]` and similar swallowed-error patterns across all handlers, not just `ApproximateNumberOfMessagesVisible` on DLQs. Same pattern likely lurks in any handler that catches and logs. **Fix is implicit when 1B revision deploys** (heartbeat-processor stops generating alerts entirely; threshold-detector writes through patient-resolution path so PK matches), but the underlying observability gap is general: logged-and-swallowed errors are invisible to ops without explicit log alarms.
 - [ ] **IoT Rule Lambda actions are async — Lambda-raised exceptions don't trip the IoT-side error action.** Discovered 2026-04-27 during 1A-rev SnippetParser malformed-payload acceptance tests (T12–T15): SnippetParser raised `SnippetValidationError` on each malformed input, but the IoT-side SQS DLQ stayed empty. AWS IoT Rule Lambda actions invoke Lambda asynchronously by default; the rule succeeds the moment the Lambda is invoked, regardless of whether the function later raises. Exceptions show up in CloudWatch logs (which is what ops actually wants for visibility) and as Lambda Errors metric — but NOT in the IoT Rule's SQS error-action queue. The IoT DLQ continues to catch IoT-side failures (auth, throttling, malformed SQL, missing Lambda permission). Spec assumption A7 in [`phase-1a-revision.md`](phase-1a-revision.md) is more nuanced than originally written. Implication for Phase 1.6: alarm on Lambda Errors metric + log-pattern filters per handler; do not rely on DLQ depth alone for handler-internal failure detection.
+- [ ] **Shadow IoT Rule trigger topic correction.** [`phase-1b-revision.md`](phase-1b-revision.md) Lambda 2 originally specified `$aws/things/+/shadow/update/accepted` paired with SQL projecting `current.state.reported` and `previous.state.reported`. That combination is internally inconsistent — `update/accepted` carries only the merged delta as a flat `state.reported` object; `current` / `previous` only exist on `update/documents` payloads. Discovered during 1B-rev deploy verification 2026-04-27: threshold-detector returned with `Duration: 17ms` because `event.get("reported")` was None on every invocation. Fixed by switching the IoT Rule topic to `update/documents`; SQL stayed identical. Inline comment in [ingestion-stack.ts](../../infra/lib/stacks/ingestion-stack.ts) records the rationale. The phase-1b-revision spec text is still pre-fix; consider a small addendum or reconcile the topic naming on the next rev.
 
 ### Firmware-coordination items — RESOLVED (2026-04-26 batch)
 > All items below were raised in [`firmware-coordination/2026-04-17-cloud-contracts.md`](../firmware-coordination/2026-04-17-cloud-contracts.md) §F.9 and answered in §C.4 of the same doc. Kept here for searchability; firmware team's next batch will trigger a fresh "open items" subsection.
@@ -1501,7 +1520,7 @@ Path to portal-renders-real-data:
 | 1A | IoT Ingestion | [`phase-1a-ingestion.md`](phase-1a-ingestion.md) | ✅ Deployed |
 | 1A-rev | Ingestion Revision (snippet IoT Rule + parser Lambda, downlink topic, Shadow IoT-policy grants, OTA bucket CMK, policy refactor) | [`phase-1a-revision.md`](phase-1a-revision.md) | ✅ Deployed (2026-04-27) |
 | 1B | Processing Logic (original) | [`phase-1b-processing.md`](phase-1b-processing.md) | ✅ Deployed |
-| 1B-rev | Processing Logic Revision (Threshold Detector via Shadow, patient-centric handlers, ARM64 + Powertools, hierarchy snapshots) | [`phase-1b-revision.md`](phase-1b-revision.md) | 🔲 Planned |
+| 1B-rev | Processing Logic Revision (Threshold Detector via Shadow, patient-centric handlers, ARM64 + Powertools, hierarchy snapshots) | [`phase-1b-revision.md`](phase-1b-revision.md) | ✅ Deployed (2026-04-27) |
 | 1C | Scheduled Jobs | — | 🔲 Planned |
 | 1.5 | Security Foundation | [`phase-1.5-security.md`](phase-1.5-security.md) | 🟡 Partially deployed — Security stack live; IdentityKey CMK consumed by 0A-rev + 0B-rev; FirmwareKey CMK consumption scoped into 1A-rev; Org bootstrap + IAM audits still pending |
 | 1.6 | Observability | — | 🔲 Planned (new) |

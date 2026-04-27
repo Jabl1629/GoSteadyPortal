@@ -1,118 +1,81 @@
 """
-Activity Processor Lambda — Phase 1B
+Activity Processor Lambda — Phase 1B revision
 
 Triggered by: IoT Rule on gs/+/activity
-IoT Rule SQL:  SELECT *, topic(2) AS thingName FROM 'gs/+/activity'
+IoT Rule SQL: SELECT *, topic(2) AS thingName FROM 'gs/+/activity'
 
-Expected payload (session-based):
-{
-    "serial": "GS0000001234",
-    "session_start": "2026-04-15T14:02:00Z",
-    "session_end":   "2026-04-15T14:18:00Z",
-    "steps": 142,
-    "distance_ft": 340.5,
-    "active_min": 16,
-    "thingName": "GS0000001234"    <-- injected by IoT Rule SQL
-}
-
-Responsibilities (Phase 1B):
-  1. Validate the payload (reject + log if malformed).
-  2. Resolve the walker's timezone (device → walkerUserId → profile → tz).
-  3. Compute the local-date GSI field ("YYYY-MM-DD" in walker tz, UTC fallback).
-  4. Write one row to the activity table.
-     - SK = session_end (UTC ISO 8601), which is strictly monotonic per device.
-     - Conditional PutItem on attribute_not_exists(serialNumber) so a retried
-       MQTT delivery cannot create a duplicate row for the same session.
-
-Non-goals (deferred):
-  - Midnight session splitting  → handled by future daily-rollup Lambda.
-  - EventBridge fan-out         → Phase 2C.
-  - FHIR Observation projection → Phase 4.
+Phase 1B revision changes (vs deployed Phase 1B original):
+  - Patient-centric PK on Activity table (PK=patientId, SK=sessionEnd) per
+    architecture S1 / 0B revision.
+  - Hierarchy snapshot (clientId/facilityId/censusId) frozen at write time
+    per S6 / T4. Resolved via the shared serial → DeviceAssignments →
+    Patients pipeline.
+  - `expiresAt` TTL column (epoch seconds, sessionEnd + 13 months) per L5.
+  - Optional firmware-derived extras (`roughness_R`, `surface_class`,
+    `firmware_version`) plus an `extras` map for any other unknown fields
+    per D14 / D16.
+  - Powertools structured logging + metrics + audit emission per L13/L16.
+  - ARM64 runtime per G7.
 """
 
-import json
+from __future__ import annotations
+
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import boto3
 from botocore.exceptions import ClientError
 
-# ── Configuration ────────────────────────────────────────────────
-DEVICE_TABLE = os.environ["DEVICE_TABLE"]
-ACTIVITY_TABLE = os.environ["ACTIVITY_TABLE"]
-USER_PROFILE_TABLE = os.environ["USER_PROFILE_TABLE"]
-
-# Validation bounds. Chosen liberally — the goal is to reject obvious
-# garbage (negative numbers, 24-hour-plus active_min) rather than
-# second-guess the device firmware's sensor fusion.
-MAX_STEPS = 100_000            # marathon-level ceiling
-MAX_DISTANCE_FT = 50_000       # ~9.5 miles in one session
-MAX_ACTIVE_MIN = 1_440         # 24 hours
-
-# Fields the device firmware must send. `thingName` is injected by the IoT Rule.
-REQUIRED_FIELDS = (
-    "session_start",
-    "session_end",
-    "steps",
-    "distance_ft",
-    "active_min",
+from _shared import (
+    PatientContext,
+    emit_audit,
+    get_logger,
+    get_metrics,
+    resolve_patient,
 )
+from aws_lambda_powertools.metrics import MetricUnit
 
-# ── AWS clients (module-scope for warm-invoke reuse) ─────────────
+# ── Configuration ────────────────────────────────────────────────
+ACTIVITY_TABLE = os.environ["ACTIVITY_TABLE"]
+
+# 13 months = 13 × 30 × 86400 seconds ≈ retention horizon (L5 / 0B-rev D2).
+ACTIVITY_TTL_SECONDS = 13 * 30 * 86_400
+
+# Validation bounds — the goal is to reject obvious garbage, not second-
+# guess on-device sensor fusion.
+MAX_STEPS = 100_000
+MAX_DISTANCE_FT = 50_000
+MAX_ACTIVE_MIN = 1_440
+
+REQUIRED_FIELDS = ("session_start", "session_end", "steps", "distance_ft", "active_min")
+NAMED_FIELDS = {
+    *REQUIRED_FIELDS,
+    "serial",
+    "thingName",
+    "roughness_R",
+    "surface_class",
+    "firmware_version",
+}
+ALLOWED_SURFACE_CLASS = {"indoor", "outdoor"}
+
+logger = get_logger()
+metrics = get_metrics()
+
 _ddb = boto3.resource("dynamodb")
-_device_tbl = _ddb.Table(DEVICE_TABLE)
 _activity_tbl = _ddb.Table(ACTIVITY_TABLE)
-_profile_tbl = _ddb.Table(USER_PROFILE_TABLE)
 
 
-# ── Helpers ──────────────────────────────────────────────────────
 def _parse_iso(ts: str) -> datetime:
-    """Parse an ISO 8601 timestamp, normalising 'Z' → +00:00."""
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
-def _resolve_walker_tz(serial: str) -> tuple[str | None, str | None]:
-    """
-    Follow the device → walkerUserId → profile.timezone chain.
-
-    Returns (walkerUserId, tz_name). Either may be None if the device
-    isn't linked yet (Phase 2 will populate walkerUserId) or if the
-    walker hasn't set a timezone on their profile.
-    """
-    try:
-        dev = _device_tbl.get_item(Key={"serialNumber": serial}).get("Item") or {}
-        walker_id = dev.get("walkerUserId")
-        if not walker_id:
-            return None, None
-        prof = _profile_tbl.get_item(Key={"userId": walker_id}).get("Item") or {}
-        return walker_id, prof.get("timezone")
-    except ClientError as e:
-        # DynamoDB transient failure — degrade gracefully to UTC.
-        print(f"[ACTIVITY] tz lookup failed for {serial}: {e}")
-        return None, None
-
-
-def _local_date(session_start: datetime, tz_name: str | None) -> str:
-    """
-    Render session_start's date in the walker's timezone.
-    Falls back to UTC if tz_name is missing or unknown.
-    """
-    if tz_name:
-        try:
-            return session_start.astimezone(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
-        except ZoneInfoNotFoundError:
-            print(f"[ACTIVITY] unknown tz '{tz_name}', falling back to UTC")
-    return session_start.astimezone(timezone.utc).strftime("%Y-%m-%d")
-
-
 def _validate(event: dict) -> tuple[bool, str]:
-    """Return (ok, reason). Reason is a short human-readable tag."""
     for f in REQUIRED_FIELDS:
         if f not in event:
             return False, f"missing:{f}"
-
     try:
         ss = _parse_iso(event["session_start"])
         se = _parse_iso(event["session_end"])
@@ -120,83 +83,152 @@ def _validate(event: dict) -> tuple[bool, str]:
         return False, f"bad_timestamp:{e}"
     if se < ss:
         return False, "session_end<session_start"
-
     try:
         steps = int(event["steps"])
         distance = float(event["distance_ft"])
         active = int(event["active_min"])
     except (TypeError, ValueError) as e:
         return False, f"bad_number:{e}"
-
     if not 0 <= steps <= MAX_STEPS:
         return False, f"steps_out_of_range:{steps}"
     if not 0 <= distance <= MAX_DISTANCE_FT:
         return False, f"distance_out_of_range:{distance}"
     if not 0 <= active <= MAX_ACTIVE_MIN:
         return False, f"active_out_of_range:{active}"
-
     return True, "ok"
 
 
-# ── Handler ──────────────────────────────────────────────────────
-def handler(event, context):
+def _local_date(session_start: datetime, tz_name: str) -> str:
+    try:
+        return session_start.astimezone(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    except ZoneInfoNotFoundError:
+        logger.warning("unknown_timezone", extra={"timezone": tz_name})
+        return session_start.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _to_decimal(value: Any) -> Any:
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _to_decimal(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_decimal(v) for v in value]
+    return value
+
+
+def _build_extras(event: dict) -> dict[str, Any]:
+    return {k: _to_decimal(v) for k, v in event.items() if k not in NAMED_FIELDS}
+
+
+@logger.inject_lambda_context(log_event=False, correlation_id_path="thingName")
+@metrics.log_metrics(capture_cold_start_metric=True)
+def handler(event: dict, _context):
     serial = event.get("serial") or event.get("thingName") or "UNKNOWN"
 
-    # 1. Validate — reject + log raw payload on failure so the
-    #    device firmware team can diagnose field drift.
     ok, reason = _validate(event)
     if not ok:
-        print(f"[ACTIVITY][REJECT] serial={serial} reason={reason} event={json.dumps(event)}")
+        logger.warning("activity_reject", extra={"serial": serial, "reason": reason})
+        metrics.add_metric(name="activity_reject_count", unit=MetricUnit.Count, value=1)
         return {"statusCode": 400, "body": f"invalid payload: {reason}"}
+
+    patient: PatientContext | None = resolve_patient(serial)
+    if patient is None:
+        logger.warning(
+            "unmapped_serial",
+            extra={"serial": serial, "stage": "activity-processor"},
+        )
+        metrics.add_metric(name="unmapped_serial_count", unit=MetricUnit.Count, value=1)
+        return {"statusCode": 200, "body": "no active assignment; dropped"}
 
     ss = _parse_iso(event["session_start"])
     se = _parse_iso(event["session_end"])
-
-    # 2. Timezone lookup — best-effort; falls back to UTC.
-    walker_id, tz_name = _resolve_walker_tz(serial)
-    local_date = _local_date(ss, tz_name)
-
-    # 3. Build item. Use Decimal for any non-integer since DynamoDB
-    #    rejects float. Normalise timestamps back to ISO 'Z' form.
-    session_end_iso = se.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     session_start_iso = ss.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    session_end_iso = se.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_at = int(se.astimezone(timezone.utc).timestamp()) + ACTIVITY_TTL_SECONDS
 
-    item: dict = {
-        "serialNumber": serial,
-        "timestamp": session_end_iso,           # PK/SK
+    surface_class = event.get("surface_class")
+    if surface_class is not None and surface_class not in ALLOWED_SURFACE_CLASS:
+        logger.warning(
+            "unknown_surface_class",
+            extra={"serial": serial, "surface_class": surface_class},
+        )
+        surface_class = None
+
+    item: dict[str, Any] = {
+        "patientId": patient.patientId,
+        "timestamp": session_end_iso,
+        "deviceSerial": serial,
+        "clientId": patient.clientId,
+        "facilityId": patient.facilityId,
+        "censusId": patient.censusId,
         "sessionStart": session_start_iso,
         "sessionEnd": session_end_iso,
         "steps": int(event["steps"]),
         "distanceFt": Decimal(str(event["distance_ft"])),
         "activeMinutes": int(event["active_min"]),
-        "date": local_date,                     # GSI by-date sort key
-        "ingestedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "date": _local_date(ss, patient.timezone),
+        "timezone": patient.timezone,
         "source": "device",
+        "ingestedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "expiresAt": expires_at,
     }
-    if walker_id:
-        item["walkerUserId"] = walker_id
-    if tz_name:
-        item["timezone"] = tz_name
 
-    # 4. Conditional write — MQTT retries must not create duplicates.
+    if "roughness_R" in event:
+        item["roughnessR"] = Decimal(str(event["roughness_R"]))
+    if surface_class is not None:
+        item["surfaceClass"] = surface_class
+    if "firmware_version" in event:
+        item["firmwareVersion"] = str(event["firmware_version"])
+
+    extras = _build_extras(event)
+    if extras:
+        item["extras"] = extras
+
     try:
         _activity_tbl.put_item(
             Item=item,
-            ConditionExpression="attribute_not_exists(serialNumber) AND attribute_not_exists(#ts)",
+            ConditionExpression="attribute_not_exists(patientId) AND attribute_not_exists(#ts)",
             ExpressionAttributeNames={"#ts": "timestamp"},
-        )
-        print(
-            f"[ACTIVITY][OK] serial={serial} session_end={session_end_iso} "
-            f"steps={item['steps']} active={item['activeMinutes']} date={local_date} tz={tz_name}"
         )
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            print(f"[ACTIVITY][DUP] serial={serial} session_end={session_end_iso} — already recorded")
+            logger.info(
+                "activity_duplicate",
+                extra={"serial": serial, "patientId": patient.patientId, "sessionEnd": session_end_iso},
+            )
             return {"statusCode": 200, "body": "duplicate session ignored"}
-        print(f"[ACTIVITY][ERROR] serial={serial} {e}")
+        logger.exception("activity_write_failed", extra={"serial": serial})
+        metrics.add_metric(name="activity_write_error_count", unit=MetricUnit.Count, value=1)
         raise
 
+    metrics.add_metric(name="activity_session_count", unit=MetricUnit.Count, value=1)
+    emit_audit(
+        "patient.activity.create",
+        subject={
+            "patientId": patient.patientId,
+            "clientId": patient.clientId,
+            "censusId": patient.censusId,
+            "deviceSerial": serial,
+        },
+        action="create",
+        after={
+            "sessionEnd": session_end_iso,
+            "steps": item["steps"],
+            "activeMinutes": item["activeMinutes"],
+            "date": item["date"],
+        },
+    )
+
+    logger.info(
+        "activity_ok",
+        extra={
+            "serial": serial,
+            "patientId": patient.patientId,
+            "sessionEnd": session_end_iso,
+            "steps": item["steps"],
+        },
+    )
     return {
         "statusCode": 200,
-        "body": f"Activity recorded for {serial}: {item['steps']} steps, {item['activeMinutes']} min",
+        "body": f"activity recorded for patient={patient.patientId} steps={item['steps']}",
     }

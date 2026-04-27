@@ -72,8 +72,10 @@ const processing = new ProcessingStack(app, `${prefix}-Processing`, {
   env,
   config,
   dataStack: data,
+  securityStack: security,
   description: `GoSteady Processing — ${config.envName}`,
 });
+processing.addDependency(security); // Phase 1B revision: handlers consume IdentityKey CMK
 // Phase 0B revision (2026-04-27): Processing no longer cross-stack-imports
 // Data tables (uses Table.fromTableName instead). Removing the explicit
 // CDK dependency lets us deploy Processing without auto-deploying Data —

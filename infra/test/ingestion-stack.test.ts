@@ -37,11 +37,20 @@ describe('IngestionStack — Phase 1A revision', () => {
     snippetTotalRetentionDays: 395,
     snippetParserMemoryMb: 256,
     snippetParserTimeoutSeconds: 30,
+    processingLambdaMemoryMb: 256,
+    processingHeartbeatMemoryMb: 128,
+    processingLambdaTimeoutSeconds: 30,
+    activationAckWindowHours: 24,
+    preActivationAuditSampleHours: 1,
   };
 
   const security = new SecurityStack(app, 'TestSecurityForIngestion', { config });
   const data = new DataStack(app, 'TestDataForIngestion', { config, securityStack: security });
-  const processing = new ProcessingStack(app, 'TestProcessingForIngestion', { config, dataStack: data });
+  const processing = new ProcessingStack(app, 'TestProcessingForIngestion', {
+    config,
+    dataStack: data,
+    securityStack: security,
+  });
   const stack = new IngestionStack(app, 'TestIngestion', {
     config,
     processingStack: processing,
@@ -49,8 +58,17 @@ describe('IngestionStack — Phase 1A revision', () => {
   });
   const template = Template.fromStack(stack);
 
-  test('creates 4 IoT Topic Rules (activity, heartbeat, alert, snippet)', () => {
-    template.resourceCountIs('AWS::IoT::TopicRule', 4);
+  test('creates 5 IoT Topic Rules (activity, heartbeat, alert, snippet, shadow_update)', () => {
+    template.resourceCountIs('AWS::IoT::TopicRule', 5);
+  });
+
+  test('ShadowUpdateRule SQL targets $aws/things/+/shadow/update/documents with current/previous reported', () => {
+    template.hasResourceProperties('AWS::IoT::TopicRule', {
+      RuleName: 'gosteady_test_shadow_update',
+      TopicRulePayload: Match.objectLike({
+        Sql: Match.stringLikeRegexp("FROM '\\$aws/things/\\+/shadow/update/documents'"),
+      }),
+    });
   });
 
   test('SnippetRule SQL base64-encodes the binary payload', () => {
