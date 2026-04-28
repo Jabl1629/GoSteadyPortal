@@ -1690,7 +1690,7 @@ For any future revision that recreates DDB tables, modifies Cognito triggers, or
 3. **Don't catch broadly in handlers** — catch narrow exceptions where there's a known recovery path; let everything else propagate to the IoT Rule's error-action path (DLQ). This is a Phase 1B revision design choice baked into the new shared `_shared/observability.py` module spec.
 4. **Trust DLQ-depth alarms only when handlers don't catch broadly** — DLQ-depth as a health signal is meaningful only if errors actually propagate to the rule. With `try/except: log; return ok`, DLQ becomes a "manifest absence rather than presence" indicator.
 
-In this specific case the fix is implicit: Phase 1B revision rewrites the heartbeat handler entirely, threshold-fired writes go through the new threshold-detector Lambda which uses the patient-resolution path → PK matches → no exception → no swallow. But the general pattern is worth keeping in mind for any handler edits.
+In this specific case the fix landed implicitly with the Phase 1B revision deploy on 2026-04-27: the heartbeat handler was rewritten entirely (slim path, no threshold work), threshold-fired writes go through the new threshold-detector Lambda which uses the patient-resolution path → PK matches → no exception → no swallow. Spot-verified via the same synthetic battery_critical / signal_lost probes as §C4.3 — alerts now land in the Alert History table with `patientId` PK and `source=cloud`. The general pattern is still worth keeping in mind for any future handler edits.
 
 ---
 

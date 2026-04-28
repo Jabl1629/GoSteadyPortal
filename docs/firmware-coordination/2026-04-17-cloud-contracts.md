@@ -1840,3 +1840,231 @@ for cloud-side planning.
 
 *Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
 
+---
+---
+
+# Cloud team milestone update — 2026-04-28 (Phase 1B revision deployed)
+
+> **From:** GoSteady cloud team
+> **Closes:** the §C4.7 commitment to post a §C5 implementation milestone
+> update when 1B revision ships.
+> **In response to:** firmware §F3 (M12.1c.1 milestone closure) — which
+> beat this entry to the doc by a few hours, since firmware's first real
+> publish landed against the freshly-deployed Lambda.
+>
+> **TL;DR:** Phase 1B revision deployed to dev 2026-04-27T23:38:54 UTC
+> (commit `1a1684f`). Heartbeat-processor slimmed (Shadow only, no DDB
+> on routine heartbeat) — resolves §F2.3 drift in code. New
+> `gosteady-dev-threshold-detector` Lambda live, triggered by Shadow
+> update IoT Rule, generates synthetic alerts post-activation only.
+> Activity + alert handlers refactored to patient-centric PKs with
+> hierarchy snapshot. **All four handlers Python 3.12 ARM64 with
+> Powertools.** Firmware §F3.2 bug (2) — Shadow MQTT topic IoT-policy
+> grants — is a real gap on the cloud side; commitment + remedy in
+> §C5.4 below. Should be a small follow-up deploy.
+
+---
+
+## C5.1 Ack of firmware §F3 milestone
+
+Congrats on M12.1c.1 closure. The §F3.1 Shadow document is exactly the
+shape we hoped to see — all five required heartbeat fields populated
+with real device-sourced values (RSRP/SNR from `AT+CESQ`, NITZ
+timestamp from `AT+CCLK?`, hardcoded battery placeholder per plan).
+Net 17 s boot-to-PUBACK on first try is comfortably inside any
+realistic cellular-wake budget.
+
+The "drive-by validation" of Phase 1B revision in §F3.3 saved us a
+synthetic acceptance probe — the firmware-side publish was the first
+real-firmware heartbeat through the new Lambda, and all four checks
+came back clean. We did run our own synthetic probes earlier in the
+deploy (acceptance results are captured in
+[`docs/specs/phase-1b-revision.md`](../specs/phase-1b-revision.md)
+Test Scenarios T2–T18); the firmware-side validation closes the loop.
+
+The "old fields persist" quirk you flagged in §F3.3 is correct and
+expected — Shadow does merge-not-replace on partial `reported` writes,
+so probe-era fields (`firmware`, `uptime_s`, `reset_reason`, etc.)
+linger until a future write removes them. We'll let those age out
+naturally; nothing actionable.
+
+---
+
+## C5.2 Ack of firmware §F3.2 bug fixes
+
+Both findings are useful records:
+
+**(1) QoS 0 + fixed-delay drain on NB-IoT.** Confirmed safe — QoS 1
++ wait-on-PUBACK is the right pattern for cellular publish. We have
+no analog cloud-side bug; just glad it surfaced on bench rather than
+in clinic. M12.1c.2's retry-on-failure path will be a stronger
+guarantee.
+
+**(2) `CONFIG_AWS_IOT_AUTO_DEVICE_SHADOW_REQUEST=y` policy
+violation.** This is the more interesting find — see §C5.4 below for
+the cloud-side action that follows from it.
+
+---
+
+## C5.3 What 1B-rev landed
+
+For the record — full detail in
+[`docs/specs/phase-1b-revision.md`](../specs/phase-1b-revision.md)
+Changelog and ARCHITECTURE.md §12 Phase 1B:
+
+| Component | Change |
+|---|---|
+| `gosteady-dev-heartbeat-processor` | Slimmed to Shadow.reported update + activation-ack only. NO DDB telemetry writes on routine heartbeat (per ARCHITECTURE.md P5). Activation-ack matches `last_cmd_id` against `Device Registry.outstandingActivationCmds` within 24 h window (DL14a). **Dormant** until Phase 2A `device-api` populates the map. |
+| `gosteady-dev-threshold-detector` (NEW) | Triggered by IoT Rule on `$aws/things/+/shadow/update/documents` (the topic the spec said `update/accepted` — see §C5.5 below). Pre-activation suppression: skips synthetic alerts when Device Registry `activated_at` is null; emits `device.preactivation_heartbeat` audit at ≤1/hr/serial via Shadow `reported.lastPreactivationAuditAt` dedupe. Post-activation: writes synthetic alerts to Alert History with `source=cloud`, hierarchy snapshot, compound SK. |
+| `gosteady-dev-activity-processor` | Patient-centric (PK = patientId). Hierarchy snapshot frozen at write. `expiresAt` TTL (sessionEnd + 13 mo). Optional firmware extras (`roughnessR`, `surfaceClass`, `firmwareVersion`) on top-level columns; `extras` map for any other unknown fields. |
+| `gosteady-dev-alert-handler` | Patient-centric. Hierarchy snapshot. `expiresAt` TTL (eventTimestamp + 24 mo). |
+| All four | Python 3.12 ARM64 (G7). `aws-lambda-powertools` 3.x as pip dep, vendored at synth time via CDK local bundling (no Docker required on this dev machine). Structured JSON logs with PII scrubber (`displayName`/`dateOfBirth`/`email` redacted at any depth). EMF metrics in `GoSteady/Processing/dev`. |
+| KMS | `kms:Decrypt` + `kms:GenerateDataKey` grants on IdentityKey for the three patient-readers (activity / threshold-detector / alert). Heartbeat-processor narrowed off (no CMK reads). |
+
+Cloud-side acceptance (run before firmware §F3 publish): synthetic
+heartbeats → Shadow only; pre-activation suppression confirmed; post-
+activation `battery_pct=0.03` → single `battery_critical` (suppresses
+low); combined `battery_pct=0.02 + rsrp_dbm=-125` → both alerts with
+compound SKs; replay → conditional PutItem rejects duplicate; tipover
+device alert lands with `source=device`; PII scrubber filter for
+`displayName="PII_DO_NOT_LOG"` returned empty across all four log
+groups; DLQ stayed at 0.
+
+---
+
+## C5.4 Action item: Shadow MQTT topic policy grants (gates M12.1e.2)
+
+The §F3.2 bug (2) finding is a real gap on the cloud side. The
+1A-rev device-policy refactor added `iot:GetThingShadow` and
+`iot:UpdateThingShadow` to `gosteady-dev-device-policy` per the
+§F.9.4 / §C.4.4 decision. **Those are IAM actions for the AWS IoT
+REST API**, not for MQTT-protocol shadow access. The NCS `aws_iot`
+library uses MQTT throughout — and the MQTT shadow protocol requires
+explicit topic-level grants on `$aws/things/{thing}/shadow/...`,
+which the current policy does not include.
+
+Concretely, the policy currently allows MQTT only on the `gs/{thing}/*`
+topic prefix (heartbeat / activity / alert / snippet / cmd). When
+firmware tries the M12.1e.2 wake path:
+
+1. `aws_iot_shadow_get()` → MQTT publish on `$aws/things/GS.../shadow/get`
+2. broker rejects on policy violation
+3. broker disconnects after a few seconds (which is exactly what bug 2
+   surfaced today)
+
+**Cloud-side fix:** add two MQTT-topic statements to the per-thing
+policy (mirror of the existing publish/subscribe statements but
+scoped to shadow topics):
+
+```jsonc
+// Publish to own shadow get + update
+{
+  "Sid": "OwnShadowMqttPublish",
+  "Effect": "Allow",
+  "Action": "iot:Publish",
+  "Resource": [
+    "arn:aws:iot:us-east-1:${account}:topic/$aws/things/${iot:Connection.Thing.ThingName}/shadow/get",
+    "arn:aws:iot:us-east-1:${account}:topic/$aws/things/${iot:Connection.Thing.ThingName}/shadow/update"
+  ]
+},
+// Subscribe + receive on own shadow get/update accepted/rejected/delta
+{
+  "Sid": "OwnShadowMqttSubscribe",
+  "Effect": "Allow",
+  "Action": ["iot:Subscribe", "iot:Receive"],
+  "Resource": [
+    "arn:aws:iot:.../topicfilter/$aws/things/${...}/shadow/get/accepted",
+    "arn:aws:iot:.../topicfilter/$aws/things/${...}/shadow/get/rejected",
+    "arn:aws:iot:.../topicfilter/$aws/things/${...}/shadow/update/accepted",
+    "arn:aws:iot:.../topicfilter/$aws/things/${...}/shadow/update/rejected",
+    "arn:aws:iot:.../topicfilter/$aws/things/${...}/shadow/update/delta",
+    "arn:aws:iot:.../topic/$aws/things/${...}/shadow/get/accepted",
+    "arn:aws:iot:.../topic/$aws/things/${...}/shadow/get/rejected",
+    "arn:aws:iot:.../topic/$aws/things/${...}/shadow/update/accepted",
+    "arn:aws:iot:.../topic/$aws/things/${...}/shadow/update/rejected",
+    "arn:aws:iot:.../topic/$aws/things/${...}/shadow/update/delta"
+  ]
+}
+```
+
+**Scope and timing:** small CDK edit in `ingestion-stack.ts`; deploy
+is ~30 s (policy change only). Will land as a 1A-rev addendum (or
+queued ahead of the next cloud-side dev session — whichever comes
+first) before firmware reaches M12.1e.2. Will post a follow-up §C6
+entry when the policy update deploys; once it's live, firmware can
+proceed with `aws_iot_shadow_get()`-based wake checks without
+disabling `AUTO_DEVICE_SHADOW_REQUEST` as a workaround (though as
+§F3.2 noted, you may prefer explicit on-wake fetch over auto-on-
+connect anyway — that's a firmware-side architectural choice, not
+gated by our policy).
+
+**Heads-up before that lands:** the existing `iot:GetThingShadow` /
+`iot:UpdateThingShadow` IAM actions in the policy are still
+useful — they let the cloud-side Lambdas (heartbeat-processor,
+threshold-detector, future device-shadow-handler) hit the REST
+API. Firmware-side MQTT shadow access needs the new topic grants.
+
+---
+
+## C5.5 Spec correction: Shadow rule topic
+
+For completeness — the [`phase-1b-revision.md`](../specs/phase-1b-revision.md)
+Lambda 2 spec originally said the Shadow rule subscribes to
+`$aws/things/+/shadow/update/accepted` with SQL projecting
+`current.state.reported` and `previous.state.reported`. That
+combination is internally inconsistent: `update/accepted` carries
+only the merged delta as a flat `state.reported` object, no
+`current` / `previous` shape. Discovered during deploy verification
+when threshold-detector started returning `Duration: 17ms` because
+`event.get("reported")` was None on every fire.
+
+Fixed by switching the IoT Rule topic to `update/documents` (which
+*does* carry `current` + `previous` full-state docs); SQL itself
+unchanged. Inline rationale in
+[`infra/lib/stacks/ingestion-stack.ts`](../../infra/lib/stacks/ingestion-stack.ts)
+at the ShadowUpdateRule definition. Firmware doesn't need to know or
+care about this — it's an internal cloud-side rule plumbing detail —
+but flagging in case anyone reads the spec and wonders why the
+deployed topic disagrees. Spec changelog entry covers it.
+
+---
+
+## C5.6 Lambda cold-start cost (informational)
+
+Worth noting since §F3.1's Lambda cold-start log entry (389.91 ms)
+matches what we see on the activity / threshold-detector side too.
+Powertools 3.x adds ~300–400 ms to Python 3.12 ARM64 cold init. With
+~3 site-survey units publishing one heartbeat/hr each, the Lambda
+will be cold most invocations (long inter-invocation gaps) and pay
+that init cost every time. Acceptable at MVP scale; revisit only if
+a real-time SLA appears (alerts are best-effort, not millisecond-
+critical). Phase 1.6 may switch Powertools to a shared layer
+(reduces per-Lambda zip size, doesn't change init cost).
+
+---
+
+## C5.7 Cadence
+
+This entry resolves the §C4.7 commitment + acks §F3.
+
+**Cloud team next coord-doc-affecting work:** §C5.4 shadow MQTT
+topic policy grants. ETA: next focused cloud-side dev session
+(should be small + quick); will post §C6 when deployed. After that,
+the only remaining cloud-side dependency for M12.1e.2 is the Phase
+2A `device-shadow-handler` Lambda that consumes
+`reported.activated_at` shadow-delta events and flips Device
+Registry `activated_at` accordingly — that's deferred to Phase 2A
+proper, dormant until then. Firmware can write
+`reported.activated_at` from M12.1e.2 onwards; the cloud will
+accept the Shadow update but won't yet do anything with it.
+
+**Next firmware coord batch trigger** (per the original §9 cadence
+note + §F3.4 announcement): M12.1d activity uplink landing, which
+would be the second message-type ingest probe — useful symmetry to
+the heartbeat-side validation closure today.
+
+---
+
+*Entry owner (cloud side): Jace + Claude. Counter-proposals, blocker
+flags, and milestone updates welcome.*
+
