@@ -1678,3 +1678,165 @@ unchanged from the original §9 cadence note.
 
 *Entry owner (cloud side): Jace + Claude. Counter-proposals welcome.*
 
+---
+---
+
+# Firmware team milestone update — 2026-04-27 (M12.1c.1 — first heartbeat from real firmware lands in cloud Shadow)
+
+> **Closes:** M12.1c.1 (bench-cert minimum-viable heartbeat) — full
+> end-to-end verified on the bench unit at 2026-04-28T03:22:45Z UTC.
+>
+> **Confirms:** Phase 1B revision Lambda is live and writing Shadow.
+> §F2.3 spec-drift is resolved in code, not just in spec. Cloud team's
+> deploy happened 2026-04-27T23:38:54 UTC — about 3 hours before our
+> first successful E2E publish. Thanks for the fast turnaround.
+>
+> **TL;DR:** Bench unit GS9999999999 attached to LTE-M, connected to
+> AWS IoT Core via TLS in 5 s, published one heartbeat to
+> `gs/GS9999999999/heartbeat`, received PUBACK from broker in 342 ms,
+> disconnected cleanly. Heartbeat appears in Device Shadow at version
+> 9 with all 5 required fields (serial, ts, battery_pct, rsrp_dbm,
+> snr_db) populated correctly. Total boot-to-PUBACK: 17 s.
+
+---
+
+## F3.1 What landed
+
+Confirmed via `aws iot-data get-thing-shadow --thing-name GS9999999999`
+immediately after the firmware logged `PUBACK received — broker confirmed`:
+
+```json
+{
+  "state": {
+    "reported": {
+      "serial": "GS9999999999",
+      "ts": "2026-04-28T03:22:45Z",
+      "battery_pct": 0.5,
+      "rsrp_dbm": -88,
+      "snr_db": 6,
+      ...
+    }
+  },
+  "version": 9
+}
+```
+
+`battery_pct=0.5` is the M12.1c.1 hardcoded placeholder per plan; real
+fuel-gauge value lands with M10.7.2 / M12.1c.2. `rsrp_dbm=-88, snr_db=6`
+are real signal stats from M12.1a's `AT+CESQ` reporter. `ts` is real
+NITZ time from `AT+CCLK?`. Shadow metadata timestamp 1777346567 = exact
+firmware publish timestamp.
+
+Lambda CloudWatch entry corroborates:
+
+```
+{"level": "INFO", "message": "heartbeat_ok",
+ "serial": "GS9999999999", "ts": "2026-04-28T03:22:45Z",
+ "battery_pct": 0.5, "rsrp_dbm": -88, ...}
+Duration: 389.91 ms (cold start)
+```
+
+## F3.2 Bugs surfaced + fixed in the bench-test path
+
+Two firmware-side bugs found during M12.1c.1 validation. Both have
+implications for any future firmware that publishes to AWS IoT, so
+worth surfacing for the record.
+
+**(1) QoS 0 + fixed-delay drain races NB-IoT latency.** Initial
+implementation used `MQTT_QOS_0_AT_MOST_ONCE` followed by
+`k_sleep(K_MSEC(500))` before `aws_iot_disconnect`. On NB-IoT
+(~1-3 s RTT) the modem tore down TCP before the PUBLISH bytes hit the
+wire. Lambda showed zero invocations across two NB-IoT publish attempts.
+Fix: switch to `MQTT_QOS_1_AT_LEAST_ONCE` and wait on
+`AWS_IOT_EVT_PUBACK` before disconnecting. Removes the fixed-delay
+guess entirely — broker confirms receipt or we time out at 30 s.
+
+**(2) `CONFIG_AWS_IOT_AUTO_DEVICE_SHADOW_REQUEST=y` (NCS default)
+silently violates per-thing IoT policy.** With the default, the
+aws_iot lib publishes to `$aws/things/GS9999999999/shadow/get`
+immediately after CONNACK to fetch the device shadow. Our policy
+(`gosteady-dev-device-policy`) only allows MQTT publish on
+`gs/{thing}/{heartbeat,activity,alert,snippet}` — shadow MQTT
+topics are not listed. AWS IoT broker silently disconnects on policy
+violation, ~4 s after CONNECTED, before any of our app-level publishes
+get a PUBACK. Symptom: heartbeat publish hangs on PUBACK timeout (30 s),
+then `aws_iot_disconnect` returns -95 because the broker already
+disconnected us. Fix: add `CONFIG_AWS_IOT_AUTO_DEVICE_SHADOW_REQUEST=n`
+to prj_cloud.conf and prj_field.conf. **Heads-up for cloud-side
+M12.1e.2 work:** when firmware needs to read shadow on cellular wake
+per §C.4.4, the policy will need to allow MQTT publish on
+`$aws/things/${iot:Connection.Thing.ThingName}/shadow/get` (and the
+get/accepted/rejected subscribe topics). NCS aws_iot lib's
+"AUTO_DEVICE_SHADOW_REQUEST" path is the wrong abstraction for our
+use case (it fires on connect; we want explicit on-wake fetch only),
+so M12.1e.2 will likely use direct shadow get/update calls rather
+than re-enabling that Kconfig.
+
+Both fixes committed in `gosteady-firmware/e36a14e` with full rationale
+in the message. The dual-bug experience is exactly the kind of finding
+M12.1c.1 was designed to surface — the M12.1c.2 production-shaped
+heartbeat now has retry + cadence + extras to add, but no surprise
+auth or transport issues to debug.
+
+## F3.3 Phase 1B revision validation (drive-by)
+
+Cloud team's Phase 1B revision Lambda was deployed silently at
+2026-04-27T23:38:54 UTC (per `aws lambda get-function-configuration
+--function-name gosteady-dev-heartbeat-processor --query
+LastModified`). Our firmware-side first publish at 03:22:45 UTC was
+the first real-firmware heartbeat through the new Lambda. Validation
+results:
+
+- ✅ Lambda fired on receipt of our publish (`heartbeat_ok` log entry,
+  cold_start=true → first invocation in a while)
+- ✅ Lambda parsed the payload correctly (all 5 required fields read
+  back into the log entry with our exact values)
+- ✅ Shadow.reported updated with our payload (Shadow version 9,
+  metadata timestamp matches publish wall-clock)
+- ✅ DDB row left untouched (Lambda no longer writes DDB on heartbeat
+  per §C4.1 / Phase 1B revision design)
+
+§F2.3 spec drift is now resolved in code, not just on paper. Firmware
+side has updated `GOSTEADY_CONTEXT.md` Heartbeat uplink table to
+remove the "currently deployed: DDB" caveat.
+
+One small quirk worth noting: Shadow.reported retains older fields
+from cloud-team probe runs (`firmware: "1.2.0"`, `uptime_s: 86400`,
+`reset_reason: "power_on"`, `fault_counters`, `watchdog_hits`,
+`lastPreactivationAuditAt`) because partial updates don't remove
+fields. Their metadata timestamps are 1777333281–1777333282 (older
+probes); only the 5 fields we sent now have the fresh 1777346567
+timestamp. Not a problem — Shadow's "old fields persist" is documented
+behavior — just worth being aware of when reading the Shadow document
+for diagnostic purposes.
+
+## F3.4 What's next firmware-side (Stage B per the renumbered arc)
+
+M12.1c.1 closure unblocks the rest of M12.1c / .1d / .1e:
+
+- **M12.1d** (activity uplink on session close) — cheap, ~1 day,
+  reuses M12.1c.1's TLS+MQTT path. Just a different topic + payload
+  builder. Useful as the next acceptance probe target on cloud side.
+- **M10.7.2** (nPM1300 fuel gauge wiring) — ~1 day, gets real
+  battery_pct into the heartbeat instead of the 0.5 placeholder.
+- **M12.1c.2** (production-shaped heartbeat) — hourly cadence + all
+  locked optional extras + retry-on-failure (see "bug 1" above:
+  M12.1c.1's lack of retry was OK for the bench test where we could
+  just power-cycle, but production needs exponential-backoff on
+  -EAGAIN / -ETIMEDOUT). Depends on M10.7.2 + M10.7.3.
+
+Next coord-doc trigger from firmware side: M12.1d activity uplink
+landing (probably this week) — second message type into cloud,
+closes the schema-coverage on the §C.7 activity table.
+
+## F3.5 Cadence
+
+This entry is the M12.1c.1 milestone-complete announcement. No firmware
+action items for cloud team (Phase 1B revision is already deployed and
+working). One soft heads-up about M12.1e.2 shadow-policy needs in §F3.2
+for cloud-side planning.
+
+---
+
+*Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
+
