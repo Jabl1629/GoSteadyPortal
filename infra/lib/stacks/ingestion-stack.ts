@@ -73,6 +73,14 @@ export class IngestionStack extends cdk.Stack {
       `arn:aws:iot:${region}:${account}:topic/gs/\${iot:Connection.Thing.ThingName}/${suffix}`;
     const ownTopicFilter = (suffix: string) =>
       `arn:aws:iot:${region}:${account}:topicfilter/gs/\${iot:Connection.Thing.ThingName}/${suffix}`;
+    // Shadow MQTT topics are under $aws/things/{thing}/shadow/* (firmware
+    // coord §C5.4 / §F3.2 bug 2). The IAM-action grants on iot:GetThingShadow
+    // / iot:UpdateThingShadow only cover the AWS IoT REST API; MQTT shadow
+    // access requires explicit topic-level grants.
+    const ownShadowTopic = (suffix: string) =>
+      `arn:aws:iot:${region}:${account}:topic/$aws/things/\${iot:Connection.Thing.ThingName}/shadow/${suffix}`;
+    const ownShadowTopicFilter = (suffix: string) =>
+      `arn:aws:iot:${region}:${account}:topicfilter/$aws/things/\${iot:Connection.Thing.ThingName}/shadow/${suffix}`;
 
     new iot.CfnPolicy(this, 'DevicePolicy', {
       policyName: `gosteady-${p}-device-policy`,
@@ -107,11 +115,40 @@ export class IngestionStack extends cdk.Stack {
           // and writes reported.activated_at. Cloud's transition handlers
           // (Phase 2A) maintain the invariant that desired.activated_at is
           // non-null iff Device Registry status ∈ {provisioned, active_monitoring}.
+          //
+          // OwnShadowApi covers IAM-action grants for the AWS IoT REST API
+          // (used by cloud-side Lambdas hitting GetThingShadow /
+          // UpdateThingShadow). MQTT-protocol shadow access from firmware
+          // additionally needs the topic-level grants below — surfaced by
+          // firmware coord §F3.2 bug 2 (NCS aws_iot lib uses MQTT, not REST).
           {
             Sid: 'OwnShadowApi',
             Effect: 'Allow',
             Action: ['iot:GetThingShadow', 'iot:UpdateThingShadow'],
             Resource: `arn:aws:iot:${region}:${account}:thing/\${iot:Connection.Thing.ThingName}`,
+          },
+          // Shadow MQTT statements use a `shadow/*` wildcard rather than
+          // enumerating every channel — explicit enumeration of get,
+          // get/accepted, get/rejected, update, update/accepted,
+          // update/rejected, update/delta on both topic + topicfilter pushes
+          // the policy past AWS IoT's 2048-byte hard limit. Wildcard is
+          // tenancy-safe because it is still scoped to the device's own
+          // thing via the `${iot:Connection.Thing.ThingName}` variable;
+          // the only relaxation versus enumeration is that `shadow/delete`
+          // (and any future AWS-added shadow sub-paths) becomes allowed.
+          // `delete` worst-case impact is the device wiping its own shadow,
+          // which the cloud can rewrite via desired state — acceptable.
+          {
+            Sid: 'OwnShadowMqttPublish',
+            Effect: 'Allow',
+            Action: 'iot:Publish',
+            Resource: ownShadowTopic('*'),
+          },
+          {
+            Sid: 'OwnShadowMqttSubscribe',
+            Effect: 'Allow',
+            Action: ['iot:Subscribe', 'iot:Receive'],
+            Resource: [ownShadowTopicFilter('*'), ownShadowTopic('*')],
           },
         ],
       },

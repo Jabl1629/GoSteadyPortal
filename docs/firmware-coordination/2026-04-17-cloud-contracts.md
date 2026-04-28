@@ -2218,3 +2218,208 @@ testing concern that drove M12.1c.1 + M12.1d in the first place.
 
 *Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
 
+---
+---
+
+# Cloud team milestone update — 2026-04-28 (Shadow MQTT topic policy grants — §C5.4 closure)
+
+> **From:** GoSteady cloud team
+> **Closes:** the §C5.4 follow-up commitment — Shadow MQTT topic policy
+> grants are now live in `gosteady-dev-device-policy`.
+> **Acks:** firmware §F4 (M12.1d activity uplink closure). The DDB row
+> shape in §F4.1 is exactly the §C5.3 design intent; nice to see the
+> patient-centric PK + hierarchy snapshot + extras + expiresAt all
+> populated cleanly on real-firmware payload. Patient-resolution
+> pipeline working end-to-end was the highest-risk part of 1B-rev —
+> good to have it confirmed by a non-synthetic publish.
+>
+> **TL;DR:** Firmware can now use `aws_iot_shadow_get()` /
+> `aws_iot_shadow_update()` over MQTT. Both M12.1e.1 (NCS Shadow lib
+> bench check) and M12.1e.2 (pre-activation gate + Shadow re-check)
+> are cloud-side unblocked. One small implementation choice worth
+> flagging: we used a `shadow/*` wildcard rather than enumerating each
+> channel — see §C6.2 for why.
+
+---
+
+## C6.1 What deployed
+
+Two new statements added to `gosteady-dev-device-policy` (per-thing
+policy, scoped via `${iot:Connection.Thing.ThingName}`):
+
+```jsonc
+{
+  "Sid": "OwnShadowMqttPublish",
+  "Effect": "Allow",
+  "Action": "iot:Publish",
+  "Resource": "arn:aws:iot:us-east-1:460223323193:topic/$aws/things/${iot:Connection.Thing.ThingName}/shadow/*"
+},
+{
+  "Sid": "OwnShadowMqttSubscribe",
+  "Effect": "Allow",
+  "Action": ["iot:Subscribe", "iot:Receive"],
+  "Resource": [
+    "arn:aws:iot:us-east-1:460223323193:topicfilter/$aws/things/${iot:Connection.Thing.ThingName}/shadow/*",
+    "arn:aws:iot:us-east-1:460223323193:topic/$aws/things/${iot:Connection.Thing.ThingName}/shadow/*"
+  ]
+}
+```
+
+**Effective grant table** (all scoped to the device's own thing):
+
+| MQTT operation | Topic | Allowed? |
+|---|---|---|
+| Publish | `$aws/things/{thing}/shadow/get` | ✅ |
+| Publish | `$aws/things/{thing}/shadow/update` | ✅ |
+| Publish | `$aws/things/{thing}/shadow/delete` | ✅ (acceptable — see §C6.2) |
+| Subscribe + Receive | `$aws/things/{thing}/shadow/get/accepted` | ✅ |
+| Subscribe + Receive | `$aws/things/{thing}/shadow/get/rejected` | ✅ |
+| Subscribe + Receive | `$aws/things/{thing}/shadow/update/accepted` | ✅ |
+| Subscribe + Receive | `$aws/things/{thing}/shadow/update/rejected` | ✅ |
+| Subscribe + Receive | `$aws/things/{thing}/shadow/update/delta` | ✅ |
+| Subscribe + Receive | `$aws/things/{thing}/shadow/delete/*` | ✅ (same caveat) |
+| Anything on a different thing's shadow | — | ❌ (per-thing scoping) |
+
+The existing `OwnShadowApi` statement (REST-API actions
+`iot:GetThingShadow` / `iot:UpdateThingShadow` on
+`thing/{iot:Connection.Thing.ThingName}`) is unchanged. Cloud-side
+Lambdas still use the REST path; firmware now has the MQTT path.
+
+---
+
+## C6.2 Why wildcard instead of explicit channel enumeration
+
+Initial deploy attempt enumerated all seven channels (get / get/accepted
+/ get/rejected / update / update/accepted / update/rejected /
+update/delta) on both `topic/` and `topicfilter/` ARN forms. That came
+to ~2129 bytes serialized — over AWS IoT's 2048-byte hard limit on
+policy documents, and CFN failed the update with
+`Policy cannot be created - size exceeds hard limit (2048)`.
+
+Two ways to handle the cap: (a) enumerate fewer channels (lose
+explicit `update/delta`, etc.) or (b) wildcard. We picked (b). The
+relaxation versus full enumeration: `shadow/delete` and any future
+AWS-added shadow sub-paths become allowed on the device's own thing.
+Worst case for `delete`: the device wipes its own shadow document,
+which the cloud can rewrite via `desired` state on next provision
+transition (the §F.9.4 / DL14 invariant doesn't depend on the
+previous shadow content). Tenancy is unaffected — the wildcard sits
+inside the per-thing scope, so a device still cannot touch another
+device's shadow regardless.
+
+The deployed policy is 1558 bytes (490-byte margin under cap). A new
+jest assertion in `infra/test/ingestion-stack.test.ts` measures the
+rendered policy size and fails if it ever creeps within 200 bytes of
+the cap, so future grants don't silently re-trigger the issue.
+
+This is captured as cumulative requirement DL14b in
+[`ARCHITECTURE.md` §14](../specs/ARCHITECTURE.md), and as a 2026-04-28
+addendum entry in the
+[`phase-1a-revision.md`](../specs/phase-1a-revision.md) Changelog.
+
+---
+
+## C6.3 What this unblocks
+
+Per firmware §F4.4:
+
+- **M12.1e.1** (NCS Shadow lib bench check) — was flagged as blocked
+  on §C5.4. **Unblocked.** Should be a clean ~half-day.
+- **M12.1e.2** (pre-activation gate + Shadow re-check) — also
+  cloud-side unblocked, but with one remaining cloud-side caveat
+  worth restating from §C5.7:
+
+  The cloud-side **consumer** of `reported.activated_at` shadow-delta
+  events (a `device-shadow-handler` Lambda that watches for the
+  device-side ack and flips `Device Registry.activated_at`
+  accordingly) is **deferred to Phase 2A** — it lives alongside the
+  `device-api` Lambda that issues the activate cmds in the first
+  place, since both touch the same Device Registry attributes.
+
+  Practical implication: from M12.1e.2 onwards, firmware can
+  successfully `aws_iot_shadow_get()` to read `desired.activated_at`
+  and `aws_iot_shadow_update()` to write `reported.activated_at` —
+  the broker will accept both. But until Phase 2A ships, the cloud
+  side won't pick up the `reported.activated_at` ack signal, so
+  `Device Registry.activated_at` stays in whatever state it was
+  before the M12.1e.2 publish.
+
+  **For firmware's M12.1e.2 acceptance probe:** the Shadow round-trip
+  itself is the testable surface. Verify with `aws iot-data
+  get-thing-shadow` after the firmware update — `reported.activated_at`
+  should match what firmware just wrote. End-to-end activation flow
+  (cloud-side device-api → cmd publish → firmware receive → device
+  ack via `last_cmd_id` heartbeat echo + Shadow `reported.activated_at`
+  write → device-shadow-handler consumes the delta → Device Registry
+  flip) is a Phase 2A integration test, not an M12.1e.2 test.
+
+- **M12.1c.2** (production-shaped heartbeat) — independent; not gated
+  on §C6.
+
+---
+
+## C6.4 Acks of firmware §F4 highlights
+
+A few drive-by acknowledgements:
+
+- The fact that `pt_test_001` / `dtc_test_001` / `cen_synth_001` (the
+  synthetic Patients + DeviceAssignment row I created during 1B-rev
+  acceptance testing) ended up resolving the real firmware activity
+  publish was unintentional but correct — those rows live in the dev
+  DDB indefinitely until cleaned up. They are safe to leave in place
+  through the rest of the bench / site-survey work; firmware-side
+  publishes from `GS9999999999` will continue to resolve to that
+  patient row. We can clean up before site-survey unit ships if
+  needed, or leave them as forever-bench-fixtures and add a
+  `synthetic_for_testing: true` flag if we want to filter from
+  internal-admin queries later.
+- §F4.2's `active_min=0` rounding from 11.95 s motion → noted; no
+  cloud-side change needed (cloud just stores what firmware sends).
+  Worth flagging on the portal-UX side when caregiver dashboards
+  start showing `activeMinutes` aggregates so we don't surprise
+  product with sub-minute sessions reading as zero. Not a now-thing.
+- §F4.2's `roughness_R=0.1587 → "indoor"` is the first end-to-end
+  observation that the M9 surface classifier cleanly reaches cloud.
+  We persist `surfaceClass` as a top-level column today; if you ever
+  start needing the raw `R` value at portal-rendering time, just
+  query `roughnessR` instead.
+- §F4.3 build sizes (810/892/869 KB) — useful telemetry; cloud has
+  no side here, just appreciating the per-build accounting.
+
+---
+
+## C6.5 Cadence
+
+This entry closes the §C5.4 commitment. With it, **the cloud-side
+processing layer + ingestion infrastructure are feature-complete for
+the firmware bring-up + site-survey scope** — every firmware-side
+milestone through M14.5 now has its cloud-side half ready.
+
+**Next cloud-side dev-path items** (no longer firmware-coordination-
+gating):
+
+1. Phase 1.6 Observability — alarm catalog (especially log-pattern
+   filters for the swallowed-error pattern; see ARCHITECTURE.md §16),
+   X-Ray activation, dashboards.
+2. Phase 1.7 Audit — dedicated audit log group + S3 Object Lock
+   destination + subscription filter to route the audit-shape log
+   entries the 1B-rev handlers already emit.
+3. Phase 2A device-lifecycle — `device-api` Lambda (provision
+   endpoint, populates `outstandingActivationCmds`, publishes
+   activate cmds, writes Shadow `desired.activated_at`),
+   `device-shadow-handler` (consumes `reported.activated_at`,
+   flips Device Registry `activated_at`), `discharge-cascade` Lambda.
+
+1.6 + 1.7 specs aren't drafted yet; both gate Phase 2A. No firmware-
+side dependency on any of those landing.
+
+**Next firmware coord batch trigger** (per §F4.4): M12.1c.2 hourly-
+cadence first sequence with extras populated, OR M12.1f snippet
+uplink (which would surface real questions on the §F.3 / §F.4
+binary-preamble framing). Whichever lands first.
+
+---
+
+*Entry owner (cloud side): Jace + Claude. Counter-proposals, blocker
+flags, and milestone updates welcome.*
+

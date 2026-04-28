@@ -204,6 +204,75 @@ describe('IngestionStack — Phase 1A revision', () => {
     expect(flattenArn(stmt!.Resource)).toMatch(/:thing\/\$\{iot:Connection\.Thing\.ThingName\}/);
   });
 
+  test('Device IoT policy authorizes MQTT Publish on own shadow/* topic', () => {
+    const stmt = stmtBySid('OwnShadowMqttPublish');
+    expect(stmt).toBeDefined();
+    expect(stmt!.Action).toBe('iot:Publish');
+    const resource = flattenArn(stmt!.Resource);
+    expect(resource).toMatch(/topic\/\$aws\/things\/\$\{iot:Connection\.Thing\.ThingName\}\/shadow\/\*$/);
+  });
+
+  test('Device IoT policy authorizes MQTT Subscribe + Receive on own shadow/* (topicfilter + topic)', () => {
+    const stmt = stmtBySid('OwnShadowMqttSubscribe');
+    expect(stmt).toBeDefined();
+    expect(stmt!.Action).toEqual(['iot:Subscribe', 'iot:Receive']);
+    const resources = (stmt!.Resource as unknown[]).map(flattenArn);
+    expect(
+      resources.some((r) => r.includes('topicfilter/$aws/things/') && r.endsWith('/shadow/*')),
+    ).toBe(true);
+    expect(
+      resources.some((r) => r.includes(':topic/$aws/things/') && r.endsWith('/shadow/*')),
+    ).toBe(true);
+  });
+
+  /**
+   * AWS IoT enforces a 2048-byte hard limit on policy documents. Initial
+   * deploy attempt with explicit enumeration of all shadow MQTT channels
+   * exceeded the cap; we now use shadow/* wildcards (still scoped to the
+   * device's own thing via the policy variable). Synth-time `Fn::Join`
+   * intrinsics inflate the serialized form well past the actual policy
+   * size, so we walk the doc and flatten ARNs to their rendered string
+   * form before measuring — gives a faithful predictor of what AWS will
+   * see on deploy.
+   */
+  test('Device IoT policy stays under AWS IoT 2048-byte hard limit', () => {
+    const policies = template.findResources('AWS::IoT::Policy');
+    type Stmt = { Resource: unknown; [k: string]: unknown };
+    const def = Object.values(policies)[0] as {
+      Properties: { PolicyDocument: { Statement: Stmt[]; Version: string } };
+    };
+
+    const renderResource = (r: unknown): unknown => {
+      if (Array.isArray(r)) return r.map(renderResource);
+      if (typeof r === 'string') return r;
+      if (r && typeof r === 'object') {
+        const obj = r as Record<string, unknown>;
+        if (obj['Fn::Join']) {
+          const [delim, parts] = obj['Fn::Join'] as [string, unknown[]];
+          // Substitute account/region tokens with realistic placeholders so
+          // the rendered length matches what gets shipped to AWS.
+          return parts
+            .map((p) => (typeof p === 'string' ? p : '460223323193'))
+            .join(delim);
+        }
+      }
+      return r;
+    };
+
+    const renderedDoc = {
+      Version: def.Properties.PolicyDocument.Version,
+      Statement: def.Properties.PolicyDocument.Statement.map((s) => ({
+        ...s,
+        Resource: renderResource(s.Resource),
+      })),
+    };
+    const serialized = JSON.stringify(renderedDoc);
+    expect(serialized.length).toBeLessThan(2048);
+    // Margin guard — fail-loud if a future grant pushes us within 200 bytes
+    // of the cap, so we hit the rebuild before the deploy fails.
+    expect(serialized.length).toBeLessThan(2048 - 200);
+  });
+
   test('SnippetParser has PutObject permission on snippet bucket only', () => {
     // Find the SnippetParser default policy and confirm s3:PutObject grants
     // resolve to the snippet bucket ARN.
