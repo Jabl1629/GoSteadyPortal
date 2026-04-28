@@ -2068,3 +2068,153 @@ the heartbeat-side validation closure today.
 *Entry owner (cloud side): Jace + Claude. Counter-proposals, blocker
 flags, and milestone updates welcome.*
 
+---
+---
+
+# Firmware team milestone update — 2026-04-27 (M12.1d — first activity uplink from a real session lands in Activity DDB)
+
+> **Closes:** M12.1d (activity uplink on session close). Same-day delivery
+> as M12.1c.1; both ride the same cloud-side Phase 1B revision deploy.
+> Per cloud's §C5.7 cadence, this is the "second message-type ingest
+> probe" they were watching for.
+>
+> **Acks:** §C5 in full. §C5.4 shadow MQTT topic policy gap is the
+> right read of §F3.2 bug (2); waiting on §C6 deploy before M12.1e.2.
+> §C5.5 spec correction on Shadow rule topic noted (firmware-side
+> opaque, agreed). §C5.6 cold-start cost acknowledged.
+>
+> **Confirms:** activity-processor (1B-rev'd) + DeviceAssignment patient
+> resolution + Activity Series DDB write all work end-to-end with a real
+> firmware payload. Two of four uplink topics in §C.7 now under concrete
+> test (heartbeat = M12.1c.1, activity = M12.1d; alert + snippet still
+> deferred per anti-feature list / M12.1f respectively).
+
+---
+
+## F4.1 What landed
+
+```
+publish gs/GS9999999999/activity -> {
+  "serial":            "GS9999999999",
+  "session_start":     "2026-04-28T03:54:26Z",
+  "session_end":       "2026-04-28T03:54:56Z",
+  "steps":             15,
+  "distance_ft":       11.05,
+  "active_min":        0,                       # motion=11.95s rounds to 0min
+  "roughness_R":       0.1587,
+  "surface_class":     "indoor",
+  "firmware_version":  "0.7.0-cloud"
+}
+```
+
+DDB row in `gosteady-dev-activity` (newest entry for `pt_test_001`):
+
+```
+patientId           = pt_test_001
+clientId            = dtc_test_001          # hierarchy snapshot per §C5.3
+censusId            = cen_synth_001         #         "
+deviceSerial        = GS9999999999
+timestamp           = 2026-04-28T03:54:56Z
+sessionEnd          = 2026-04-28T03:54:56Z
+steps               = 15
+distanceFt          = 11.05
+activeMinutes       = 0
+roughnessR          = 0.1587                # optional firmware extra → top-level column
+surfaceClass        = indoor                #         "
+firmwareVersion     = 0.7.0-cloud           #         "
+source              = device                # cloud distinguishes from synthetic probes
+date                = 2026-04-27            # America/Los_Angeles bucket
+expiresAt           = 1811024280            # sessionEnd + 13 mo TTL per §C5.3
+```
+
+Audit event from activity-processor:
+```
+{"event": "patient.activity.create",
+ "actor": {"system": "gosteady-dev-activity-processor"},
+ "subject": {"patientId": "pt_test_001", "clientId": "dtc_test_001",
+             "censusId": "cen_synth_001", "deviceSerial": "GS9999999999"},
+ "after": {"sessionEnd": "2026-04-28T03:54:56Z", "steps": 15,
+           "activeMinutes": 0, "date": "2026-04-27"}}
+```
+
+The §C5.3 1B-rev activity-processor design points are all visible here:
+patient-centric PK ✓, hierarchy snapshot frozen at write ✓, expiresAt TTL ✓,
+optional firmware extras on top-level columns ✓, source=device ✓.
+
+## F4.2 Notable observations
+
+- **PUBACK in 655 ms** — same LTE-M cellular session as M12.1c.1's
+  heartbeat publish (a few minutes earlier in the same boot). Lambda
+  duration 460 ms warm; cold-start adds ~500 ms (matches §C5.6
+  characterization).
+- **active_min=0** is correct — the M9 motion gate said 11.95 s of
+  active motion in the 30 s session; `floor((motion_s/60) + 0.5) = 0`.
+  Sessions of < 30 s motion always round to 0; the field is intended
+  for hour-scale rollups so this isn't a bug, but worth noting when
+  reading clinic data — sub-minute precision lives on `distanceFt` /
+  `steps` / sessionStart-vs-sessionEnd, not `activeMinutes`.
+- **roughness_R = 0.1587 → "indoor"** — auto-classifier worked
+  correctly (R < threshold τ=0.245 = indoor per M9 Phase 4
+  calibration). First end-to-end confirmation that the M9 classifier
+  output reaches cloud cleanly.
+- **firmware_version = "0.7.0-cloud"** — bumped from 0.6.0-algo with
+  the M12.1c.1 cloud bring-up. Centralized as `GS_FIRMWARE_VERSION_STR`
+  macro in `src/session.c`; used in both the session header (FIRMWARE
+  layer in the .dat file) and the activity uplink, so cloud-side
+  queries can correlate them.
+
+## F4.3 Code-side
+
+`gosteady-firmware/cb94d17`:
+- New `struct gosteady_activity` + `gosteady_cloud_publish_activity()`
+  public API in `src/cloud.h` (inline-string struct so it can be
+  msgq'd cleanly across thread boundaries).
+- `src/cloud.c` refactored: extracted `connect_publish_disconnect()`
+  helper holding `s_aws_mutex` so heartbeat (one-shot at boot) and
+  activity (persistent worker thread blocked on msgq, depth 4) serialize
+  cleanly without sharing more than they need. Both use QoS 1 + PUBACK
+  wait per the M12.1c.1 closure debug.
+- `src/session.c` captures cellular UTC at `session_start`, builds the
+  activity struct from M9 outputs at `session_stop`, calls the new
+  cloud API. Gated on `IS_ENABLED(CONFIG_GOSTEADY_CLOUD_ENABLE)` —
+  bench builds for M8 data collection skip the activity publish entirely.
+
+Build sizes after M12.1d: bench 810 KB (unchanged — IS_ENABLED works),
+cloud 892 KB (+9 KB for the activity worker), field 869 KB.
+
+## F4.4 What's next firmware-side
+
+- **M10.7.2** (nPM1300 fuel gauge wiring) — ~1 day, gets real
+  `battery_pct` into the heartbeat instead of the 0.5 placeholder.
+- **M12.1c.2** (production-shaped heartbeat) — hourly cadence + all
+  locked optional extras (`last_cmd_id`, `reset_reason`, `fault_counters`,
+  `watchdog_hits`, `uptime_s`, `firmware`) + retry-with-backoff. Depends
+  on M10.7.2 + M10.7.3.
+- **M10.7.1** (storage repartition) — foundation for M10.7.3 + M12.1f.
+- **M10.7.3** (crash forensics + watchdog) — depends on 10.7.1.
+- **M12.1e.1** (NCS Shadow lib bench check) — small ~half-day. Now
+  blocked on cloud §C5.4 (shadow MQTT topic policy grants); once §C6
+  drops we can knock this out.
+- **M12.1e.2** (pre-activation gate + Shadow re-check) — depends on
+  M12.1e.1 + §C5.4.
+
+Next coord-doc trigger from firmware side: probably either M12.1c.2
+hourly-cadence first sequence landing in cloud Shadow with extras
+populated, OR M12.1f snippet uplink work surfacing a question on the
+binary preamble + JSON header framing in §F.3 / §F.4. Whichever lands
+first.
+
+## F4.5 Cadence
+
+This entry is the M12.1d milestone-complete announcement + ack of §C5.
+No firmware action items for cloud team beyond the §C5.4 follow-up
+(which cloud is already on). Activity-processor is working correctly
+with our payload; DeviceAssignment patient resolution is working;
+audit events are emitting; DDB writes are landing with full hierarchy
+snapshot + TTL. Solid stop point for the cloud-side acceptance
+testing concern that drove M12.1c.1 + M12.1d in the first place.
+
+---
+
+*Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
+
