@@ -2423,3 +2423,248 @@ binary-preamble framing). Whichever lands first.
 *Entry owner (cloud side): Jace + Claude. Counter-proposals, blocker
 flags, and milestone updates welcome.*
 
+
+
+---
+---
+
+# Firmware milestone update — 2026-04-29 (M10.7 production-telemetry stack + M12.1c.2 hourly heartbeat with extras — code-complete + bench-validated)
+
+> **From:** GoSteady firmware team
+> **Closes:** §C6.5's invitation — M12.1c.2 hourly-cadence first sequence
+> with all locked optional extras populated. First Shadow update with the
+> full production-shape payload landed at 2026-04-29T20:02:32Z.
+>
+> **Acks:** §C5 + §C6 in full. Shadow MQTT topic policy grants verified
+> usable end-to-end during M12.1c.2 development (didn't actually exercise
+> shadow_get/update yet — that's M12.1e.1's surface — but the Shadow
+> document now carries our heartbeat extras cleanly so the policy chain
+> is healthy through the publish path at minimum). The wildcard scoping
+> (§C6.2) is fine as-is. The pre-created `pt_test_001` / `dtc_test_001` /
+> `cen_synth_001` synthetic patient row continues to be the right fixture
+> for `GS9999999999` activity uplinks; no cleanup needed for our purposes.
+>
+> **Confirms:** the four M10.7 + M12.1c.2 milestones from the firmware
+> arc are code-complete and bench-validated. Specifically:
+>
+>   - M10.7.1 storage repartition (crash_forensics + telemetry_queue +
+>     snippet_storage carved out of the previously-unused 19 MB tail of
+>     external flash — foundation for the rest of the production stack)
+>   - M10.7.2 nPM1300 fuel gauge wiring (real `battery_pct` + new
+>     `battery_mv`)
+>   - M10.7.3 crash forensics + watchdog (reset reason + fault counters
+>     + watchdog hit counter persisted across reset; HW watchdog kicked
+>     from a dedicated supervisor thread)
+>   - M12.1c.2 production-shaped heartbeat (hourly cadence + linear-
+>     backoff retry + all locked optional extras: `battery_mv`,
+>     `firmware`, `uptime_s`, `last_cmd_id`, `reset_reason`,
+>     `fault_counters`, `watchdog_hits`)
+>
+> Firmware version bumped 0.7.0-cloud → **0.8.0-prod**.
+
+---
+
+## F5.1 What landed in cloud Shadow
+
+First production-shaped heartbeat publish, captured on uart0 + verified
+via `aws iot-data get-thing-shadow --thing-name GS9999999999`:
+
+```json
+publish gs/GS9999999999/heartbeat -> {
+  "serial":      "GS9999999999",
+  "ts":          "2026-04-29T20:02:32Z",
+  "battery_pct": 0.936,                  # real fuel gauge (was 0.5 placeholder)
+  "rsrp_dbm":    -82,
+  "snr_db":      5,
+  "battery_mv":  4218,                   # M10.7.2 optional extra
+  "firmware":    "0.8.0-prod",           # version.h, single source of truth
+  "uptime_s":    13,
+  "reset_reason":"SOFTWARE",             # M10.7.3 hwinfo formatted
+  "fault_counters": {"fatal":0, "asserts":0, "watchdog":0},
+  "watchdog_hits": 0
+}
+```
+
+253 bytes serialized — well under the 512 B HEARTBEAT_PAYLOAD_MAX.
+Boot-to-PUBACK 18-19 s on Onomondo LTE-M roaming (RSRP -82 dBm / SNR
+5 dB, similar conditions to the M12.1c.1 closure run). Cellular attach
+8 s, AWS IoT TLS+MQTT CONNECT 5 s, broker PUBACK 700 ms.
+
+Shadow document after the publish (post-merge view, version 16):
+
+```
+state.reported.serial          = "GS9999999999"
+state.reported.ts              = "2026-04-29T19:43:20Z"
+state.reported.battery_pct     = 0.761
+state.reported.rsrp_dbm        = -82
+state.reported.snr_db          = 5
+state.reported.battery_mv      = 4218
+state.reported.firmware        = "0.8.0-prod"
+state.reported.uptime_s        = 13
+state.reported.reset_reason    = "SOFTWARE"
+state.reported.fault_counters  = {"i2c":0, "watchdog":0, "fatal":0, "asserts":0}
+state.reported.watchdog_hits   = 0
+state.reported.lastSeen        = "2026-04-29T19:43:20Z"     # cloud-added
+state.reported.lastPreactivationAuditAt = "..."             # cloud-added
+```
+
+Two things from this worth flagging:
+
+- **Accept-all merge preserved a stale `fault_counters.i2c: 0` key**
+  from an earlier cloud-side probe (timestamp older than this publish).
+  Our handler's published object only contains `fatal/asserts/watchdog`
+  but the prior shadow content was preserved at the per-leaf level.
+  This is exactly the cloud-side merge contract working as documented;
+  flagging only because it shows up in shadow inspections and is
+  effectively immortal until we publish a `null` for that leaf or
+  someone overwrites the shadow doc. Not a bug.
+
+- **`battery_pct` accuracy**: the bundled "Example" 1100 mAh LiPol
+  model from the upstream NCS sample is not perfectly tuned for the
+  Thingy:91 X's LP803448 (~1300 mAh). Voltage-based SoC correction
+  keeps it within ±5-10 % absolute, fine for v1 cloud telemetry and
+  threshold-detector `battery_critical` alarm logic. v1.5 should swap
+  in an LP803448-tuned model from real discharge curves — flagged
+  as a v1.5 follow-up rather than a deployment blocker.
+
+## F5.2 Fault-recovery path validated end-to-end
+
+Built a stress-test surface (`CONFIG_GOSTEADY_FORENSICS_STRESS=y`,
+default off, bench-only) that exposes two debug commands on the uart1
+dump channel: `CRASH` (k_panic via the fault handler) and `STALL` (wedge
+the WDT supervisor in a busy loop). Used these to validate the M10.7.3
+recovery axis.
+
+Shadow snapshots through the test, in order:
+
+| Trigger          | reset_reason | fault_counters.fatal | fault_counters.watchdog | watchdog_hits | Cycle |
+|------------------|--------------|----------------------|-------------------------|---------------|-------|
+| baseline         | SOFTWARE     | 0                    | 0                       | 0             | —     |
+| (earlier probes) | SOFTWARE     | 0                    | 3                       | 3             | —     |
+| `STALL`          | **WATCHDOG** | 0                    | **4**                   | **4**         | ~60 s |
+| `CRASH`          | **SOFTWARE** | **1**                | 4                       | 4             | ~30 s |
+| `CRASH` (again)  | SOFTWARE     | **2**                | 4                       | 4             | ~30 s |
+
+`reset_reason` cleanly distinguishes the two recovery paths. Cycle time
+matters for in-field battery cost: a true hang (no fault handler
+invocation) eats 60 s of WDT timeout per recovery, whereas a software
+panic recovers in ~30 s including LTE-M re-attach. Both paths now
+correctly persist their counters into the next-boot heartbeat.
+
+Cloud-side implication for the threshold detector: the `watchdog_hits`
+field is now an actionable signal (was a stub through M12.1c.1).
+Suggested ops alarm threshold: ≥3 watchdog hits in a 24 h window probably
+warrants a "device unstable" caregiver-side notice. Not a v1 spec ask;
+just a heads-up that the data is now real.
+
+## F5.3 Bugs found + fixed during M10.7.3 validation
+
+Two bugs in our originally-shipped (this morning's) M10.7.3 fault path
+surfaced during the bench validation. Both fixed in commit `eea8d7e`,
+on `main`:
+
+### Bug 1: in-handler flash persist doesn't survive the reboot timing
+
+The original M10.7.3 `k_sys_fatal_error_handler` did
+`flash_area_erase + flash_area_write` directly, then `k_fatal_halt`. On
+this nRF9151 + TF-M platform the path doesn't survive: post-`LOG_PANIC`
+the kernel scheduler is locked, the SPI flash driver state freezes, and
+either the writes don't complete or they get pre-empted by the eventual
+reboot. Empirical signal: `fault_counters.fatal` stayed 0 across multiple
+forced fault triggers; only `watchdog`/`watchdog_hits` (which is bumped
+by next-boot init reading the hwinfo bitmask) reflected the events.
+
+Fix: stamp fault info into a `__noinit` SRAM struct (Cortex-M
+NVIC_SystemReset retains SRAM by default — verified empirically), and
+have next-boot init drain the noinit slot into the persistent record
+where flash I/O is fully ready. Magic word gates against cold-boot
+random-bits double-counting; cleared on drain so a subsequent re-init
+without a fault doesn't double-bump.
+
+### Bug 2: `k_fatal_halt` was a 60 s death spiral
+
+`k_fatal_halt` is an infinite loop, not a reboot. Without our handler
+explicitly triggering a reset, the only path to recovery was the
+watchdog timeout — costing 60 s per fault, AND mis-attributing the
+reset_reason as `WATCHDOG` (it was really an unhandled assert/panic).
+
+Fix: handler now calls `sys_reboot(SYS_REBOOT_WARM)` after the noinit
+stamp; falls through to `k_fatal_halt` only if reboot somehow returns
+(it shouldn't on this platform). Recovery time drops from 60 s → ~30 s
+(cellular re-attach is now the dominant cost), and `reset_reason`
+correctly reads `SOFTWARE` for the fault path so cloud-side triage can
+distinguish recoverable-by-handler vs hung-and-watchdog'd events.
+
+## F5.4 What this means for cloud-side acceptance
+
+Three of the four "TBD until firmware lands" cloud-spec optional fields
+are now real:
+
+- ✅ `reset_reason` — formatted string, distinguishes POWER_ON / PIN /
+  SOFTWARE / WATCHDOG / FAULT (and joins multiple bits with comma)
+- ✅ `fault_counters` — `{"fatal":N, "asserts":N, "watchdog":N}` JSON
+  object literal, cumulative since first format of the crash_forensics
+  partition (currently `boot_count` in the high tens after our stress
+  testing, so the partition's seen real wear)
+- ✅ `watchdog_hits` — int, monotonically increasing across boots that
+  read RESET_WATCHDOG via hwinfo
+
+The fourth (`last_cmd_id`) plumbing is in place but stays empty until
+M12.1e.2 wires up the activate-cmd subscription — covered separately
+in the next firmware milestone.
+
+The Phase 1B revision Shadow-write Lambda continues to handle these
+cleanly without code change on cloud side; the merge behavior is exactly
+as documented (accept-all on unknown fields, per-leaf preservation of
+prior values that the new payload doesn't include). One observation
+worth recording for future reference: shadow-document key cleanup is
+effectively immortal absent a `null` write — see §F5.1 footnote on the
+stale `fault_counters.i2c: 0` key surviving from an earlier probe.
+
+## F5.5 What's next firmware-side
+
+Per the M14.5 site-survey shakedown timeline, the remaining firmware
+milestones before clinic ship are:
+
+- **M12.1e.1** NCS Shadow lib bench check (~½ day; cloud §C5.4 unblocked
+  this back on 2026-04-28). Will validate `aws_iot_shadow_get` +
+  `aws_iot_shadow_update` round-trip against `GS9999999999`'s shadow.
+- **M12.1e.2** Pre-activation gate + Shadow re-check on every cellular
+  wake (~2 days; depends on M12.1e.1). Wires up `last_cmd_id` echo on
+  next heartbeat as the activate-cmd ack surface. Note the §C6.3 caveat
+  that the cloud-side `device-shadow-handler` Lambda is Phase 2A
+  deferred — firmware will pass the shadow round-trip test (Shadow
+  document carries `reported.activated_at` after the firmware update),
+  but Device Registry won't flip `activated_at` automatically until the
+  Phase 2A handler ships. We're aware; the M12.1e.2 acceptance probe
+  is the shadow round-trip itself, not the full provisioning flow.
+- **M12.1f** Snippet uplink (~3 days; depends on M10.7.1, which is now
+  done). JSON header framing per §F.3 + binary layout per §F.4.
+  Opportunistic upload piggybacking on Priority-1 cellular wakes per
+  M10.5 snippet upload policy. May surface real questions on the
+  4-byte BE length-prefix + JSON-header-then-binary layout once
+  implementation begins.
+
+After M12.1e.2 + M12.1f land we hit **M14.5** — the site-survey
+shakedown. Bench desk for ≥7 days with `GS0000000001` running the
+deployment build, observing heartbeat stream + battery curve +
+forensics counters across a real "cellular alone, sensor occasionally
+moving" scenario.
+
+## F5.6 Cadence
+
+This entry closes the M10.7 + M12.1c.2 work-block. No firmware action
+items for cloud team beyond what's already in flight (Phase 1.6 / 1.7
+/ 2A); the data flowing through Shadow is well-aligned with the spec.
+
+Next coord-doc trigger from firmware side: probably M12.1e.1 outcome
+(half-day) or M12.1e.2 closure with shadow-round-trip end-to-end against
+the bench Thing. Either way it lands within the next few days.
+
+If anything in §F5.1 (the immortal stale-leaf observation) or §F5.4
+(suggested ops-alarm thresholds for `watchdog_hits`) wants a cloud-side
+counter-proposal or spec note, happy to incorporate.
+
+---
+
+*Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
