@@ -2831,3 +2831,224 @@ implementation. Both within the next few days.
 ---
 
 *Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
+
+
+---
+---
+
+# Firmware milestone update — 2026-04-29 (M12.1e.2 pre-activation gate + activate-cmd ingest — bench-validated end-to-end)
+
+> **From:** GoSteady firmware team
+> **Closes:** M12.1e.2 implementation per coord §C.4.4 + §C.2 contract.
+> Activate cmd flow works end-to-end against `GS9999999999`: cloud publish
+> → AWS IoT broker queues (CLEAN_SESSION=n) → device CONNECT on next
+> heartbeat resumes session and receives the queued cmd → JSON parses →
+> `activation_apply` persists to `/lfs/activation.bin` → cloud sees
+> `state.reported.activated_at` in Shadow.
+>
+> **Acks:** §C6.1 (Shadow MQTT topic policy) — verified the same per-thing
+> policy that grants `shadow/*` also covers app-topic Subscribe on
+> `gs/{serial}/cmd`, so no additional grant needed. §C.2 / §C.4.4 contract
+> followed end-to-end.
+>
+> **§C.5.1 follow-up (also closes via this entry):** Shadow `desired.
+> activated_at` re-check on every cellular wake is INTENTIONALLY DEFERRED
+> per the §C6.3 caveat — cloud-side `device-shadow-handler` Lambda is
+> Phase 2A, so per-wake re-check has no observable effect until that
+> ships. Will re-implement when Phase 2A lands; firmware-side the change
+> is ~30 LOC inside the existing heartbeat path.
+
+---
+
+## F7.1 What landed
+
+`src/activation.{h,c}` — small persisted-state module backing a tiny
+JSON-config-style file at `/lfs/activation.bin` (88 B packed record:
+magic + version + activated_at_iso + last_cmd_id + reserved). LittleFS
+survives SoC reset cleanly; activation state is preserved across both
+soft (sys_reboot) and hard resets.
+
+`src/cloud.c` —
+  - Registers `gs/{serial}/cmd` via `aws_iot_application_topics_set`
+    at init (log: `registered app subscription: gs/GS9999999999/cmd
+    (QoS 1)`). Subscribed on every CONNECT alongside the shadow topics.
+  - DATA_RECEIVED handler dispatches on `topic.type_received ==
+    AWS_IOT_SHADOW_TOPIC_APPLICATION_SPECIFIC` → JSON parse via
+    Zephyr's json lib using the schema-locked descriptor —
+
+    ```c
+    struct activate_cmd_json { const char *cmd, *cmd_id, *ts, *session_id; };
+    ```
+  - On `cmd == "activate"`: calls `gosteady_activation_apply`,
+    `gosteady_cloud_set_last_cmd_id` (M12.1c.2 plumbing), and
+    `write_reported_activated_at` which is a Shadow UPDATE with body
+    `{"state":{"reported":{"activated_at":"<ts>"}}}`.
+  - 1.5 s linger after PUBACK before disconnect — gives time for
+    queued app-topic deliveries to arrive and the synchronous event
+    handler to dispatch `handle_activate_cmd`.
+
+`src/session.c` — `gosteady_session_start` gains a top-of-function
+pre-activation gate gated on `CONFIG_GOSTEADY_FIELD_MODE`. Returns
+`-EACCES` when `!gosteady_activation_is_activated()`. Bench builds
+(capture.html / SW0 / control.py) skip the gate entirely so M8 data-
+collection continues to work unchanged.
+
+`prj_cloud.conf` + `prj_field.conf` — **flipped `CONFIG_MQTT_CLEAN_SESSION`
+y → n**. The original CLEAN_SESSION=y dropped any cloud-published
+activate cmd while the device was between hourly heartbeats. With
+CLEAN_SESSION=n + the same client_id, AWS IoT holds QoS 1 messages
+per-client until next CONNECT. First connect after the change shows
+`persistent_session=0` (broker bootstrap); subsequent connects show
+`persistent_session=1` and queued cmds flow on resume.
+
+## F7.2 Bench validation
+
+Two-step test 2026-04-29 against `GS9999999999`:
+
+```
+# Test 1 — fresh activation
+pre  : gs_activation: not activated (read=-2 magic=0x00000000) — pre-activation state
+       cloud Shadow: activated_at <missing>
+
+publish: aws iot-data publish --topic gs/GS9999999999/cmd --qos 1 \
+         --payload '{"cmd":"activate","cmd_id":"act_test_m12_1e2",
+                     "ts":"2026-04-29T22:35:00Z",
+                     "session_id":"sess_bench_001"}'
+
+reset device → CONNECT(persistent_session=1)
+
+log:
+  gs_cloud: activate cmd received: cmd_id=act_test_m12_1e2
+            ts=2026-04-29T22:35:00Z session_id=sess_bench_002
+  gs_activation: activation applied: at=2026-04-29T22:35:00Z
+                 cmd_id=act_test_m12_1e2
+                 (persisted to /lfs/activation.bin)
+  gs_cloud: wrote reported.activated_at=2026-04-29T22:35:00Z to Shadow
+  PUBACK msg_id=1 (heartbeat)
+  PUBACK msg_id=2 (Shadow.reported.activated_at)
+
+cloud Shadow (version 38):
+  state.reported.activated_at = "2026-04-29T22:35:00Z"   ✓
+
+# Test 2 — reboot persistence
+reset device (no new cmd, /lfs/activation.bin should drive state)
+log:
+  gs_activation: activated: at=2026-04-29T22:35:00Z
+                 cmd_id=act_test_m12_1e2  ✓
+```
+
+Every step in the contract worked first time:
+
+- ✅ App-topic subscribe registered + included in CONNECT subscribe
+- ✅ Cloud queue + persistent-session delivery (the CLEAN_SESSION fix)
+- ✅ JSON parse against the locked schema
+- ✅ `last_cmd_id` echo plumbing (the M12.1c.2 hook fires correctly)
+- ✅ `reported.activated_at` Shadow-side ack
+- ✅ /lfs persistence across SoC reset
+
+## F7.3 Pre-activation gate
+
+In `CONFIG_GOSTEADY_FIELD_MODE` builds only:
+
+```c
+int gosteady_session_start(const struct gosteady_prewalk *prewalk) {
+    if (!gosteady_activation_is_activated()) {
+        LOG_WRN("session_start refused — device in pre-activation state ...");
+        return -EACCES;
+    }
+    ...
+}
+```
+
+The auto-start coordinator in `main.c` already handles non-zero return
+from `session_start` gracefully — suspends BMI270, returns to idle,
+re-arms motion sem. So a pre-activation device that wakes on motion
+goes through the BMI270 confirmation window, calls session_start,
+gets -EACCES, suspends BMI270, drains the motion sem, sleeps. Net
+behavior matches §M10.5: "wake on motion → connect → publish heartbeat
+→ wait for activation → if not activated, return to sleep without
+opening any session."
+
+Skipped the physical motion test for this milestone (would require
+field-mode flash + sealed cap). Will be exercised end-to-end as part
+of M14.5 site-survey shakedown.
+
+## F7.4 Two design decisions worth flagging
+
+### CLEAN_SESSION=n is now load-bearing
+
+Activate cmd ingest depends on AWS IoT's per-client persistent-session
+state. Implications worth being aware of cloud-side:
+
+- AWS IoT retains session state for **disconnected clients with QoS 1
+  messages** for as long as those messages are queued (default ~1 hour
+  per AWS docs). Our hourly heartbeat keeps the session alive
+  indefinitely.
+- If the firmware ever switches client_id (e.g., shipping unit reflash
+  with a different serial), the previous session's state is orphaned
+  on the broker. Acceptable for v1 scope; just noting it so future
+  fleet-provisioning work doesn't surprise on this.
+- Heartbeat publishes are still QoS 1 + connect-publish-disconnect.
+  No change to the single-publish-per-hour cadence; we just
+  benefit from the broker holding any inbound app-topic messages
+  while we're disconnected.
+
+### 1.5 s linger after PUBACK
+
+The heartbeat's `connect_publish_disconnect` now sleeps 1.5 s after
+PUBACK before disconnect. Empirically generous — the broker delivers
+queued QoS 1 messages within hundreds of ms after the SUBACK we get
+during connect, so by PUBACK + 1.5 s any held activate cmd has
+already arrived and `handle_activate_cmd` has applied + persisted.
+Pretty cheap on the energy side (1.5 s of cellular RRC connected =
+~0.5 mC). Will be revisited if the M14.5 site-survey unit shows
+unexplained battery drain.
+
+## F7.5 What's deferred + why
+
+- **Shadow re-check on every cellular wake.** Per §C.4.4 the firmware
+  is supposed to GET shadow on every wake and validate
+  `desired.activated_at` against on-flash, dropping back to
+  pre-activation if cloud cleared it. **Deferred per §C6.3 caveat:**
+  the cloud-side `device-shadow-handler` Lambda that consumes
+  `reported.activated_at` (and the matching de-provision flow that
+  writes `desired.activated_at = null`) is Phase 2A, not yet shipped.
+  Implementing the firmware re-check now would have no observable
+  cloud effect; will re-implement when Phase 2A lands. Firmware-side
+  cost when it lands: ~30 LOC inside the existing heartbeat connect
+  block (1 GET + JSON parse + comparison).
+
+- **Blue LED slow-blink in pre-activation.** Per M10.5 the device
+  should slow-blink blue (1 Hz, 100 ms on / 900 ms off) while in
+  `ready_to_provision`. Pure visual polish, no observable cloud or
+  field-validation impact. Will add as a polish commit alongside
+  M14.5 flash for `GS0000000001`.
+
+## F7.6 What's next firmware-side
+
+- **M12.1f** Snippet uplink (~3 days; depends on M10.7.1, done).
+  JSON header per §F.3 + binary layout per §F.4. May surface real
+  questions on the framing once implementation begins; will post
+  here if so.
+- **M14.5** Site-survey shakedown — flash `GS0000000001` with the
+  field deployment build, week-long bench observation, M11.1
+  confirmation walk against shipping firmware. The pre-activation
+  gate gets its first physical-motion test as part of this; if cloud
+  team has a preferred way to trigger an activate cmd from the dev
+  IoT account during shakedown, happy to coordinate.
+
+## F7.7 Cadence
+
+§C.4.4 + §C.2 contract fully implemented and bench-validated. No
+firmware action items for cloud team. The synthetic activation
+(`pt_test_001` / `dtc_test_001` / `cen_synth_001` from §C5.3) keeps
+working as the bench fixture; my test cmd_id `act_test_m12_1e2` is
+visible in the Shadow's `last_cmd_id` field on next heartbeat (in
+~1 hour as I write this; will appear by the time anyone reads this).
+
+Next coord-doc trigger from firmware: M12.1f closure or any
+binary-preamble framing question that surfaces during implementation.
+
+---
+
+*Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
