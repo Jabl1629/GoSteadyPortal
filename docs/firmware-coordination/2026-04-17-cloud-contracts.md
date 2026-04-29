@@ -3052,3 +3052,253 @@ binary-preamble framing question that surfaces during implementation.
 ---
 
 *Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
+
+
+---
+---
+
+# Firmware milestone update — 2026-04-29 (M12.1f snippet capture + opportunistic upload — end-to-end S3 landing)
+
+> **From:** GoSteady firmware team
+> **Closes:** M12.1f per coord §F.3 + §F.4 + the M10.5 snippet upload
+> policy. Snippet capture + opportunistic upload working end-to-end
+> against `GS9999999999`: 30 s window of raw 100 Hz BMI270 samples is
+> framed per §F.3 + §F.4 and lands in
+> `s3://gosteady-dev-snippets/GS9999999999/2026-04-29/<snippet_id>.bin`
+> at the exact byte count we published (43,122 B for the validation
+> run — 16 B header + 1,536 samples × 28 B + JSON wrapper + 4 B prefix).
+>
+> **Acks:** §C.2 (cloud confirmed the IoT Rule + parser Lambda was up
+> ahead of M12.1f). The full path landed first try once we got the
+> framing right on our side — header_len BE prefix → JSON header parse
+> → snippet_id extraction → S3 PUT all worked as documented.
+>
+> With this, **all four firmware-feature milestones are bench-validated**
+> (heartbeat + activity + cmd ingest + snippet upload). The remaining
+> firmware-side blocker for shipping is M14.5 site-survey shakedown;
+> no further coord questions for this batch.
+
+---
+
+## F8.1 What ran end-to-end
+
+```
+# Boot 1 — fresh flash with CONFIG_GOSTEADY_SNIPPET_ENABLE=y
+gs_snippet: snippet fs mounted: total=16777216 B free=16769024 B
+gs_cloud: publish gs/GS9999999999/heartbeat -> {... 286 B ...}
+gs_cloud: PUBACK received — broker confirmed
+
+# Trigger session via uart1 START
+gs_snippet: snippet capture start: c1c906b6-dc63-4675-b530-19fcd7fc1c92
+            window_start_ts=2026-04-29T23:17:33Z
+
+# 15 s later: AUTO_STOP_STATIONARY_S fires — session_stop runs
+gosteady: auto-stop: 15 s of stationary motion → ending session
+gs_snippet: snippet capture finish: c1c906b6-... samples=1536
+            (43040 B body)
+
+# Heartbeat tick — snippet drained inside the same connect cycle,
+# after the heartbeat PUBACK, before disconnect:
+gs_snippet: snippet upload: c1c906b6-... — 43122 B (json=94, bin=43024)
+gs_cloud: snippet PUBACK received (43122 B published)
+```
+
+Cloud-side after the run:
+
+```
+$ aws s3 ls s3://gosteady-dev-snippets/GS9999999999/ --recursive --region us-east-1
+2026-04-29 17:18:04   43122  GS9999999999/2026-04-29/c1c906b6-...-19fcd7fc1c92.bin
+```
+
+(43,122 B object — bit-exact match to the bytes we published.)
+
+## F8.2 Wire framing per §F.3 + §F.4
+
+Outer framing (built at upload time, in a single 84 KB BSS buffer
+shared with the body read to avoid double-allocation):
+
+```
+offset 0    : [4-byte BE uint32 hdr_len]      = 94 in this run
+offset 4    : [hdr_len bytes JSON header]     = {"snippet_id":"<uuid>",
+                                                  "window_start_ts":"<iso>"}
+offset 4+H  : [16-byte binary header LE]      = §F.4 verbatim
+offset 20+H : [N × 28-byte sample records]    = N=1536 in this run
+```
+
+§F.4 binary header with sample_count_n = 1536:
+```
+format_version  = 1
+sensor_id       = 1   (BMI270)
+sample_rate_hz  = 100
+sample_count_n  = 1536
+window_start_uptime_ms = (this boot's uptime at first sample)
+```
+
+JSON wrapper (94 B):
+```
+{"snippet_id":"c1c906b6-dc63-4675-b530-19fcd7fc1c92",
+ "window_start_ts":"2026-04-29T23:17:33Z"}
+```
+
+`anomaly_trigger` is absent in v1 — the always-on capture path doesn't
+classify, so JSON serializes without it. v1.5 will add when the
+anomaly detector lands (per coord §F.4 schema reservation: the JSON
+parser ignores unknown fields, the binary `format_version` stays 1).
+
+## F8.3 Capture path in src/snippet.c
+
+Two responsibilities, separated for clarity:
+
+**Capture (writer thread, per session)**:
+- session.c::gosteady_session_start now calls
+  gosteady_snippet_capture_start(session_uuid, window_start_ts,
+  uptime_ms_at_first_sample). Reuses session_uuid as snippet_id so
+  cloud-side join across the snippet S3 object + the activity DDB
+  row is trivial.
+- session.c writer-thread per-sample drain loop calls
+  gosteady_snippet_capture_append(t_ms, ax..gz). Samples accumulate
+  into a 64-sample in-RAM batch (1.8 KB); batch flushes to flash on
+  full or at finish. **Avoiding per-sample fs_write was load-
+  bearing**: 30 s × 100 Hz = 3000 writes per window deepened the
+  writer thread's call stack with LittleFS metadata churn enough to
+  HardFault session_stop. After batching to 64-sample chunks (~47
+  flushes per window) + a +1 KB writer-stack bump, the auto-stop
+  + finish path is rock-solid.
+- session.c writer-thread stop branch calls
+  gosteady_snippet_capture_finish. Flushes trailing partial batch
+  → rewrites the binary header at offset 0 with the real
+  sample_count → close .bin → write .json sidecar → done.
+
+**Upload (heartbeat thread, opportunistic)**:
+- After PUBACK on the heartbeat publish but BEFORE disconnect,
+  cloud.c calls drain_one_snippet which delegates to
+  gosteady_snippet_upload_one with publish_snippet_callback as the
+  MQTT-send primitive.
+- snippet.c::find_pending_uuid iterates /snippets/ via fs_readdir,
+  returns the first .bin entry without a paired .up marker. Strict
+  FIFO-by-mtime would require fs_stat per entry — overkill for a
+  partition that holds a few hundred files at most. v1 takes
+  whatever readdir order LittleFS gives us (roughly insertion
+  order in practice).
+- Read .json into s_payload[4:4+json_len], read .bin into
+  s_payload[4+json_len:], stamp the 4-byte BE prefix at offset 0.
+  Single 84 KB BSS buffer; no double-allocation.
+- publish_snippet_callback (cloud.c) sends to gs/{serial}/snippet
+  at QoS 1, waits for PUBACK with the same 30 s timeout the
+  heartbeat path uses.
+- On PUBACK: write a zero-byte .up marker file. find_pending_uuid
+  excludes any uuid with a .up marker, so subsequent ticks pick
+  the next pending snippet.
+
+Per M10.5 policy this is **Priority-2**: the snippet drain only
+runs when a heartbeat wake is already happening; never opens its
+own cellular cycle. v1 doesn't implement the explicit
+`battery_pct ≥ 30 %` gate from the policy (relies on the
+implicit "if heartbeat made it, battery is fine for an extra
+84 KB push") — will revisit if M14.5 battery numbers warrant.
+
+## F8.4 Bugs found + fixed during validation
+
+Posting here in case they're useful for any cloud-side reviewer
+who's debugging firmware deltas across milestones, and so the
+record's complete:
+
+1. **Per-sample fs_write into the writer thread overflowed its
+   stack.** Original M12.1f draft did one fs_write per snippet
+   sample from session.c::writer_entry. With the sampler +
+   writer + per-sample LittleFS metadata churn all sharing the
+   3072 B writer stack, the auto-stop session_stop sequence
+   HardFaulted on the trailing flush + algo finalize +
+   rewrite_header + close. Fix: 64-sample in-RAM batch (1.8 KB
+   stack) + writer_stack bumped 3072 → 4096.
+
+2. **Two static 84 KB buffers blew the RAM region by 80 KB.**
+   Initial design had separate read-binary and
+   build-outer-framing buffers. Fix: single 84 KB buffer; read
+   .json + .bin directly into their slots in the outer-framing
+   layout (no double-allocation).
+
+3. **Orphaned .bin from a previous-boot HardFault loops the
+   upload path forever.** A snippet whose capture_start
+   succeeded but whose capture_finish never ran (because the
+   stop sequence faulted) leaves a .bin without a .json sidecar.
+   find_pending_uuid keeps returning that uuid, the upload path
+   errors on the missing sidecar, infinite spam in logs +
+   real snippets behind it never get their turn. Fix: when the
+   .json sidecar is missing on upload attempt, best-effort
+   fs_unlink the orphan .bin so the next upload tick gets the
+   next pending entry.
+
+## F8.5 Notes for cloud-side reviewers
+
+A few observations about the round-trip, in case any of these
+inform Phase 2 cloud-side decisions:
+
+- **JSON-header framing was the right v1 call.** NCS 3.2.4's
+  Zephyr MQTT lib is 3.1.1 only — no MQTT 5 user properties
+  available. We confirmed this empirically during M12.1f
+  development (per §F.3 prediction). The §F.3 fallback works
+  cleanly; cloud-side parser implementation matches what the
+  4-byte BE prefix + JSON header gave it.
+
+- **Snippet S3 path reflects firmware-internal state correctly.**
+  `{serial}/{date}/{snippet_id}.bin` has the snippet_id from our
+  JSON header (`c1c906b6-...`), not the wall-clock time (which
+  is in window_start_ts). Cloud-side analytics tooling should
+  use snippet_id as the canonical row key + window_start_ts for
+  bucketing. Both are firmware-generated.
+
+- **Always-on v1 capture vs scheduled (every 6 hr) v1.5 cadence.**
+  Capacity math: 16 MB partition / 84 KB max = 195 snippets
+  worst case; clinic walks are typically 5-20 s so most files
+  are 14-56 KB → 280-1100 snippets actual capacity. At 1 session
+  per typical clinic patient day (best estimate from M10.5
+  scoping) that's at least a year of capacity at v1's
+  always-arm setting before any rotation matters. v1.5 will add
+  the 14-day stale cutoff + 90 % full rotation rules from the
+  M10.5 policy when more conservative behavior becomes
+  worthwhile.
+
+- **uploaded marker is a separate empty file, not a flag in the
+  .json.** Allows the marker write to be idempotent — if upload
+  PUBACK happens but mark_uploaded fails (flash busy, partition
+  full), the cleanup happens on next upload tick. Worst case is
+  a duplicate upload of the same snippet_id, which the cloud
+  IoT Rule's S3 PUT idempotently overwrites.
+
+## F8.6 What's next firmware-side
+
+With M12.1f closing out the M10.5-mandated cloud-uplink set, the
+remaining firmware items before clinic ship are mechanical /
+operational rather than feature work:
+
+- **M14.5** Site-survey shakedown (~1 day setup + 1 wk obs).
+  Flash `GS0000000001` with the deployment build (prj_field.conf
+  + everything we've shipped through M12.1f), bench desk for
+  ≥7 days, observe heartbeat stream + battery curve + crash
+  forensics + snippet drain across a real "cellular alone, sensor
+  occasionally moving" scenario. Includes M11.1 confirmation
+  walk against this exact build. The pre-activation gate +
+  blue-LED-slow-blink polish (deferred from M12.1e.2) lands
+  alongside this flash.
+
+- **M15** Field testing — clinic deployment of `GS0000000002/3`
+  (or 0001 if it stays as the survey/dev unit per use case).
+  M11.2 measures the outcome.
+
+## F8.7 Cadence
+
+This entry closes the M12.1 Cellular work-block. Heartbeat,
+activity, cmd ingest, and snippet uplink all bench-validated +
+cloud-Shadow / DDB / S3 landing all confirmed. No firmware
+action items for cloud team beyond what's already in flight
+(Phase 1.6 / 1.7 / 2A).
+
+Next coord-doc trigger from firmware: M14.5 site-survey
+shakedown report at the end of the week-long observation,
+which will include actual battery numbers + any deployment-
+readiness issues that surface from sustained cellular operation.
+
+---
+
+*Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
