@@ -2668,3 +2668,166 @@ counter-proposal or spec note, happy to incorporate.
 ---
 
 *Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
+
+
+---
+---
+
+# Firmware milestone update — 2026-04-29 (M12.1e.1 NCS Shadow lib bench check — GET + UPDATE round-trips PASS; §C.5.1 closed)
+
+> **From:** GoSteady firmware team
+> **Closes:** §C.5.1 (the open question on whether NCS 3.2.4's aws_iot
+> lib supports the Device Shadow surface end-to-end). **Answer: yes.**
+> **Acks:** §C6.1's per-thing IoT policy grant for shadow MQTT topics
+> — used end-to-end on this run; subscriptions land on connect, GET +
+> UPDATE both round-trip cleanly.
+>
+> **Implication:** M12.1e.2 is unblocked to use the Shadow path per
+> §C.4.4 (`desired.activated_at` re-check on every cellular wake +
+> `reported.activated_at` ack-write). No fallback to MQTT-retained
+> activate cmd needed.
+
+---
+
+## F6.1 What ran
+
+`CONFIG_GOSTEADY_CLOUD_SHADOW_BENCH_CHECK=y` (new, default n, bench-only)
+spawns a one-shot worker that fires ~30 s after boot, takes the aws_iot
+mutex, connects to AWS IoT, runs an explicit Shadow GET, then a Shadow
+UPDATE, logs each round-trip on uart0, and disconnects.
+
+Bench result captured 2026-04-29T21:10 against `GS9999999999`:
+
+```
+shadow bench: aws_iot_connect
+aws_iot: Subscribing to topic: $aws/things/GS9999999999/shadow/get/accepted
+aws_iot: Subscribing to topic: $aws/things/GS9999999999/shadow/get/rejected
+aws_iot: Subscribing to topic: $aws/things/GS9999999999/shadow/update/accepted
+aws_iot: Subscribing to topic: $aws/things/GS9999999999/shadow/update/rejected
+aws_iot: Subscribing to topic: $aws/things/GS9999999999/shadow/update/delta
+aws_iot: on_suback: Received ACK for subscribe message: id = 1984 result = 0
+gs_cloud: evt: CONNECTED (persistent_session=0)
+gs_cloud: shadow bench: sending GET
+aws_iot: Publishing to topic: $aws/things/GS9999999999/shadow/get
+aws_iot: on_puback: Received ACK for published message: id = 1 result = 0
+aws_iot: on_publish: Received message: topic = $aws/things/GS9999999999/shadow/get/accepted and len = 1036
+gs_cloud: shadow bench: GET round-trip OK
+gs_cloud: shadow bench: sending UPDATE — {"state":{"reported":{"shadow_bench_check_at":"2026-04-29T21:10:16Z"}}}
+aws_iot: Publishing to topic: $aws/things/GS9999999999/shadow/update
+aws_iot: on_puback: Received ACK for published message: id = 2 result = 0
+aws_iot: on_publish: Received message: topic = $aws/things/GS9999999999/shadow/update/accepted and len = 182
+gs_cloud: shadow bench: UPDATE round-trip OK
+gs_cloud: ==== M12.1e.1 SHADOW BENCH CHECK: PASS ====
+```
+
+Cloud-side verification via `aws iot-data get-thing-shadow`:
+
+```
+state.reported.shadow_bench_check_at = "2026-04-29T21:10:16Z"
+state.reported keys (14 total) = serial, ts, battery_pct, battery_mv,
+  rsrp_dbm, snr_db, firmware, uptime_s, reset_reason, fault_counters,
+  watchdog_hits, lastSeen, lastPreactivationAuditAt,
+  shadow_bench_check_at
+```
+
+The `shadow_bench_check_at` leaf merged in alongside the heartbeat
+fields cleanly — accept-all merge per portal contract working as
+documented for the UPDATE direction.
+
+## F6.2 What we proved
+
+- ✅ The aws_iot lib's `AWS_IOT_SHADOW_TOPIC_GET` send path publishes
+  to `$aws/things/<thing>/shadow/get` with empty body and correctly
+  routes the response to `AWS_IOT_EVT_DATA_RECEIVED` with
+  `topic.type_received == AWS_IOT_SHADOW_TOPIC_GET_ACCEPTED`.
+- ✅ The `AWS_IOT_SHADOW_TOPIC_UPDATE` send path with a real reported-
+  state JSON body lands on `$aws/things/<thing>/shadow/update` and the
+  acceptance fires through `AWS_IOT_SHADOW_TOPIC_UPDATE_ACCEPTED`.
+- ✅ Subscribe-on-connect for all five shadow/* topics
+  (get/{accepted,rejected}, update/{accepted,rejected,delta}) takes
+  ~700 ms total in our handler — that's the SUBACK we observe. Happens
+  once per CONNECT, not per shadow operation.
+- ✅ The §C6.1 wildcard policy grant works in practice for Publish +
+  Subscribe + Receive across the full set of shadow/* sub-topics. No
+  silent broker disconnects (which is what we saw in M12.1c.1 closure
+  before §C5.4 landed) — clean SUBACK + PUBACK sequence throughout.
+
+## F6.3 Notes for M12.1e.2 design
+
+A few things observed during the bench check that will inform the
+M12.1e.2 implementation; flagging here so they're in the record:
+
+- **Shadow doc sizing.** Today's GET response is 1036 B (14 reported
+  keys). M12.1e.2 buffer sizing should target 2 KB to leave headroom
+  as the shadow accumulates more keys (the Phase 2A `device-api`
+  Lambda will write `desired.activated_at`, plus future per-device
+  knobs like sampling rate, OTA gating, etc. per §F.9.4).
+
+- **JSON parsing.** Locating `desired.activated_at` in the GET response
+  requires a JSON walk. Zephyr's json lib is already in tree from M6a
+  (handles the START command schema today). Schema for the activate
+  delta is small enough — 1 string field + parent objects — to define
+  as a `json_obj_descr` array and let the lib do the work; no need to
+  pull in cJSON or similar.
+
+- **UPDATE acceptance is small.** 182 B for our test — useful as the
+  "ack persistence" surface for the M12.1e.2 flow ("wait for the
+  reported.activated_at write to be confirmed before clearing the
+  pre-activation blue LED state").
+
+- **UPDATE_DELTA_SUBSCRIBE flipped on too.** The §C.4.4 contract has
+  cloud writing `desired.activated_at` and firmware re-checking on
+  every cellular wake. Subscribing to the delta topic gives us a free
+  push-style notification on the immediate-push path (cloud sends
+  the activate cmd via gs/{serial}/cmd AND writes desired Shadow
+  state — firmware sees both, can ack via either). M12.1e.2 will
+  decide which path is canonical; UPDATE_DELTA gives optionality.
+
+- **One observation worth recording.** Cellular registration was
+  unusually long on this run (~2:25 vs the usual 8 s). Independent of
+  shadow code — bench check ran fine once cellular came up. Logging
+  it because if it persists across the next few wake cycles it'd
+  warrant a coord-doc note on PSM/eDRX timer interaction with the
+  modem's roaming-network selection.
+
+## F6.4 What's next firmware-side
+
+Now firmware-side unblocked end-to-end on the M12.1e path:
+
+- **M12.1e.2** Pre-activation gate + Shadow re-check on every cellular
+  wake (~2 days). Wires up:
+  - Subscribe to `gs/{serial}/cmd` during pre-activation, parse
+    `activate` cmd schema (`{cmd, cmd_id, ts, session_id}`).
+  - On receipt: persist `activated_at` to flash, write
+    `reported.activated_at` to Shadow, echo `cmd_id` in next heartbeat
+    via `gosteady_cloud_set_last_cmd_id()` (M12.1c.2 plumbing).
+  - On every cellular wake post-activation: GET shadow, validate
+    `desired.activated_at` matches on-flash value; if `null` →
+    re-enter pre-activation, blue LED on, no session capture (per
+    §C.4.4 cloud-side invariant).
+  - Pre-activation visual indicator: blue LED slow-blink (1 Hz, 100 ms
+    on / 900 ms off) per M10.5 spec.
+
+  Cloud-side caveat from §C6.3: the `device-shadow-handler` Lambda
+  (consumer of `reported.activated_at` ack → flips Device Registry
+  `activated_at`) is Phase 2A deferred. M12.1e.2 will pass the shadow
+  round-trip itself but Device Registry won't auto-flip; we're aware,
+  the M12.1e.2 acceptance probe is the shadow-write itself.
+
+- **M12.1f** Snippet uplink (~3 days; depends on M10.7.1, done).
+- **M14.5** Site-survey shakedown.
+
+## F6.5 Cadence
+
+This entry closes §C.5.1 with the PASS outcome. No firmware action items
+for cloud team — the bench check fully validated the policy grant from
+§C6.1 + the existing aws_iot lib API surface.
+
+Next coord-doc trigger from firmware: M12.1e.2 closure (Shadow round-
+trip from real activate-cmd flow), or M12.1f surfacing real questions
+on the §F.3 / §F.4 binary-preamble framing during snippet uplink
+implementation. Both within the next few days.
+
+---
+
+*Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
