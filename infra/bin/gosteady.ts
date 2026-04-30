@@ -14,7 +14,9 @@
  * Preview changes:         cdk diff --all --context env=dev
  */
 import * as cdk from 'aws-cdk-lib/core';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import { ENVIRONMENTS, GoSteadyEnvConfig } from '../lib/config.js';
+import { EnforceLogRetention } from '../lib/aspects/log-retention.js';
 import { SecurityStack } from '../lib/stacks/security-stack.js';
 import { AuthStack } from '../lib/stacks/auth-stack.js';
 import { DataStack } from '../lib/stacks/data-stack.js';
@@ -126,6 +128,16 @@ const integration = new IntegrationStack(app, `${prefix}-Integration`, {
 });
 integration.addDependency(data);
 integration.addDependency(notification);
+
+// ── Log retention enforcement (Phase 1.6 Stage 4) ──────────────────
+// Aspect-based defense in depth: every Logs::LogGroup that doesn't
+// already have RetentionInDays set picks up the env-appropriate value.
+// Existing explicit settings on Lambda log groups are left alone.
+cdk.Aspects.of(app).add(
+  new EnforceLogRetention({
+    retention: config.prefix === 'prod' ? logs.RetentionDays.THREE_MONTHS : logs.RetentionDays.ONE_MONTH,
+  }),
+);
 
 // ── Observability (Phase 1.6) ──────────────────────────────────────
 // Wraps everything; no inbound CDK dependencies. Dashboards reference

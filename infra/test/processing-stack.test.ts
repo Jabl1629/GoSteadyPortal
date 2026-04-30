@@ -45,6 +45,7 @@ describe('ProcessingStack — Phase 1B revision', () => {
     preActivationAuditSampleHours: 1,
     powertoolsLayerArn:
       'arn:aws:lambda:us-east-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-arm64:32',
+      costAnomalyEnabled: false,
   };
 
   const security = new SecurityStack(app, 'TestSecurityForProcessing', { config });

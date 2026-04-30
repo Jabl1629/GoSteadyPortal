@@ -121,6 +121,18 @@ export interface GoSteadyEnvConfig {
    * separate prod account exists.
    */
   readonly powertoolsLayerArn: string;
+  /**
+   * Whether to deploy AWS Cost Anomaly Detection (Phase 1.6 §Architecture).
+   * **Requires Cost Explorer to be enabled at the account level FIRST** —
+   * one-time click in the AWS Console (Billing & Cost Management → Cost
+   * Explorer → Enable). The CFN `AWS::CE::AnomalyMonitor` resource cannot
+   * enable it programmatically; deploying without it returns
+   * `User not enabled for cost explorer access` and rolls back the stack.
+   *
+   * Default false in dev (manual opt-in pending). When ready: enable Cost
+   * Explorer in console, flip this to true, redeploy Observability stack.
+   */
+  readonly costAnomalyEnabled: boolean;
 }
 
 /**
@@ -159,6 +171,9 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     // Bump the version number when upgrading; AWS publishes monthly.
     powertoolsLayerArn:
       'arn:aws:lambda:us-east-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-arm64:32',
+    // Cost Explorer not enabled in this dev account at deploy time
+    // (2026-04-29). Flip to true after the one-time console opt-in.
+    costAnomalyEnabled: false,
   },
   prod: {
     envName: 'Production',
@@ -193,5 +208,8 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     // first deploy (Phase 1.6 Open Question Q1).
     powertoolsLayerArn:
       'arn:aws:lambda:us-east-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-arm64:32',
+    // Cost Explorer not enabled in this dev account at deploy time
+    // (2026-04-29). Flip to true after the one-time console opt-in.
+    costAnomalyEnabled: false,
   },
 };

@@ -1,8 +1,12 @@
 import * as cdk from 'aws-cdk-lib/core';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import { Construct } from 'constructs';
 import { GoSteadyEnvConfig } from '../config.js';
 import { PlatformHealthDashboard } from '../constructs/dashboards/platform-health.js';
 import { PerDeviceDashboard } from '../constructs/dashboards/per-device.js';
+import { HandlerAlarms } from '../constructs/alarms/handler-alarms.js';
+import { InfrastructureAlarms } from '../constructs/alarms/infrastructure-alarms.js';
+import { DeviceAlarms } from '../constructs/alarms/device-alarms.js';
 
 export interface ObservabilityStackProps extends cdk.StackProps {
   readonly config: GoSteadyEnvConfig;
@@ -76,6 +80,34 @@ export class ObservabilityStack extends cdk.Stack {
       // Default serial = bench unit; M14.5 will switch to a shipping unit
       // by toggling the dashboard variable in the console (no redeploy).
       defaultSerial: 'GS9999999999',
+    });
+
+    // ── Alarm catalog (Stage 4) ─────────────────────────────────
+    // Reuse Phase 1.5's existing SNS topic (deployed by Security stack;
+    // exported as `{env}-CostAlarmTopic`) — preserves the email
+    // subscription that's already configured. Spec L6.
+    const opsTopicArn = cdk.Fn.importValue(`${env}-CostAlarmTopic`);
+    const opsTopic = sns.Topic.fromTopicArn(this, 'OpsTopicRef', opsTopicArn);
+
+    new HandlerAlarms(this, 'HandlerAlarms', {
+      env,
+      opsTopic,
+      lambdaNames: allLambdaNames,
+    });
+
+    new InfrastructureAlarms(this, 'InfraAlarms', {
+      env,
+      opsTopic,
+      opsTopicArn,
+      dlqQueueName: `gosteady-${env}-iot-dlq`,
+      iotRuleNames,
+      ddbTableNames: identityTables,
+      costAnomalyEnabled: config.costAnomalyEnabled,
+    });
+
+    new DeviceAlarms(this, 'DeviceAlarms', {
+      env,
+      opsTopic,
     });
 
     // ── Outputs ──────────────────────────────────────────────────
