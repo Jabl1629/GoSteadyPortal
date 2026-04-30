@@ -3302,3 +3302,239 @@ readiness issues that surface from sustained cellular operation.
 ---
 
 *Entry owner (firmware side): Jace + Claude. Counter-proposals welcome.*
+
+
+---
+---
+
+# Cloud team milestone update — 2026-04-30 (Phase 1.6 Observability deployed)
+
+> **From:** GoSteady cloud team
+> **Closes:** the §C6.5 commitment line about "Phase 1.6 Observability —
+> alarm catalog (especially log-pattern filters for the swallowed-error
+> pattern; see ARCHITECTURE.md §16), X-Ray activation, dashboards." All
+> three landed today.
+> **Acks:** firmware §F5–§F8 (M10.7 + M12.1c.2 + M12.1e.1 + M12.1e.2 +
+> M12.1f) collectively closing out the M12.1 Cellular work-block. The
+> data flowing through Shadow + Activity DDB + S3 across that sprint
+> was exactly the input shape the Phase 1.6 dashboard widgets needed —
+> turning on the dashboards retroactively pulled up live data points
+> (the M12.1d activity row, the M12.1f snippet upload, the M12.1c.2
+> heartbeat extras) on first render.
+>
+> **TL;DR:** Phase 1.6 Observability stack deployed to dev 2026-04-30
+> across 4 stages with checkpoints (commits `5bcc9cc` → `7e73121`).
+> Two CloudWatch dashboards (`gosteady-dev-platform-health` +
+> `gosteady-dev-per-device`), 29 alarms, AWS-managed Powertools
+> layer attached to the 4 handler Lambdas, X-Ray Active Tracing on all
+> 6 Lambdas, log-retention aspect, log-pattern filters that close the
+> §16 swallowed-error gap. Cost Anomaly Detection coded but gated
+> pending Cost Explorer account-level opt-in (CFN can't enable it).
+>
+> **Implication for firmware:** during M14.5 site-survey shakedown,
+> the Per-Device Detail dashboard URL becomes the shareable monitoring
+> surface for the bench unit + shipping unit. Switch the dashboard
+> variable to the shipping unit's serial when `GS0000000001` flashes;
+> all widgets re-query without redeploying the dashboard.
+
+---
+
+## C7.1 What deployed
+
+Stack: `GoSteady-Dev-Observability` (new), 42 CFN resources total.
+4-stage rollout with separate commits per stage so rollback is clean.
+
+Stage-by-stage summary:
+
+| Stage | Commit | Resources | Acceptance |
+|-------|--------|-----------|-----------|
+| **0** Spec drafted | `5bcc9cc` | docs only | (n/a) |
+| **1** Powertools layer | `c4589e0` | 4 Lambda updates | T1: layer attached to all 4 handlers, ARM64/py3.12; T2: heartbeat / activity / threshold / alert all functional through layer |
+| **2** X-Ray + per-device metrics | `22a42fb` | 6 Lambda updates + heartbeat-processor handler.py | T3: all 6 Lambdas show TracingConfig.Mode=Active; T4: 7-metric EMF JSON in `GoSteady/Devices/dev` namespace, X-Ray trace `1-69f2d971-...` visible with 309 ms response latency |
+| **3** Dashboards | `de81b16` | new Observability stack (2 dashboards + URL outputs) | T5/T6/T7/T17/T18: both dashboards rendered, per-device variable populates, recent-activity + recent-snippet widgets surface the bench unit's M12.1d session + M12.1f snippet upload (43,122 B `c1c906b6-...`) |
+| **4** Alarms + retention + cost gate | `7e73121` | 29 alarms + 9 metric filters + log-retention aspect + cost-anomaly construct (gated off) | T8: 30 alarms total; T9 ALARM-fired correctly on synthetic orphan-serial activity; T10 ALARM-fired (after pattern fix for stdlib log shape) on synthetic format_version=99 snippet; T14: all 6 Lambda log groups at 30d retention |
+
+## C7.2 The "rudimentary view of files offloaded by device"
+
+Per firmware feedback that triggered this spec (the §F8.7 → 1.6 →
+"step by step validation" sequence). The Per-Device Detail dashboard
+at `gosteady-dev-per-device` includes two Logs Insights table
+widgets:
+
+- **Recent activity sessions** — backed by activity-processor's
+  Powertools `patient.activity.create` audit log entries, surfacing
+  the last 20 sessions for the selected serial with `session_end`,
+  `steps`, `distance_ft`, `active_min`, `roughness_R`, `surface_class`,
+  `firmware_version`. Bench-validated against the M12.1d row
+  (`steps=15, distance_ft=11.05, R=0.1587, surface=indoor,
+  firmware=0.7.0-cloud`) — shows up cleanly when filtered to
+  `GS9999999999`.
+- **Recent snippet uploads** — backed by snippet-parser's
+  `device.snippet_uploaded` JSON log lines, surfacing the last 20
+  uploads for the selected serial with `snippet_id`,
+  `window_start_ts`, `size_bytes`, `anomaly_trigger`, `s3_key`.
+  Bench-validated against the M12.1f snippet (`c1c906b6-dc63-...`,
+  43,122 B, `GS9999999999/2026-04-29/c1c906b6-...bin`) — shows up
+  with the bench unit's full S3 key.
+
+Phase 2A's Lambda-backed custom widgets will replace the Logs
+Insights queries with direct DDB / S3 queries (more efficient, less
+latency, clickable S3 links). Until then this is the rudimentary
+shape — live, real-data, shareable URL.
+
+## C7.3 Per-device dashboard variable for switching units
+
+The dashboard exposes a single PATTERN-type variable `serial` (free-
+text input, default `GS9999999999`). Toggling it does a regex find-
+and-replace across the dashboard JSON at render time — every metric
+dimension and every Logs Insights query containing `GS9999999999`
+gets transparently swapped to the new value.
+
+For M14.5 site-survey: when `GS0000000001` (or whichever shipping
+unit ships first) is flashed, click the variable selector at the top
+of the dashboard, type the new serial, and the entire dashboard
+re-queries against that unit. No redeploy needed. Default can be
+flipped later via a config-only redeploy if the bench unit becomes
+less interesting.
+
+## C7.4 Alarm catalog — closes §16 swallowed-error gap
+
+Per the §16 ARCHITECTURE.md open question that 1.6 was scoped to
+address. Three signal paths now alarm explicitly, ending the
+silent-failure window:
+
+1. **Lambda Errors > 0** per handler — catches uncaught exceptions
+   that propagate out of the handler. Was already a CloudWatch
+   metric; now alarms.
+2. **ERROR-level log filter** per handler — catches handlers that
+   log-and-swallow (return success while logging an error).
+   Powertools handlers (4): `"level":"ERROR"` JSON shape match.
+   Stdlib handlers (`cognito-pre-token` + `snippet-parser`):
+   `[ERROR]` substring match against Lambda runtime's
+   uncaught-exception line prefix.
+3. **DLQ depth > 0** on the IoT DLQ — catches IoT-side failures
+   (auth, throttling, malformed SQL, missing Lambda permission).
+   The §16 finding was that this DLQ does NOT catch handler-internal
+   failures (async Lambda invoke). The other two paths fill that
+   gap.
+
+Plus handler-specific alarms for the most-likely-swallowed failure
+modes: `unmapped_serial` on activity-processor (orphan device row),
+`SnippetValidationError` on snippet-parser (malformed payload).
+
+Handler-specific test results during deploy:
+- `activity-processor-unmapped-serial`: synthetic publish for
+  serial `GS_ORPHAN_T9` → activity-processor logged `unmapped_serial`
+  WARN line → metric filter incremented to 1 →
+  alarm transitioned to ALARM after 5 min (sampleCount=7 datapoint).
+- `snippet-parser-snippet-validation-error`: synthetic publish with
+  `format_version=99` → snippet-parser raised `SnippetValidationError`
+  → Lambda runtime emitted `[ERROR] SnippetValidationError: ...` →
+  all 3 snippet-parser alarms (errors, error-pattern,
+  snippet-validation-error) transitioned to ALARM.
+
+## C7.5 Watchdog-hits ≥3 / 24 h alarm (firmware §F5.2 suggestion)
+
+Per the firmware-coord §F5.2 recommendation when M10.7.3 made
+`watchdog_hits` actionable. CloudWatch metric-math alarm on the
+Stage-2 EMF metric:
+
+```
+expression: MAX([m1]) - MAX([m1_24h_ago])  (where m1 = WatchdogHits)
+threshold: ≥3
+period: 24h
+```
+
+Fires when any device in the fleet reports ≥3 watchdog resets within
+24 h. v1 routes to the ops topic — once Phase 2A device-shadow-handler
+ships, this becomes a candidate for caregiver-facing surfacing
+("device unstable"). Alarm description in CloudWatch console
+includes a pointer to the Per-Device dashboard for diagnosis.
+
+v1 caveat: alarm doesn't carry the offending serial in the
+notification text (single fleet-wide metric math), so operator
+inspects the Per-Device dashboard to find the specific unit.
+Phase 2A custom widgets will swap to per-serial alarms once Device
+Registry is queryable from CDK synth time.
+
+## C7.6 Cost Anomaly Detection — gated, requires console opt-in
+
+CFN `AWS::CE::AnomalyMonitor` failed CREATE on first deploy with
+`User not enabled for cost explorer access`. Cost Explorer is an
+account-level opt-in that has to be enabled manually via the AWS
+Console (Billing & Cost Management → Cost Explorer → Enable). CFN
+can't trigger it.
+
+Wrapped both the monitor and subscription in a feature flag:
+`config.costAnomalyEnabled` (default `false` in dev). Construct +
+spec are coded; flip the flag + redeploy `GoSteady-Dev-Observability`
+once Cost Explorer is enabled in console. Anomaly delta threshold
+set at $20 (meaningful jump at our ~$10-30/mo dev spend).
+
+The existing $100 billing alarm from Phase 1.5 continues to run
+unchanged — that's the absolute-threshold catch.
+
+## C7.7 What this unblocks for firmware
+
+**M14.5 site-survey shakedown observability surface:**
+
+| Need | URL / mechanism |
+|------|-----------------|
+| Live device state | `aws iot-data get-thing-shadow --thing-name GS9999999999` (markdown widget on Per-Device dashboard documents the snippet); Phase 2A custom widget replaces this |
+| Heartbeat history (battery, signal, fault counters) | Per-Device dashboard battery/signal/watchdog graphs over selected time range |
+| Recent walk sessions | Per-Device dashboard "Recent activity sessions" widget |
+| Recent snippet uploads | Per-Device dashboard "Recent snippet uploads" widget; click `s3_key` value → S3 console |
+| Lambda errors / IoT failures | Platform Health dashboard + ops-topic email subscriptions |
+| Crash forensics surface | Per-Device dashboard fault-counter graphs trending over time |
+
+For M14.5: switch the dashboard variable to `GS0000000001` (or
+whichever shipping unit ships first) when the unit goes on the
+bench. Email subscriber on the ops topic gets pinged on any alarm
+transition during the 7-day soak.
+
+## C7.8 What's next cloud-side
+
+With 1.6 deployed, cloud-surface remaining items for the firmware
+M14.5 → M15 timeline:
+
+1. **Phase 1.7 Audit Logging** — dedicated audit log group + S3
+   Object Lock + subscription filter routing the existing audit-
+   shape log entries (1B-rev handlers already emit them in Powertools
+   structured JSON). Spec not yet drafted; gates Phase 2A together
+   with what 1.6 just landed.
+2. **Phase 2A Device Lifecycle** — `device-api` Lambda (provision
+   endpoint that publishes the activate cmd + writes Shadow
+   `desired.activated_at`), `device-shadow-handler` Lambda (consumes
+   firmware's `reported.activated_at` ack and flips Device Registry
+   state), `discharge-cascade` Lambda. Until 2A ships, firmware's
+   M12.1e.2 wake-time Shadow re-check has no observable cloud
+   effect (per §C6.3). Spec lives at
+   [`phase-2a-device-lifecycle.md`](../specs/phase-2a-device-lifecycle.md).
+3. **Cost Anomaly Detection enablement** — manual Cost Explorer
+   opt-in in console, then flip the gate flag + redeploy.
+
+No firmware-side action items from this entry. The 1.6 deploy is
+non-disruptive to the ingestion path; existing M12.1c.1 / M12.1d /
+M12.1e.2 / M12.1f publish cycles continue working unchanged. The
+new dashboards retroactively render the existing data; future
+heartbeats automatically populate the per-device EMF metrics
+(no firmware change).
+
+## C7.9 Cadence
+
+This entry closes the §C6.5 commitment on Phase 1.6 deliverables.
+Next cloud-side coord-doc-affecting work: Phase 1.7 Audit Logging
+spec drafting + deploy, then Phase 2A Device Lifecycle (per the
+arc above).
+
+Per firmware §F8.7 ("Next coord-doc trigger from firmware:
+M14.5 site-survey shakedown report at the end of the week-long
+observation"), the next ping from firmware should be the M14.5
+report. The Per-Device dashboard URL is the recommended surface
+for that observation; happy to share access patterns or extend the
+widget set if anything proves missing.
+
+---
+
+*Entry owner (cloud side): Jace + Claude. Counter-proposals,
+blocker flags, and milestone updates welcome.*

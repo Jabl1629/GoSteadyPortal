@@ -2,10 +2,10 @@
 
 ## Overview
 - **Phase**: 1.6
-- **Status**: Planned
-- **Branch**: feature/observability
-- **Date Started**: TBD
-- **Date Completed**: TBD
+- **Status**: ✅ Deployed (dev)
+- **Branch**: feature/infra-scaffold (matched existing project pattern; spec field aspirational)
+- **Date Started**: 2026-04-29
+- **Date Completed**: 2026-04-30
 
 Deploys the operational telemetry layer for the cloud platform: a Powertools Lambda layer (refactor target for the six existing handlers), X-Ray tracing across IoT Rule → Lambda → DDB, two CloudWatch dashboards (a platform-health view and a per-device detail view), an alarm catalog covering the silent-failure modes documented in [`ARCHITECTURE.md` §16](ARCHITECTURE.md), enforced log-retention policies, and AWS Cost Anomaly Detection. Audience is internal: the cloud + firmware teams need shared visibility during M14.5 site-survey shakedown and M15 clinic deployment, before the real caregiver-facing portal (Phase 2A → 2B → 3A) ships.
 
@@ -494,3 +494,4 @@ Three of six decided now. Q1 + Q2 require observation/external state to resolve;
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-04-29 | Jace + Claude (firmware coord with cloud team) | Initial spec drafted in response to firmware coordination feedback that the existing Phase Plan deferred all visual validation past M14.5 ship — see firmware-coordination doc §F9 (forthcoming) |
+| 2026-04-30 | Jace + Claude (cloud session) | **Deployed** to dev. 4-stage deploy with checkpoints (`5bcc9cc` spec → `c4589e0` Stage 1 layer → `22a42fb` Stage 2 X-Ray + metrics → `de81b16` Stage 3 dashboards → `7e73121` Stage 4 alarms). Acceptance T1–T18, T20 pass; T15 deferred (no stub Lambda needed today); T16 deferred behind feature flag pending Cost Explorer console opt-in. Three implementation findings: (a) layer scope is 4 handlers not 6 — `cognito-pre-token` + `snippet-parser` are stdlib-only and don't import aws-lambda-powertools; (b) Cost Anomaly Detection requires account-level Cost Explorer enablement that CFN can't trigger — gated behind `costAnomalyEnabled` config field; (c) snippet-parser log filter patterns must be stdlib substring matches, not Powertools JSON shape — fixed in `handler-alarms.ts` with a per-Lambda `isPowertools` switch. |

@@ -1162,15 +1162,38 @@ Structured JSON via Lambda Powertools:
 
 ---
 
-### Phase 1.6 — Observability Foundation 🔲 **NEW**
+### Phase 1.6 — Observability Foundation ✅ **Deployed (dev) 2026-04-30**
 
-- Lambda Powertools for Python deployed as a layer
-- Structured JSON logging across all Lambdas
-- X-Ray tracing across IoT Rule → Lambda → DDB
-- CloudWatch dashboards: ingestion health, alert rate, error rate, cost
-- Alarm catalog: Lambda errors, DLQ depth, IoT Rule failures, DDB throttles
-- Log retention enforced (30d dev / 90d prod)
-- Cost anomaly detection enabled
+**Spec:** [`phase-1.6-observability.md`](phase-1.6-observability.md)
+
+**Deployed in dev (Observability stack `GoSteady-Dev-Observability`, 2026-04-30; commits `5bcc9cc` → `7e73121`):**
+- AWS-managed Powertools layer (v32 / Powertools 3.28.0, ARM64 / Python 3.12) attached to the 4 handler Lambdas; pip dep removed from each handler's bundle. `cognito-pre-token` + `snippet-parser` are stdlib-only and stay off the layer.
+- X-Ray Active Tracing on **all 6 Lambdas** (`tracing: ACTIVE` + auto-granted `xray:PutTraceSegments` / `xray:PutTelemetryRecords` on each execution role). `POWERTOOLS_TRACER_DISABLED` flipped `true` → `false` on the 4 handlers; Powertools Tracer's boto3 auto-instrumentation now lights up.
+- Heartbeat-processor publishes 7 per-device EMF metrics in the `GoSteady/Devices/{env}` namespace (dimensioned by `serial`): `BatteryPct`, `RsrpDbm`, `SnrDb` (always); `UptimeSec`, `WatchdogHits`, `FaultCountersFatal`, `FaultCountersWatchdog` (when present). Implemented via Powertools `EphemeralMetrics` (separate buffer from the `GoSteady/Processing/{env}` default).
+- Two CloudWatch Dashboards:
+  - `gosteady-{env}-platform-health` — global view: IoT Rule success/failure rates, Lambda invocations + errors + duration p50/95/99 per handler, DLQ depth, DDB throttles, monthly billing.
+  - `gosteady-{env}-per-device` — single-device drill-down with PATTERN-type `serial` variable (default `GS9999999999`): battery + signal time-series + watchdog/fault gauges + four Logs Insights tables (recent activity / recent snippets / recent synthetic alerts / recent device alerts).
+- Alarm catalog (29 alarms total) all routing to Phase 1.5's existing `gosteady-{env}-cost-alarms` SNS topic (cross-stack-imported, repurposed for ops):
+  - 6 × per-handler Lambda Errors > 0
+  - 6 × per-handler ERROR-pattern log filter (Powertools `"level":"ERROR"` for the 4 handlers; `[ERROR]` substring for stdlib-only `cognito-pre-token` + `snippet-parser`)
+  - `activity-processor-unmapped-serial` (orphan-serial activity publishes)
+  - `snippet-parser-snippet-validation-error` (malformed snippet payload)
+  - `iot-dlq-not-empty`
+  - 5 × IoT Rule Failure
+  - 8 × DDB UserErrors / SystemErrors per identity table
+  - `device-watchdog-hits-rate` metric-math alarm (≥3 watchdog hits within 24 h, per firmware coord §F5.2 suggestion)
+- Log retention enforcement: `EnforceLogRetention` CDK Aspect attached at app level. No-op on currently-explicit Lambda log groups; defense-in-depth for any future LogGroup added without explicit retention. 30 days dev / 90 days prod.
+
+**🟡 Pending — same phase, gated behind config flag:**
+- AWS Cost Anomaly Detection (`config.costAnomalyEnabled = false`) — CFN `AWS::CE::AnomalyMonitor` requires Cost Explorer to be enabled at the account level first (one-time console opt-in). Construct + subscription are coded behind `if (costAnomalyEnabled) { ... }`; flip the flag + redeploy after enabling Cost Explorer in console.
+
+**Closes ARCHITECTURE.md §16 open questions:**
+- "Phase 1.6 alarm catalog must include log-pattern alarms, not just DLQ-depth" — done via the per-handler ERROR-pattern + handler-specific filters.
+- "IoT Rule Lambda actions are async — Lambda exceptions don't trip the IoT-side error action" — closed by the per-handler Lambda Errors alarms (catch uncaught exceptions) + log-pattern alarms (catch logged-and-swallowed errors). DLQ depth alarm continues to catch IoT-side failures.
+
+**Dashboard URLs (CFN outputs):**
+- Platform-Health: `https://console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=gosteady-dev-platform-health`
+- Per-Device Detail: `https://console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=gosteady-dev-per-device`
 
 ---
 
@@ -1319,11 +1342,12 @@ Firmware M12.1e.2 unblocked:     cloud-side Shadow consumer (Threshold Detector)
                                  reported.activated_at consumer is dormant (handler-shape ready,
                                  device-side write path lands with M12.1e.2 firmware itself).
 
-New phases needed:               1.6 🔲   1.7 🔲   2A 🔲   2B 🔲
+New phases needed:               1.6 ✅ (2026-04-30)   1.7 🔲   2A 🔲   2B 🔲
 
 Path to portal-renders-real-data:
-  1.6 + 1.7 → 2A → 2B
-  (1A-rev + 1B-rev landed 2026-04-27; 1.6 / 1.7 specs not yet written; both gate 2A)
+  1.6 ✅ → 1.7 → 2A → 2B
+  (1.6 deployed 2026-04-30 — dashboards + alarms + Powertools layer + X-Ray;
+   1.7 spec not yet written; gates 2A together with the unwritten 1.7)
 ```
 
 ---
@@ -1482,8 +1506,8 @@ Path to portal-renders-real-data:
 - [ ] **Daily rollup scope:** Steps/distance/active-min by day? By hour? Both?
 - [ ] **Audit hot-path latency:** Acceptable to add ~10ms per mutation for synchronous audit write? Or fire-and-forget via SQS?
 - [ ] **Multi-facility caregiver UX:** Single facility selector, or unified inbox across all assigned facilities?
-- [ ] **Phase 1.6 alarm catalog must include log-pattern alarms, not just DLQ-depth.** Discovered 2026-04-27 via firmware-coord §C4.3 threshold-detector probe: heartbeat-processor's threshold-fired alert PutItems fail post-0B-revision (alerts table now `patientId`-keyed, OLD handler still writes `serialNumber`). Lambda catches the exception, logs `[HEARTBEAT][ALERT][ERROR] ...`, returns OK — IoT Rule sees a successful invocation, **DLQ stays empty.** Phase 1.6 needs CloudWatch Logs metric filters / alarms on `[ALERT][ERROR]` and similar swallowed-error patterns across all handlers, not just `ApproximateNumberOfMessagesVisible` on DLQs. Same pattern likely lurks in any handler that catches and logs. **Fix is implicit when 1B revision deploys** (heartbeat-processor stops generating alerts entirely; threshold-detector writes through patient-resolution path so PK matches), but the underlying observability gap is general: logged-and-swallowed errors are invisible to ops without explicit log alarms.
-- [ ] **IoT Rule Lambda actions are async — Lambda-raised exceptions don't trip the IoT-side error action.** Discovered 2026-04-27 during 1A-rev SnippetParser malformed-payload acceptance tests (T12–T15): SnippetParser raised `SnippetValidationError` on each malformed input, but the IoT-side SQS DLQ stayed empty. AWS IoT Rule Lambda actions invoke Lambda asynchronously by default; the rule succeeds the moment the Lambda is invoked, regardless of whether the function later raises. Exceptions show up in CloudWatch logs (which is what ops actually wants for visibility) and as Lambda Errors metric — but NOT in the IoT Rule's SQS error-action queue. The IoT DLQ continues to catch IoT-side failures (auth, throttling, malformed SQL, missing Lambda permission). Spec assumption A7 in [`phase-1a-revision.md`](phase-1a-revision.md) is more nuanced than originally written. Implication for Phase 1.6: alarm on Lambda Errors metric + log-pattern filters per handler; do not rely on DLQ depth alone for handler-internal failure detection.
+- [x] **Phase 1.6 alarm catalog must include log-pattern alarms, not just DLQ-depth.** ~~Discovered 2026-04-27...~~ **Resolved 2026-04-30 by Phase 1.6 deploy.** Per-handler ERROR-pattern log alarms now ship for all 6 Lambdas (Powertools `"level":"ERROR"` for the 4 handlers; `[ERROR]` substring for stdlib-only `cognito-pre-token` + `snippet-parser`), plus handler-specific filters (`unmapped_serial` on activity-processor; `SnippetValidationError` on snippet-parser). DLQ depth alarm still ships separately to catch IoT-side failures.
+- [x] **IoT Rule Lambda actions are async — Lambda-raised exceptions don't trip the IoT-side error action.** ~~Discovered 2026-04-27...~~ **Resolved 2026-04-30 by Phase 1.6 deploy.** Per-handler Lambda Errors alarm (`AWS/Lambda > Errors > 0 in 5 min`) now catches uncaught exceptions for all 6 Lambdas. Log-pattern alarms catch logged-and-swallowed errors. The IoT DLQ depth alarm continues to catch IoT-side failures. All three signal paths now have explicit alarms; no more silent-failure modes.
 - [ ] **Shadow IoT Rule trigger topic correction.** [`phase-1b-revision.md`](phase-1b-revision.md) Lambda 2 originally specified `$aws/things/+/shadow/update/accepted` paired with SQL projecting `current.state.reported` and `previous.state.reported`. That combination is internally inconsistent — `update/accepted` carries only the merged delta as a flat `state.reported` object; `current` / `previous` only exist on `update/documents` payloads. Discovered during 1B-rev deploy verification 2026-04-27: threshold-detector returned with `Duration: 17ms` because `event.get("reported")` was None on every invocation. Fixed by switching the IoT Rule topic to `update/documents`; SQL stayed identical. Inline comment in [ingestion-stack.ts](../../infra/lib/stacks/ingestion-stack.ts) records the rationale. The phase-1b-revision spec text is still pre-fix; consider a small addendum or reconcile the topic naming on the next rev.
 
 ### Firmware-coordination items — RESOLVED (2026-04-26 batch)
@@ -1525,7 +1549,7 @@ Path to portal-renders-real-data:
 | 1B-rev | Processing Logic Revision (Threshold Detector via Shadow, patient-centric handlers, ARM64 + Powertools, hierarchy snapshots) | [`phase-1b-revision.md`](phase-1b-revision.md) | ✅ Deployed (2026-04-27) |
 | 1C | Scheduled Jobs | — | 🔲 Planned |
 | 1.5 | Security Foundation | [`phase-1.5-security.md`](phase-1.5-security.md) | 🟡 Partially deployed — Security stack live; IdentityKey CMK consumed by 0A-rev + 0B-rev; FirmwareKey CMK consumption scoped into 1A-rev; Org bootstrap + IAM audits still pending |
-| 1.6 | Observability | — | 🔲 Planned (new) |
+| 1.6 | Observability | [`phase-1.6-observability.md`](phase-1.6-observability.md) | ✅ Deployed (2026-04-30) — 2 dashboards + 29 alarms + log-retention aspect; cost anomaly gated pending Cost Explorer console opt-in |
 | 1.7 | Audit Logging | — | 🔲 Planned (new) |
 | 2A | Portal API | — | 🔲 Planned |
 | 2A-dl | Device Lifecycle (subset of 2A) | [`phase-2a-device-lifecycle.md`](phase-2a-device-lifecycle.md) | 🔲 Planned |
