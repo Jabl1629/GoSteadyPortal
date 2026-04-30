@@ -90,6 +90,14 @@ export class ProcessingStack extends cdk.Stack {
       ENVIRONMENT: p,
     };
 
+    // ── Powertools Lambda layer (Phase 1.6) ──────────────────────
+    // AWS-managed layer; pinned ARN per env in config.ts.
+    const powertoolsLayer = lambda.LayerVersion.fromLayerVersionArn(
+      this,
+      'PowertoolsLayer',
+      config.powertoolsLayerArn,
+    );
+
     // ── Activity Processor (refactored) ──────────────────────────
     const activityProc = new ProcessingLambda(this, 'ActivityProcessor', {
       config,
@@ -99,6 +107,7 @@ export class ProcessingStack extends cdk.Stack {
       memoryMb: config.processingLambdaMemoryMb,
       timeoutSeconds: config.processingLambdaTimeoutSeconds,
       environment: commonEnv,
+      powertoolsLayer,
     });
     this.activityProcessor = activityProc.function;
     // Preserve pre-1B-revision CFN logical ID so CFN does an in-place
@@ -126,6 +135,7 @@ export class ProcessingStack extends cdk.Stack {
         ...commonEnv,
         ACTIVATION_ACK_WINDOW_HOURS: String(config.activationAckWindowHours),
       },
+      powertoolsLayer,
     });
     this.heartbeatProcessor = heartbeatProc.function;
 
@@ -155,6 +165,7 @@ export class ProcessingStack extends cdk.Stack {
         ...commonEnv,
         PRE_ACTIVATION_AUDIT_SAMPLE_HOURS: String(config.preActivationAuditSampleHours),
       },
+      powertoolsLayer,
     });
     this.thresholdDetector = thresholdDet.function;
 
@@ -181,6 +192,7 @@ export class ProcessingStack extends cdk.Stack {
       memoryMb: config.processingLambdaMemoryMb,
       timeoutSeconds: config.processingLambdaTimeoutSeconds,
       environment: commonEnv,
+      powertoolsLayer,
     });
     this.alertHandler = alertHand.function;
     (this.alertHandler.node.defaultChild as cdk.CfnResource).overrideLogicalId(

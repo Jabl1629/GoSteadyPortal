@@ -114,6 +114,13 @@ export interface GoSteadyEnvConfig {
    * Pre-activation audit log sampling cadence in hours per serial (Phase 1B revision L8).
    */
   readonly preActivationAuditSampleHours: number;
+  /**
+   * AWS-managed Powertools for AWS Lambda (Python) V3 layer ARN (Phase 1.6).
+   * Pinned per env so version drift is explicit. ARM64 / Python 3.12.
+   * Cross-account-readable (AWS-managed); same ARN works in prod when the
+   * separate prod account exists.
+   */
+  readonly powertoolsLayerArn: string;
 }
 
 /**
@@ -148,6 +155,10 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     processingLambdaTimeoutSeconds: 30,
     activationAckWindowHours: 24,
     preActivationAuditSampleHours: 1,
+    // Powertools 3.28.0 published 2026-04-14 (latest as of 2026-04-29 spec deploy).
+    // Bump the version number when upgrading; AWS publishes monthly.
+    powertoolsLayerArn:
+      'arn:aws:lambda:us-east-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-arm64:32',
   },
   prod: {
     envName: 'Production',
@@ -177,5 +188,10 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     processingLambdaTimeoutSeconds: 30,
     activationAckWindowHours: 24,
     preActivationAuditSampleHours: 1,
+    // Same AWS-managed layer is cross-account-readable; pin matches dev for now.
+    // When prod migrates to its own AWS account, verify cross-account access on
+    // first deploy (Phase 1.6 Open Question Q1).
+    powertoolsLayerArn:
+      'arn:aws:lambda:us-east-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-arm64:32',
   },
 };

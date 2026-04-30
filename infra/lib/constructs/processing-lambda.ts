@@ -16,22 +16,37 @@ export interface ProcessingLambdaProps {
   readonly memoryMb: number;
   readonly timeoutSeconds: number;
   readonly environment: { [key: string]: string };
+  /**
+   * Optional AWS-managed Powertools Lambda layer (Phase 1.6). When set, the
+   * layer is attached and Powertools is sourced from it instead of being
+   * pip-installed into the bundle. Each handler's requirements.txt should
+   * not list aws-lambda-powertools when this is provided.
+   */
+  readonly powertoolsLayer?: lambda.ILayerVersion;
+  /**
+   * Whether to enable AWS X-Ray Active Tracing on the Lambda (Phase 1.6).
+   * Powertools Tracer auto-instruments boto3 calls when this is true.
+   */
+  readonly tracingActive?: boolean;
 }
 
 /**
  * Lambda construct for Phase 1B handlers — Python 3.12 ARM64, with local
- * pip-bundling that vendors aws-lambda-powertools + the shared `_shared/`
- * Python module into the asset zip.
+ * pip-bundling that vendors the shared `_shared/` Python module into the
+ * asset zip.
  *
  * Why local bundling: the developer machine doesn't have Docker installed
  * (single-developer setup), so CDK's docker-image bundling path isn't
  * available. CDK's `BundlingOptions.local.tryBundle` falls back to a
  * locally-executed bundling step — we run pip install + a copy from
- * `_shared/` and the handler dir directly. Pure-Python wheels (Powertools
- * 3.x is pure Python) work cross-platform; ARM64 vs x86_64 doesn't matter.
+ * `_shared/` and the handler dir directly. Pure-Python wheels work
+ * cross-platform; ARM64 vs x86_64 doesn't matter.
  *
- * Phase 1.6 will refactor to a shared Lambda layer; until then, each
- * handler bundle ships its own Powertools install (~6–20 MB extra).
+ * Phase 1.6 added the optional `powertoolsLayer` prop. When attached,
+ * Powertools comes from the layer (centralized version pin, no per-Lambda
+ * bundle bloat) and the handler's requirements.txt should not list
+ * aws-lambda-powertools. Pre-1.6 fallback path (no layer) still works:
+ * each requirements.txt installs its own deps including Powertools.
  */
 export class ProcessingLambda extends Construct {
   public readonly function: lambda.Function;
@@ -48,6 +63,8 @@ export class ProcessingLambda extends Construct {
       throw new Error(`Expected handler.py in ${handlerDirAbs}`);
     }
 
+    const tracingActive = props.tracingActive === true;
+
     this.function = new lambda.Function(this, 'Function', {
       functionName: props.functionName,
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -55,9 +72,11 @@ export class ProcessingLambda extends Construct {
       handler: 'handler.handler',
       memorySize: props.memoryMb,
       timeout: cdk.Duration.seconds(props.timeoutSeconds),
+      tracing: tracingActive ? lambda.Tracing.ACTIVE : lambda.Tracing.DISABLED,
+      layers: props.powertoolsLayer ? [props.powertoolsLayer] : undefined,
       environment: {
         POWERTOOLS_SERVICE_NAME: props.functionName,
-        POWERTOOLS_TRACER_DISABLED: 'true', // Phase 1.6 will activate X-Ray
+        POWERTOOLS_TRACER_DISABLED: tracingActive ? 'false' : 'true',
         ...props.environment,
       },
       description: props.description,
