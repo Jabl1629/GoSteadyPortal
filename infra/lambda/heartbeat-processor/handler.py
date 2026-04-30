@@ -32,6 +32,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from _shared import audit_logger, emit_audit, get_logger, get_metrics
+from _shared.observability import make_device_metrics
 from aws_lambda_powertools.metrics import MetricUnit
 
 # ── Configuration ────────────────────────────────────────────────
@@ -88,6 +89,85 @@ def _shadow_reported(event: dict) -> dict[str, Any]:
     }
     reported["lastSeen"] = event["ts"]
     return reported
+
+
+def _emit_device_telemetry_metrics(serial: str, event: dict) -> None:
+    """
+    Emit per-device CloudWatch metrics for the Per-Device Detail dashboard
+    (Phase 1.6 §Architecture). Namespace `GoSteady/Devices/{env}`, dimensioned
+    by serial.
+
+    Required-field gauges (always emit; payload already validated):
+      - BatteryPct, RsrpDbm, SnrDb
+
+    Optional-field gauges (emit when present in the heartbeat):
+      - UptimeSec, WatchdogHits, FaultCountersFatal, FaultCountersWatchdog
+
+    Failure to emit is non-fatal: logged at debug, never raises (we don't
+    want metric publishing failures to fail the heartbeat-handler invocation).
+    """
+    try:
+        device_metrics = make_device_metrics(serial)
+
+        # Required heartbeat gauges
+        device_metrics.add_metric(
+            name="BatteryPct", unit=MetricUnit.NoUnit, value=float(event["battery_pct"]),
+        )
+        device_metrics.add_metric(
+            name="RsrpDbm", unit=MetricUnit.NoUnit, value=float(event["rsrp_dbm"]),
+        )
+        device_metrics.add_metric(
+            name="SnrDb", unit=MetricUnit.NoUnit, value=float(event["snr_db"]),
+        )
+
+        # Optional top-level gauges
+        for evt_key, metric_name in (
+            ("uptime_s", "UptimeSec"),
+            ("watchdog_hits", "WatchdogHits"),
+        ):
+            if evt_key in event:
+                try:
+                    device_metrics.add_metric(
+                        name=metric_name,
+                        unit=MetricUnit.Count,
+                        value=float(event[evt_key]),
+                    )
+                except (TypeError, ValueError):
+                    logger.debug(
+                        "device_metric_skipped",
+                        extra={"serial": serial, "metric": metric_name, "value": event[evt_key]},
+                    )
+
+        # Optional fault_counters object (firmware coord §F5.1)
+        fault_counters = event.get("fault_counters")
+        if isinstance(fault_counters, dict):
+            for fc_key, metric_name in (
+                ("fatal", "FaultCountersFatal"),
+                ("watchdog", "FaultCountersWatchdog"),
+            ):
+                if fc_key in fault_counters:
+                    try:
+                        device_metrics.add_metric(
+                            name=metric_name,
+                            unit=MetricUnit.Count,
+                            value=float(fault_counters[fc_key]),
+                        )
+                    except (TypeError, ValueError):
+                        logger.debug(
+                            "device_metric_skipped",
+                            extra={
+                                "serial": serial,
+                                "metric": metric_name,
+                                "value": fault_counters[fc_key],
+                            },
+                        )
+
+        device_metrics.flush_metrics()
+    except Exception as exc:  # noqa: BLE001 — never let metrics fail a heartbeat
+        logger.warning(
+            "device_metrics_emit_failed",
+            extra={"serial": serial, "error": str(exc)},
+        )
 
 
 def _try_activation_ack(serial: str, last_cmd_id: str, heartbeat_ts: datetime) -> bool:
@@ -199,6 +279,8 @@ def handler(event: dict, _context):
         raise
 
     metrics.add_metric(name="heartbeat_count", unit=MetricUnit.Count, value=1)
+
+    _emit_device_telemetry_metrics(serial, event)
 
     last_cmd_id = event.get("last_cmd_id")
     if isinstance(last_cmd_id, str) and last_cmd_id:

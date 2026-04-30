@@ -118,6 +118,9 @@ export class AuthStack extends cdk.Stack {
       ),
       memorySize: 256,
       timeout: cdk.Duration.seconds(5), // Cognito Lambda triggers must respond fast
+      // Phase 1.6: enable X-Ray Active Tracing for sign-in/refresh latency
+      // visibility. CDK auto-grants AWSXRayDaemonWriteAccess.
+      tracing: lambda.Tracing.ACTIVE,
       environment: {
         ROLE_ASSIGNMENTS_TABLE: this.roleAssignmentsTable.tableName,
         ENVIRONMENT: p,

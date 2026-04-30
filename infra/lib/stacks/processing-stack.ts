@@ -108,6 +108,7 @@ export class ProcessingStack extends cdk.Stack {
       timeoutSeconds: config.processingLambdaTimeoutSeconds,
       environment: commonEnv,
       powertoolsLayer,
+      tracingActive: true,
     });
     this.activityProcessor = activityProc.function;
     // Preserve pre-1B-revision CFN logical ID so CFN does an in-place
@@ -136,6 +137,7 @@ export class ProcessingStack extends cdk.Stack {
         ACTIVATION_ACK_WINDOW_HOURS: String(config.activationAckWindowHours),
       },
       powertoolsLayer,
+      tracingActive: true,
     });
     this.heartbeatProcessor = heartbeatProc.function;
 
@@ -166,6 +168,7 @@ export class ProcessingStack extends cdk.Stack {
         PRE_ACTIVATION_AUDIT_SAMPLE_HOURS: String(config.preActivationAuditSampleHours),
       },
       powertoolsLayer,
+      tracingActive: true,
     });
     this.thresholdDetector = thresholdDet.function;
 
@@ -193,6 +196,7 @@ export class ProcessingStack extends cdk.Stack {
       timeoutSeconds: config.processingLambdaTimeoutSeconds,
       environment: commonEnv,
       powertoolsLayer,
+      tracingActive: true,
     });
     this.alertHandler = alertHand.function;
     (this.alertHandler.node.defaultChild as cdk.CfnResource).overrideLogicalId(

@@ -22,6 +22,7 @@ from typing import Any
 
 from aws_lambda_powertools import Logger, Metrics, Tracer
 from aws_lambda_powertools.logging.formatter import LambdaPowertoolsFormatter
+from aws_lambda_powertools.metrics import EphemeralMetrics
 
 ENV = os.environ.get("ENVIRONMENT", "dev")
 SERVICE = os.environ.get("POWERTOOLS_SERVICE_NAME", "gosteady-processing")
@@ -75,6 +76,25 @@ def get_metrics() -> Metrics:
     if _metrics is None:
         _metrics = Metrics(namespace=f"GoSteady/Processing/{ENV}", service=SERVICE)
     return _metrics
+
+
+def make_device_metrics(serial: str) -> EphemeralMetrics:
+    """
+    Per-invocation per-device telemetry metrics (Phase 1.6).
+
+    Lives in the `GoSteady/Devices/{env}` namespace, dimensioned by `serial`,
+    so the Per-Device Detail dashboard's GraphWidgets can filter by serial
+    without dragging the processing-internal metrics in. EphemeralMetrics
+    is the Powertools-documented pattern for "separate metric buffer with
+    a different namespace from the default Metrics singleton" — flush is
+    manual.
+
+    Caller is responsible for calling `.flush_metrics()` before the Lambda
+    returns, otherwise the EMF JSON is never written to stdout.
+    """
+    m = EphemeralMetrics(namespace=f"GoSteady/Devices/{ENV}", service=SERVICE)
+    m.set_default_dimensions(serial=serial)
+    return m
 
 
 def audit_logger() -> Logger:

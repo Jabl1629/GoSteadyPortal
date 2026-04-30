@@ -41,6 +41,10 @@ export class SnippetParserLambda extends Construct {
       code: lambda.Code.fromAsset(lambdaDir),
       timeout: cdk.Duration.seconds(config.snippetParserTimeoutSeconds),
       memorySize: config.snippetParserMemoryMb,
+      // Phase 1.6: enable X-Ray Active Tracing. CDK auto-grants
+      // AWSXRayDaemonWriteAccess (PutTraceSegments + PutTelemetryRecords)
+      // on the function execution role.
+      tracing: lambda.Tracing.ACTIVE,
       environment: {
         SNIPPET_BUCKET: snippetBucket.bucketName,
         ENVIRONMENT: p,
