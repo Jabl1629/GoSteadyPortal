@@ -24,6 +24,7 @@ import { ApiStack } from '../lib/stacks/api-stack.js';
 import { NotificationStack } from '../lib/stacks/notification-stack.js';
 import { HostingStack } from '../lib/stacks/hosting-stack.js';
 import { IntegrationStack } from '../lib/stacks/integration-stack.js';
+import { ObservabilityStack } from '../lib/stacks/observability-stack.js';
 
 const app = new cdk.App();
 
@@ -125,5 +126,16 @@ const integration = new IntegrationStack(app, `${prefix}-Integration`, {
 });
 integration.addDependency(data);
 integration.addDependency(notification);
+
+// ── Observability (Phase 1.6) ──────────────────────────────────────
+// Wraps everything; no inbound CDK dependencies. Dashboards reference
+// the upstream Lambda function names / IoT Rule names / DDB table names
+// by string, so deploy order doesn't matter — Observability can deploy
+// before, after, or in parallel with the other stacks.
+new ObservabilityStack(app, `${prefix}-Observability`, {
+  env,
+  config,
+  description: `GoSteady Observability — ${config.envName}`,
+});
 
 app.synth();
