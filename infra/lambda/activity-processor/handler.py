@@ -202,6 +202,28 @@ def handler(event: dict, _context):
         raise
 
     metrics.add_metric(name="activity_session_count", unit=MetricUnit.Count, value=1)
+    # Phase 1.6 follow-up 2026-05-05: include the firmware-derived optional
+    # fields in the audit `after` block so the Per-Device Detail dashboard's
+    # Logs Insights widget can render distance / R / surface / firmware
+    # columns. Without these the widget could only surface `steps` (verified
+    # against bench unit GS9999999999 — 3 real walks landed in DDB with
+    # 38/22/72 steps + correct distance/R/surface, but dashboard showed only
+    # the `steps` column populated). Optional fields are included only when
+    # the firmware actually supplied them; cloud-side accept-all contract D16.
+    audit_after: dict = {
+        "sessionEnd": session_end_iso,
+        "steps": item["steps"],
+        "distanceFt": item["distanceFt"],
+        "activeMinutes": item["activeMinutes"],
+        "date": item["date"],
+    }
+    if "roughnessR" in item:
+        audit_after["roughnessR"] = item["roughnessR"]
+    if "surfaceClass" in item:
+        audit_after["surfaceClass"] = item["surfaceClass"]
+    if "firmwareVersion" in item:
+        audit_after["firmwareVersion"] = item["firmwareVersion"]
+
     emit_audit(
         "patient.activity.create",
         subject={
@@ -211,12 +233,7 @@ def handler(event: dict, _context):
             "deviceSerial": serial,
         },
         action="create",
-        after={
-            "sessionEnd": session_end_iso,
-            "steps": item["steps"],
-            "activeMinutes": item["activeMinutes"],
-            "date": item["date"],
-        },
+        after=audit_after,
     )
 
     logger.info(

@@ -211,10 +211,17 @@ export class PerDeviceDashboard extends Construct {
         width: 24,
         height: 8,
         queryLines: [
+          // Phase 1.6 follow-up 2026-05-05: align field names with what
+          // activity-processor actually emits in its audit `after` block —
+          // it uses camelCase (distanceFt / activeMinutes / roughnessR /
+          // surfaceClass / firmwareVersion), not the snake_case firmware
+          // contract names. Originally the query was reading from snake_case
+          // fields that don't exist in the log shape, so only `steps`
+          // populated.
           'fields @timestamp, subject.deviceSerial as serial, after.sessionEnd as session_end, ' +
-            'after.steps as steps, after.distance_ft as distance_ft, ' +
-            'after.active_min as active_min, after.roughness_R as R, ' +
-            'after.surface_class as surface, after.firmware_version as firmware',
+            'after.steps as steps, after.distanceFt as distance_ft, ' +
+            'after.activeMinutes as active_min, after.roughnessR as R, ' +
+            'after.surfaceClass as surface, after.firmwareVersion as firmware',
           'filter event = "patient.activity.create"',
           `filter subject.deviceSerial = "${defaultSerial}"`,
           'sort @timestamp desc',
