@@ -1162,7 +1162,7 @@ Structured JSON via Lambda Powertools:
 
 ---
 
-### Phase 1.6 — Observability Foundation ✅ **Deployed (dev) 2026-04-30**
+### Phase 1.6 — Observability Foundation ✅ **Deployed (dev) 2026-04-30, follow-up 2026-05-05**
 
 **Spec:** [`phase-1.6-observability.md`](phase-1.6-observability.md)
 
@@ -1194,6 +1194,12 @@ Structured JSON via Lambda Powertools:
 **Dashboard URLs (CFN outputs):**
 - Platform-Health: `https://console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=gosteady-dev-platform-health`
 - Per-Device Detail: `https://console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=gosteady-dev-per-device`
+
+**2026-05-05 follow-up (commit `ec258f5`)** — surfaced once activity uplinks started flowing reliably from real-walk data:
+- `activity-processor` audit log `after` block now emits the full firmware-derived field set (distanceFt / roughnessR / surfaceClass / firmwareVersion in addition to sessionEnd / steps / activeMinutes / date). Optional fields included only when firmware supplied them, per accept-all D16 contract.
+- Per-Device Detail dashboard's "Recent activity sessions" Logs Insights query field names aligned with the audit log shape (camelCase, matching DDB column names) instead of the original firmware-side snake_case schema.
+- Bench-validated against 5 real walks (35 / 40 / 10 / 81 / 60 steps; one classified outdoor at R=0.4033, the others indoor R=0.02–0.09). All 9 columns render in the dashboard widget after a hard-refresh.
+- Concurrent firmware-side fix to a stale `stop_done_sem` race in `gosteady_session_stop()` — see [firmware coord §C8 (joint entry, 2026-05-05)](../firmware-coordination/2026-04-17-cloud-contracts.md). The dashboards were what surfaced this bug — without the per-device drill-down view, the silent skip of activity uplinks would have continued unnoticed.
 
 ---
 

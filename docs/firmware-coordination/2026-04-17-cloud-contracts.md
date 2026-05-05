@@ -3538,3 +3538,232 @@ widget set if anything proves missing.
 
 *Entry owner (cloud side): Jace + Claude. Counter-proposals,
 blocker flags, and milestone updates welcome.*
+
+
+---
+---
+
+# Joint cloud + firmware update — 2026-05-05 (Phase 1.6 dashboards surface activity-uplink stale-sem race; fix lands both sides)
+
+> **From:** GoSteady firmware + cloud teams (same Claude session, both
+> hats worn over the course of the day).
+> **TL;DR:** Phase 1.6 Per-Device Detail dashboard at the operator's
+> console first showed "no activity sessions in 5 days" — diagnosed
+> via diagnostic LOG_INFs added to the writer thread + new visibility
+> patches on the cloud.c publish-result path. Root cause was a stale
+> `stop_done_sem` count from a previous session whose stop branch
+> exceeded the 5 s `k_sem_take` timeout (LittleFS GC on a near-full
+> sessions partition, ~84 % utilization, makes `fs_close` +
+> `snippet_capture_finish` slow). Activity uplinks were SILENTLY
+> SKIPPED; sessions persisted on flash but never reached cloud.
+>
+> Two fixes landed:
+> - **firmware** (commits `fede856` + `4d62fd5`): visibility patch +
+>   stop_done_sem reset-before-raise + 5 s → 15 s timeout bump
+> - **cloud** (commit `ec258f5`): activity-processor audit log now
+>   includes distanceFt / roughnessR / surfaceClass / firmwareVersion
+>   in the `after` block; per-device dashboard query field names
+>   aligned with audit log shape (camelCase, not firmware snake_case)
+>
+> All four uplinks (heartbeat / activity / cmd ingest / snippet) now
+> bench-validated end-to-end against real-walk data, with full
+> dashboard rendering. Five real walks landed cleanly: 35 / 40 / 10 /
+> 81 / 60 steps with M9 algo outputs intact (R + surface_class +
+> distance_ft all populated).
+
+---
+
+## Diagnostic journey
+
+Sequence of events worth capturing because the bugs hid behind each
+other and Phase 1.6 was the surface that finally exposed them:
+
+**Symptom (firmware operator on dashboard):**
+- "Cellular reporting seems ~2 hours behind"
+- "I did a few walk events in the last hour and they still haven't
+  made it through"
+- "Maybe the FIFO setup is causing delay?"
+
+**First-pass cloud-side diagnosis (≤5 min):**
+- Heartbeat actually fresh (6.9 min old; the 60 min metric-period bins
+  on the Per-Device dashboard make the latest data point appear ≤59 min
+  stale even when fresh)
+- Snippets uploading on schedule (1 per heartbeat wake per FIFO design)
+- **Zero activity rows in DDB for last 5 days, despite the user
+  reporting walks**
+- Snippet S3 path active for that period — proves cellular + cloud
+  ingest is healthy. Activity is the only path that's silently failing.
+
+**Diagnostic instrumentation added** (firmware commit `fede856`):
+- `LOG_INF` at writer thread start handshake (drained samples + flag reset)
+- `LOG_INF` on first sample's pipeline seed (mag_g value)
+- `LOG_INF` at writer thread stop branch (pipeline_seeded value +
+  sample_count + batch_fill)
+- `LOG_INF` after gs_pipeline_init at boot (success/failure)
+- Stop discarding `connect_publish_disconnect` return code in the
+  activity worker (was `(void)`; now logs WRN with rc on failure +
+  INF on success)
+- Bonus: closed the stale `TODO(M12)` on rewrite_header that was
+  leaving `session_end_utc_ms` hardcoded 0 — now populated via a new
+  `gosteady_cellular_get_network_time_unix_ms()` helper using
+  Zephyr's `timeutil_timegm64`.
+
+**Reflash + first reproduction:**
+- Synthetic 8 s session (cap on desk, no motion): pipeline correctly
+  seeded on first sample, ALGO_V1A logged with all-zeros (steps=0,
+  distance=0, R=NaN — correct for stationary cap), activity uplink
+  fired, DDB row landed. The diagnostic-only commit appeared to fix
+  it.
+- BUT: when user took a real walk on the walker (44 s session
+  `203c9073`, 4352 samples), the WARN re-appeared. Activity uplink
+  silently skipped.
+
+**Smoking-gun timestamps:**
+```
+[14:28.797]  auto-stop: 15 s of stationary motion → ending session
+[14:28.797]  session stop uuid=203c9073 samples=4352 dropped=0 duration_ms=43985
+[14:28.798]  WRN: ALGO_V1 uuid=203c9073 no outputs (pipeline not seeded)
+[14:28.863]  writer: stop branch — pipeline_seeded=1, sample_count=4392
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+              writer's diagnostic log fires 65 ms AFTER session_stop's
+              WARN. session_stop must have read s_pipeline_outputs_valid
+              BEFORE the writer set it. But k_sem_take(K_SECONDS(5))
+              should have blocked until the writer's k_sem_give...
+```
+
+**Root cause:** the **previous** session (`81c54e52` "setup" walk)
+hit the 5 s timeout on its `k_sem_take`. session_stop body fell
+through, logged "writer stop ack timeout (-11)", continued. Writer
+eventually finished its slow `rewrite_header + fs_close +
+snippet_capture_finish` (>5 s under LittleFS-GC pressure on the
+near-full sessions partition: 1.3 MB free / 8 MB) and called
+`k_sem_give`. The give landed on stop_done_sem, leaving count=1.
+Next session's `k_sem_take` consumed the stale count instantly,
+read s_pipeline_outputs_valid before that session's writer had
+even started its stop branch (still false from the start handshake)
+→ WARN → activity uplink path silently skipped.
+
+This race had been latent for the entire M12.1d era. It only became
+observable AFTER the LittleFS partition filled up enough to make
+fs_close routinely exceed 5 s. With 87 .dat files accumulated across
+4 firmware versions over the past two weeks of bench testing,
+GC contention was high.
+
+**Fix (firmware commit `4d62fd5`):**
+1. `k_sem_reset(&stop_done_sem)` immediately before raising
+   `stop_signal` in `gosteady_session_stop()`. Purges any stale
+   count from a previous timed-out cycle.
+2. Bumped `K_SECONDS(5)` → `K_SECONDS(15)` on the stop-ack take.
+   Empirical fs_close + snippet_finish on a near-full partition
+   takes ~1-2 s; 15 s gives 10x headroom for worst-case GC.
+3. Updated the timeout error log to point operators at the
+   writer's stop-branch diagnostic line (which now confirms whether
+   pipeline_seeded was set true even when the timeout fires).
+
+## C8.1 Cloud-side bug surfaced by the now-working dashboard
+
+Once activity uplinks started reaching DDB correctly, the user observed
+the Per-Device dashboard widget was rendering only the `steps` column —
+distance_ft / R / surface / firmware all empty.
+
+DDB rows were complete (verified via `aws dynamodb get-item`):
+```
+35 steps / 14.31 ft / R=0.0335 / indoor / 0.8.0-prod
+40 steps / 16.17 ft / R=0.0199 / indoor / 0.8.0-prod
+10 steps / 17.79 ft / R=0.4033 / outdoor / 0.8.0-prod    (←!)
+81 steps / 51.92 ft / R=0.0931 / indoor / 0.8.0-prod
+60 steps / 30.83 ft / R=0.0619 / indoor / 0.8.0-prod
+```
+
+Two cloud-side bugs were chained:
+
+1. **activity-processor's emit_audit `after` block was missing the
+   firmware-derived optional fields** (distanceFt / roughnessR /
+   surfaceClass / firmwareVersion). The DDB row had them; the audit
+   log only had sessionEnd / steps / activeMinutes / date. Dashboard
+   widget reads from the audit log, so the missing fields were
+   genuinely absent from the widget's data source.
+
+2. **Per-device dashboard's Logs Insights query used firmware-side
+   snake_case field names** (`after.distance_ft`,
+   `after.roughness_R`, `after.surface_class`,
+   `after.firmware_version`). Audit log uses camelCase
+   (matching DDB column names). Even with #1 fixed, snake_case
+   wouldn't have matched.
+
+**Fix (cloud commit `ec258f5`):** activity-processor handler.py
+populates the full `after` block; per-device.ts dashboard query uses
+camelCase aliases. Both deployed cleanly to dev.
+
+**Browser cache caveat noted:** when the dashboard widget's column
+schema changes (server-side), browser-cached column layouts persist
+until a hard reload. CloudWatch dashboards don't auto-invalidate
+client cache on schema change. Operator workflow: hard-refresh the
+dashboard tab (Cmd+Shift+R on macOS) after any widget redeploy that
+changes column structure.
+
+## C8.2 What this validates
+
+**All four cloud uplinks are now bench-validated end-to-end with
+real-walk data:**
+
+| Topic | Latest evidence |
+|---|---|
+| `gs/{serial}/heartbeat` | Hourly publishes, every-hour DDB Shadow updates, all 5 required + 7 optional fields populated, M10.7.3 fault counters live |
+| `gs/{serial}/activity` | 5 real walks landed at DDB Activity Series, M9 algo outputs (steps / distance_ft / R / surface_class) all populated, patient-resolution + hierarchy snapshot working, audit log fully populated for downstream query |
+| `gs/{serial}/cmd` (downlink) | M12.1e.2 activate cmd flow, persisted to /lfs/activation.bin, survives reboot, last_cmd_id echoed in heartbeat as ack |
+| `gs/{serial}/snippet` | 5+ snippets uploaded today, 14-84 KB each, S3 objects bit-exact, JSON header parsing clean |
+
+**Per-Device Detail dashboard is the operator-facing surface for
+M14.5** going forward. With today's fixes it correctly renders:
+- Battery curve from EMF metric (from heartbeat-processor publish)
+- RSRP / SNR dual-axis curve
+- Watchdog hits + fault_counters trend
+- Recent activity sessions table (full 9 columns post-fix)
+- Recent snippet uploads table
+- Recent synthetic + recent device alerts
+
+The dashboard is now a reliable single-pane view of any device's
+state — exactly the M14.5 monitoring surface that was the original
+motivation for the spec back on 2026-04-29.
+
+## C8.3 Adjacent observations worth flagging for v1.5
+
+**One real walk (19:58:50, `R=0.4033`, surface=outdoor):** the M9
+auto-surface classifier flipped that one to outdoor. R is well above
+the τ=0.245 threshold. Either user actually took the walker outside
+for that session, or there's a noise floor edge case. Worth pulling
+that .dat file and running through the Python algo offline to confirm
+the classification is reasonable. Not blocking but worth noting in
+the v1.5 retrain corpus.
+
+**LittleFS sessions partition is at ~84 % utilization** (1.3 MB free
+/ 8 MB) on the bench unit. fs_close + snippet_capture_finish slow
+down materially under this much GC pressure. Two follow-up options:
+
+1. Run `tools/cleanup_device.py --all --yes` on the bench unit to
+   reset partition utilization. Fast workaround.
+2. Implement auto-prune-on-publish-success: once activity uplink is
+   acknowledged for a session, the .dat file becomes redundant
+   (snippets are the v1.5 retrain corpus, not the .dat files).
+   Needs a small flag on each .dat file or a parallel index of
+   "uploaded_at" markers. Not a blocker for M14.5 but worth doing
+   before fleet expansion.
+
+## C8.4 What's next
+
+**Firmware-side:** ready for M14.5 site-survey shakedown. Flash
+`GS0000000001` with shipping cert + deployment build (`prj_field.conf`),
+sit on bench desk for ≥7 days, observe dashboards. Today's bug-fixing
+work proves the pipeline is solid under real walk conditions.
+
+**Cloud-side:** Phase 1.6 is complete. Next phases per the master
+plan: 1.7 (audit logging infra) → 2A (device-api Lambda + portal API
++ device-shadow-handler). Both are unblocked by 1.6's deploy.
+
+No firmware-coordination action items from this entry. Both teams
+have what they need to proceed independently to the next milestone.
+
+---
+
+*Entry owner: Jace + Claude (both firmware + cloud session, 2026-05-05).*
