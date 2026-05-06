@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../data/mock_data.dart';
 import '../models/activity.dart';
 import '../models/device.dart';
+import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/activity_timeline.dart';
 import '../widgets/device_health_card.dart';
@@ -163,6 +164,7 @@ class _Header extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final dateLabel = DateFormat('EEEE, MMMM d').format(DateTime.now());
+    final user = AuthService.instance.currentUser;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
@@ -203,6 +205,38 @@ class _Header extends StatelessWidget {
               ],
             ),
           ),
+          if (user != null) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: AppTheme.sage.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(100),
+                border: Border.all(color: AppTheme.sage.withOpacity(0.2)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    user.isCaregiver
+                        ? Icons.favorite_rounded
+                        : Icons.directions_walk_rounded,
+                    size: 14,
+                    color: AppTheme.sage,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    user.name.isNotEmpty ? user.name : user.email,
+                    style: const TextStyle(
+                      color: AppTheme.sage,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+          ],
           MouseRegion(
             cursor: SystemMouseCursors.click,
             child: OutlinedButton.icon(
@@ -224,6 +258,20 @@ class _Header extends StatelessWidget {
               ),
             ),
           ),
+          if (user != null) ...[
+            const SizedBox(width: 8),
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: IconButton(
+                onPressed: () => AuthService.instance.signOut(),
+                icon: const Icon(Icons.logout_rounded, size: 18),
+                tooltip: 'Sign out',
+                style: IconButton.styleFrom(
+                  foregroundColor: AppTheme.textSoft,
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
