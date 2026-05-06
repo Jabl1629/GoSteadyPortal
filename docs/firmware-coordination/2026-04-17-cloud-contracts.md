@@ -3767,3 +3767,192 @@ have what they need to proceed independently to the next milestone.
 ---
 
 *Entry owner: Jace + Claude (both firmware + cloud session, 2026-05-05).*
+
+
+---
+---
+
+# Joint cloud + firmware update — 2026-05-06 (auto-prune-on-publish + ENOSPC handling; SW2-misposition lesson)
+
+> **From:** GoSteady firmware + cloud teams (same Claude session, both
+> hats; this is the closing entry of the multi-day "activity uplinks
+> vanishing" debugging arc that started 2026-05-05 and was diagnosed
+> via Phase 1.6's per-device dashboard).
+>
+> **TL;DR:** Firmware commit `bde3434` ships the architectural fix for
+> the partition-fill failure mode whose symptoms we caught yesterday
+> (ENOSPC → fatal-fault mid-walk on bench unit GS9999999999): auto-prune
+> on activity PUBACK + graceful ENOSPC handling. Validated end-to-end
+> on the bench. **Firmware is ready for M14.5 site-survey shakedown.**
+> Cloud-side: nothing new today; Phase 1.6 stack continues to work as
+> the diagnostic surface that exposed all of yesterday's bugs.
+>
+> Bonus operational lesson worth burning into M14.5 procedure: a
+> SW2-bumped-to-nRF53 misposition can make `nrfjprog --recover` cascade-
+> corrupt the wrong chip. Section §C9.2 below.
+
+---
+
+## C9.1 Auto-prune-on-PUBACK + ENOSPC handling (firmware `bde3434`)
+
+Yesterday's coord §C8 closed the **stale `stop_done_sem` race** —
+silent activity-uplink drops surfaced when the dashboard widget went
+live. But §C8.3 also flagged a deeper issue: the LittleFS sessions
+partition was at 84 % utilization (1.3 MB free / 8 MB), 87 stale .dat
+files accumulated across 4 firmware versions, and ENOSPC was the
+proximate cause of the firmware fatal-faulting mid-walk. We deferred
+the architectural fix as "follow-up before M14.5 ship" — and did it
+this morning.
+
+**Two halves (single commit):**
+
+1. **Auto-prune-on-publish-success.** `struct gosteady_activity` gains
+   `session_uuid[37]`; session.c populates it from the .dat header;
+   cloud.c's activity worker calls a new `gosteady_session_prune(uuid)`
+   immediately after the success branch of `connect_publish_disconnect`.
+   The .dat becomes redundant once algo outputs are in cloud's Activity
+   Series DDB (and the snippet on the separate snippet partition is the
+   v1.5 retrain corpus). Bounds partition growth.
+
+   The prune validates the UUID against canonical 36-char hyphenated
+   form before pathing into `/lfs/sessions/{uuid}.dat` for `fs_unlink`
+   — defensive against a typo'd path unlinking unrelated files like
+   `/lfs/boot_count`.
+
+2. **Graceful ENOSPC handling.** New `s_writer_flash_full` flag in
+   session.c set by `writer_flush` on `fs_write` returning -ENOSPC,
+   logged once per session (not at the 100 Hz EAGAIN flood rate that
+   buried diagnostic lines yesterday). New `gosteady_session_flash_full()`
+   accessor; main.c heartbeat tick polls it next to the existing
+   stationary-samples auto-stop check; on `flash_full=true`, calls
+   `gosteady_session_stop()` to close the session cleanly. The
+   activity-uplink path runs normally against valid in-memory algo
+   outputs (the pipeline runs regardless of write success), and
+   auto-prune then frees a .dat slot for the next session.
+
+   main.c's sampler EAGAIN warning is also rate-limited 1-per-100
+   consecutive drops (≈1/sec at 100 Hz sampling), bounded by a
+   static drop-streak counter that resets on any successful enqueue.
+
+**Bench validation (`GS9999999999` after reflash 2026-05-06T17:41Z):**
+
+```
+writer: pipeline seeded (first mag_g=1.0098)
+writer: stop branch — pipeline_seeded=1, sample_count=637, batch_fill_at_entry=0
+ALGO_V1A uuid=56c8037b distance_ft=0.00 R=nan surface=0 steps=0
+activity enqueued: session_end=2026-05-06T17:42:51Z (msgq has 0/4)
+activity worker: dequeued
+snippet upload: 56c8037b — 17950 B
+M12.1d activity uplink sequence complete
+auto-prune: deleted /lfs/sessions/56c8037b-...dat after activity PUBACK   ← NEW
+```
+
+`LIST` on uart1 confirms `56c8037b-...dat` is gone post-PUBACK; only
+the pre-existing `1c778fdd-...dat` (from earlier today before the
+reflash, predating auto-prune) remains. Cloud-side row at
+`2026-05-06T17:42:51Z` lands cleanly with all 9 dashboard columns
+populated.
+
+## C9.2 SW2-misposition lesson learned (operational; capture for M14.5)
+
+During this morning's reflash workflow we burned ~3 hours on what
+looked like an nRF9151 lockout — `nrfjprog --recover` returning
+"Eraseprotect is enabled and readback protection setting is ALL" on
+every attempt, USB CDC stopped enumerating, every CLI escalation
+making it worse. The operator-side narrative was "did the morning's
+ENOSPC fault somehow trip APPROTECT and brick the chip?"
+
+**Actual cause:** SW2 (the chip-select switch on the Thingy:91 X
+board that decides whether the J-Link's SWD lines go to the nRF9151
+or the nRF5340 bridge) had been **physically bumped to the nRF53
+position** at some point during the day's walks. nrfjprog with the
+`-f NRF91` flag was happily talking to the nRF5340 bridge chip,
+treating it as if it were an nRF91, and the `--recover` CTRL-AP
+sequence was operating on bridge-chip register addresses that
+don't map cleanly to nRF53 layout. Result: the bridge chip got
+itself into a partially-corrupted protection state, USB CDC died,
+and every subsequent recovery attempt made things worse.
+
+**Recovery sequence that worked** (after we noticed the chip family
+in nRF Connect Programmer was `NRF5340_xxxx_REV1` rather than
+`NRF91_xxxx`):
+
+1. `nrfjprog -f NRF53 --coprocessor CP_NETWORK --recover --snr 802006700`
+   (per Programmer's hint that recovering the nRF53 network core
+   cascade-recovers the application core)
+2. `nrfjprog -f NRF53 --coprocessor CP_APPLICATION --recover --snr 802006700`
+   (verify app core is now unprotected)
+3. `nrfjprog -f NRF53 --program build_bridge/merged.hex --chiperase
+   --verify --reset --snr 802006700` (reflash our bridge fork —
+   preserves uart1 baud + BLE-NUS-targeting-uart1 patches per
+   `bridge_fw/PATCHES.md`; Nordic stock hex would need re-patching)
+4. **Physically toggle SW2 back to nRF91 position**
+5. `nrfjprog -f NRF91 --readregs --snr 802006700` to confirm the
+   nRF9151 is alive (it was the entire time — running this morning's
+   working firmware, untouched by all the bridge-side flailing)
+6. `west flash --runner nrfjprog -d build_cloud --skip-rebuild --erase`
+   to update the nRF9151 with the new build_cloud (auto-prune +
+   ENOSPC fixes)
+
+**Important non-obvious detail confirmed during recovery:** chip-erase
+on the nRF9151 application flash does NOT touch:
+- The external GD25LE255E SPI NOR flash (LittleFS partitions:
+  sessions / snippets / telemetry_queue / crash_forensics /
+  /lfs/activation.bin / /lfs/boot_count) — these all persisted across
+  the chip-erase
+- Modem firmware + modem credentials (sec_tag 201) — managed by the
+  modem subsystem in a separate flash region
+So the only post-erase work was the application flash itself. No
+re-flashing of certs needed; no loss of activation state.
+
+**Operational rule for M14.5:** before running ANY `nrfjprog --recover`
+or `west flash` command in the field, **explicitly verify SW2 is on
+the nRF91 position**. Add this as a pre-flight check to whatever
+operator runbook the site-survey deployment will use. The chip family
+shown in nRF Connect Programmer is the truth; if it shows
+`NRF5340_xxxx_REV1` for what should be an nRF91 flash target,
+SW2 is wrong.
+
+## C9.3 What this leaves us with going into M14.5
+
+**Firmware:** `bde3434` is the M14.5-ship candidate. All known
+silent-failure modes that yesterday's instrumentation surfaced are
+now closed:
+- stale `stop_done_sem` race → fixed (commit `4d62fd5`)
+- audit log + dashboard query gaps → fixed (cloud commit `ec258f5`)
+- partition-fill ENOSPC → fixed (this commit, `bde3434`, both
+  auto-prune-on-publish + flash_full → auto-stop-clean)
+
+**Cloud:** Phase 1.6 (observability) deployed and proven as a
+diagnostic surface. The dashboards caught two latent bugs in the
+firmware that had been silent for ≥2 weeks. Phase 1.7 (audit log
+infra) and Phase 2A (portal API + device-api) remain queued; per
+yesterday's discussion neither blocks the M14.5 → M15 path.
+
+**Bench unit `GS9999999999`:** running the `bde3434`-equivalent
+build_cloud as of 2026-05-06T17:41Z. LittleFS partition state: one
+pre-existing `1c778fdd-...dat` (from yesterday's testing, predates
+auto-prune); going forward, post-PUBACK auto-prune keeps the
+partition empty unless a publish fails. activation state preserved
+(`act_test_m12_1e2` from M12.1e.2). fault counters preserved
+(`fatal=3, watchdog=5` — historical, not from any fault today).
+
+**M14.5 next steps when convenient:**
+- Run `tools/cleanup_device.py --all --yes` once on `GS0000000001`
+  to start with a clean partition (M14.5 unit will accumulate
+  organically once auto-prune is doing its job)
+- Flash `build_field/merged.hex` (with the new code) onto
+  `GS0000000001` + the shipping cert via `tools/flash_cert.py`
+- Sit on bench desk for ≥7 days, observe the Per-Device dashboard
+  + the alarm catalog from Phase 1.6
+- M11.1 confirmation walk with a real walker sometime during that
+  7-day window
+
+No firmware-coord action items from this batch.
+
+---
+
+*Entry owner: Jace + Claude (both firmware + cloud session, 2026-05-06).*
+*This concludes the multi-day arc: the dashboards exposed silent
+failures; the diagnostic logs pinpointed the races; the architectural
+fixes close the failure modes; the bench unit is M14.5-ready.*
