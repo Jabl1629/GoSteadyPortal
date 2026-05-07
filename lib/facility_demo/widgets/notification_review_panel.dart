@@ -98,8 +98,11 @@ class _NotificationCardState extends State<_NotificationCard> {
   void _submitNote() {
     final text = _noteCtrl.text.trim();
     if (text.isEmpty) return;
+    // Acknowledge + Save Note: persist the note, then dismiss the
+    // notification. Adding context is the act of reviewing.
     widget.state.addNote(widget.notification, text);
     _noteCtrl.clear();
+    widget.state.dismiss(widget.notification);
   }
 
   @override
@@ -153,9 +156,6 @@ class _NotificationCardState extends State<_NotificationCard> {
                     ),
                   ],
                 ),
-              ),
-              _DismissButton(
-                onTap: () => widget.state.dismiss(n),
               ),
             ],
           ),
@@ -242,6 +242,7 @@ class _NoteInput extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         Expanded(
           child: TextField(
@@ -250,14 +251,14 @@ class _NoteInput extends StatelessWidget {
             textInputAction: TextInputAction.send,
             style: const TextStyle(fontSize: 13, color: AppTheme.textDark),
             decoration: InputDecoration(
-              hintText: 'Add a note…',
+              hintText: 'Add a note before acknowledging…',
               hintStyle: TextStyle(
                 color: AppTheme.textSoft.withOpacity(0.7),
                 fontSize: 13,
               ),
               isDense: true,
               contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
               filled: true,
               fillColor: AppTheme.warmWhite,
               border: OutlineInputBorder(
@@ -278,79 +279,64 @@ class _NoteInput extends StatelessWidget {
             ),
           ),
         ),
-        const SizedBox(width: 8),
-        _SendButton(enabled: canSubmit, onTap: onSubmit),
+        const SizedBox(width: 10),
+        _AcknowledgeButton(enabled: canSubmit, onTap: onSubmit),
       ],
     );
   }
 }
 
-class _SendButton extends StatelessWidget {
-  const _SendButton({required this.enabled, required this.onTap});
+class _AcknowledgeButton extends StatefulWidget {
+  const _AcknowledgeButton({required this.enabled, required this.onTap});
   final bool enabled;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor:
-          enabled ? SystemMouseCursors.click : SystemMouseCursors.forbidden,
-      child: GestureDetector(
-        onTap: enabled ? onTap : null,
-        child: Container(
-          width: 38,
-          height: 38,
-          decoration: BoxDecoration(
-            color: enabled ? AppTheme.sage : AppTheme.border.withOpacity(0.5),
-            shape: BoxShape.circle,
-          ),
-          child: Icon(
-            Icons.arrow_upward_rounded,
-            size: 18,
-            color: enabled ? Colors.white : AppTheme.textSoft,
-          ),
-        ),
-      ),
-    );
-  }
+  State<_AcknowledgeButton> createState() => _AcknowledgeButtonState();
 }
 
-class _DismissButton extends StatefulWidget {
-  const _DismissButton({required this.onTap});
-  final VoidCallback onTap;
-
-  @override
-  State<_DismissButton> createState() => _DismissButtonState();
-}
-
-class _DismissButtonState extends State<_DismissButton> {
+class _AcknowledgeButtonState extends State<_AcknowledgeButton> {
   bool _hover = false;
 
   @override
   Widget build(BuildContext context) {
+    final enabled = widget.enabled;
+    final bg = enabled
+        ? (_hover ? AppTheme.sageDark : AppTheme.sage)
+        : AppTheme.border.withOpacity(0.5);
     return MouseRegion(
-      cursor: SystemMouseCursors.click,
+      cursor:
+          enabled ? SystemMouseCursors.click : SystemMouseCursors.forbidden,
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
       child: GestureDetector(
-        onTap: widget.onTap,
-        child: Tooltip(
-          message: 'Dismiss notification',
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 120),
-            width: 28,
-            height: 28,
-            decoration: BoxDecoration(
-              color: _hover
-                  ? AppTheme.sage.withOpacity(0.1)
-                  : Colors.transparent,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              Icons.close_rounded,
-              size: 16,
-              color: _hover ? AppTheme.sage : AppTheme.textSoft,
-            ),
+        onTap: enabled ? widget.onTap : null,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.check_rounded,
+                size: 16,
+                color: enabled ? Colors.white : AppTheme.textSoft,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                'Acknowledge + Save Note',
+                style: TextStyle(
+                  color: enabled ? Colors.white : AppTheme.textSoft,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.1,
+                ),
+              ),
+            ],
           ),
         ),
       ),
