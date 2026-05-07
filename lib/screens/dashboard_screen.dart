@@ -6,10 +6,7 @@ import '../models/activity.dart';
 import '../models/device.dart';
 import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
-import '../widgets/activity_timeline.dart';
-import '../widgets/device_health_card.dart';
-import '../widgets/distance_card.dart';
-import '../widgets/time_range_toggle.dart';
+import '../widgets/patient_dashboard.dart';
 import 'device_screen.dart';
 
 /// Single-page V1 dashboard. The "today" tile is always locked to today's
@@ -28,8 +25,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   late List<DailyActivity> _last7;
   late List<DailyActivity> _last30;
   late List<WeeklyActivity> _last6M;
-
-  TimeRange _selectedRange = TimeRange.day;
 
   @override
   void initState() {
@@ -52,17 +47,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ),
     );
   }
-
-  List<DailyActivity> get _activeDailyData =>
-      _selectedRange == TimeRange.week ? _last7 : _last30;
-
-  Widget _chartCard(ChartMetric metric) => TrendChartCard(
-        metric: metric,
-        timeRange: _selectedRange,
-        todayHours: _today.hours,
-        dailyData: _activeDailyData,
-        weeklyData: _last6M,
-      );
 
   @override
   Widget build(BuildContext context) {
@@ -89,57 +73,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           onRefresh: () => setState(_refresh),
                         ),
                         const SizedBox(height: 10),
-                        Padding(
-                          padding: const EdgeInsets.only(left: 2),
-                          child: DeviceStatusBar(
-                            device: _device,
-                            onTap: _openDeviceScreen,
-                          ),
+                        PatientDashboard(
+                          device: _device,
+                          today: _today,
+                          last7: _last7,
+                          last30: _last30,
+                          last6Months: _last6M,
+                          onDeviceTap: _openDeviceScreen,
                         ),
-                        const SizedBox(height: 28),
-                        TodayCard(today: _today),
-                        const SizedBox(height: 36),
-                        // Trend section: toggle + charts
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            Text(
-                              'Activity Trends',
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .headlineMedium
-                                  ?.copyWith(fontSize: 22),
-                            ),
-                            const Spacer(),
-                            SizedBox(
-                              width: 240,
-                              child: TimeRangeToggle(
-                                selected: _selectedRange,
-                                onChanged: (r) =>
-                                    setState(() => _selectedRange = r),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 20),
-                        _chartCard(ChartMetric.timeInMotion),
-                        const SizedBox(height: 20),
-                        if (isWide)
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(
-                                  child: _chartCard(ChartMetric.distance)),
-                              const SizedBox(width: 20),
-                              Expanded(
-                                  child: _chartCard(ChartMetric.steps)),
-                            ],
-                          )
-                        else ...[
-                          _chartCard(ChartMetric.distance),
-                          const SizedBox(height: 20),
-                          _chartCard(ChartMetric.steps),
-                        ],
                         const SizedBox(height: 48),
                         const _Footer(),
                       ],
