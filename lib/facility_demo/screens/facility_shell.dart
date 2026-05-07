@@ -7,11 +7,10 @@ import '../widgets/facility_top_bar.dart';
 import 'patient_census_view.dart';
 import 'patient_detail_view.dart';
 
-/// Master-detail container for the facility demo. Top bar always visible.
-/// Layout per spec §5.1 / §5.2:
-/// - ≥1280px: side-by-side (census left, detail right)
-/// - <1280px: census view by default; tile click swaps to detail with a back
-///   button.
+/// Container for the facility demo. Top bar always visible; the Patient
+/// Census fills the full content width below it. Selecting a patient
+/// brings up a full-screen overlay (with a backdrop) containing the
+/// patient detail; tap the backdrop or the back affordance to dismiss.
 class FacilityShell extends StatefulWidget {
   const FacilityShell({super.key, required this.data});
   final FacilityMockData data;
@@ -44,20 +43,41 @@ class _FacilityShellState extends State<FacilityShell> {
           children: [
             FacilityTopBar(data: widget.data, selection: _selection),
             Expanded(
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  if (constraints.maxWidth >= 1280) {
-                    return _WideSplit(
-                      data: widget.data,
-                      selection: _selection,
-                      shellWidth: constraints.maxWidth,
-                    );
-                  }
-                  return _NarrowSwap(
+              child: Stack(
+                children: [
+                  // Census fills the full content area, always rendered.
+                  PatientCensusView(
                     data: widget.data,
                     selection: _selection,
-                  );
-                },
+                  ),
+                  // Patient overlay when one is selected.
+                  ListenableBuilder(
+                    listenable: _selection,
+                    builder: (context, _) {
+                      return AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 220),
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeInCubic,
+                        transitionBuilder: (child, anim) {
+                          return FadeTransition(
+                            opacity: anim,
+                            child: ScaleTransition(
+                              scale: Tween(begin: 0.985, end: 1.0).animate(anim),
+                              child: child,
+                            ),
+                          );
+                        },
+                        child: _selection.selectedPatientId == null
+                            ? const SizedBox.shrink(key: ValueKey('empty'))
+                            : _PatientOverlay(
+                                key: ValueKey(_selection.selectedPatientId),
+                                data: widget.data,
+                                selection: _selection,
+                              ),
+                      );
+                    },
+                  ),
+                ],
               ),
             ),
           ],
@@ -67,69 +87,110 @@ class _FacilityShellState extends State<FacilityShell> {
   }
 }
 
-class _WideSplit extends StatelessWidget {
-  const _WideSplit({
+/// Backdrop + centered card that wraps PatientDetailView. Backdrop click
+/// dismisses; the card itself swallows taps.
+class _PatientOverlay extends StatelessWidget {
+  const _PatientOverlay({
+    super.key,
     required this.data,
     required this.selection,
-    required this.shellWidth,
   });
 
   final FacilityMockData data;
   final FacilitySelection selection;
-  final double shellWidth;
 
   @override
   Widget build(BuildContext context) {
-    // Census pane width: 30% of shell, clamped to [380, 520].
-    final censusWidth = (shellWidth * 0.30).clamp(380.0, 520.0);
-
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return Stack(
       children: [
-        SizedBox(
-          width: censusWidth,
-          child: PatientCensusView(data: data, selection: selection),
+        // Dim backdrop — tap dismisses.
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: selection.clearPatient,
+            child: Container(color: Colors.black.withOpacity(0.35)),
+          ),
         ),
-        VerticalDivider(
-          width: 1,
-          thickness: 1,
-          color: AppTheme.border.withOpacity(0.6),
-        ),
-        Expanded(
-          child: PatientDetailView(data: data, selection: selection),
+        // Centered card holding the detail view. Tap inside is absorbed.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 1180),
+              child: Material(
+                color: AppTheme.warmWhite,
+                elevation: 16,
+                shadowColor: Colors.black.withOpacity(0.25),
+                borderRadius: BorderRadius.circular(22),
+                clipBehavior: Clip.antiAlias,
+                child: GestureDetector(
+                  // Absorb taps so the backdrop dismiss doesn't fire.
+                  onTap: () {},
+                  behavior: HitTestBehavior.opaque,
+                  child: Stack(
+                    children: [
+                      PatientDetailView(
+                        data: data,
+                        selection: selection,
+                      ),
+                      // Close (X) button top-right of the card.
+                      Positioned(
+                        top: 12,
+                        right: 14,
+                        child: _CloseButton(onTap: selection.clearPatient),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
         ),
       ],
     );
   }
 }
 
-class _NarrowSwap extends StatelessWidget {
-  const _NarrowSwap({required this.data, required this.selection});
-  final FacilityMockData data;
-  final FacilitySelection selection;
+class _CloseButton extends StatefulWidget {
+  const _CloseButton({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  State<_CloseButton> createState() => _CloseButtonState();
+}
+
+class _CloseButtonState extends State<_CloseButton> {
+  bool _hover = false;
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: selection,
-      builder: (context, _) {
-        final showingPatient = selection.selectedPatientId != null;
-        return AnimatedSwitcher(
-          duration: const Duration(milliseconds: 180),
-          child: showingPatient
-              ? PatientDetailView(
-                  key: const ValueKey('detail'),
-                  data: data,
-                  selection: selection,
-                  showBackButton: true,
-                )
-              : PatientCensusView(
-                  key: const ValueKey('census'),
-                  data: data,
-                  selection: selection,
-                ),
-        );
-      },
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: _hover
+                ? AppTheme.sage.withOpacity(0.12)
+                : AppTheme.cream,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: AppTheme.border.withOpacity(0.6),
+              width: 1,
+            ),
+          ),
+          child: Icon(
+            Icons.close_rounded,
+            size: 18,
+            color: _hover ? AppTheme.sage : AppTheme.textSoft,
+          ),
+        ),
+      ),
     );
   }
 }
