@@ -50,6 +50,11 @@ class PatientTile extends StatelessWidget {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 140),
           curve: Curves.easeOut,
+          // Fixed minimum height so the grid stays uniform whether or not
+          // a tile carries the review-needed caption. Sized to fit the
+          // tallest variant (name + room + metrics + caption) with breathing
+          // room.
+          constraints: const BoxConstraints(minHeight: 158),
           padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
           decoration: BoxDecoration(
             color: selected
