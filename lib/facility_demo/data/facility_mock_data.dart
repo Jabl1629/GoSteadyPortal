@@ -6,6 +6,7 @@ import '../models/facility.dart';
 import '../models/patient.dart';
 import '../models/unit.dart';
 import 'facility_seed.dart';
+import 'notification_engine.dart';
 
 /// Mock data source for the facility demo. Surface mirrors the eventual
 /// `ApiClient` (patient-centric methods, hierarchy snapshot at query time)
@@ -66,6 +67,39 @@ class FacilityMockData {
       _gen(patientId).last6Months;
 
   DeviceHealth deviceFor(String patientId) => _gen(patientId).device;
+
+  /// Snapshot used by NotificationEngine. Median is computed over each
+  /// window's totalSteps, sorted middle-element.
+  NotificationContext notificationContextFor(String patientId) {
+    final gen = _gen(patientId);
+    final allHistory = gen.last182Days;
+    final last7Steps = allHistory
+        .sublist(allHistory.length - 7)
+        .map((d) => d.totalSteps)
+        .toList()
+      ..sort();
+    final prior23Steps = allHistory
+        .sublist(allHistory.length - 30, allHistory.length - 7)
+        .map((d) => d.totalSteps)
+        .toList()
+      ..sort();
+    final med7 = last7Steps.isEmpty
+        ? 0
+        : last7Steps[last7Steps.length ~/ 2];
+    final medPrior = prior23Steps.isEmpty
+        ? 0
+        : prior23Steps[prior23Steps.length ~/ 2];
+    final today = gen.today;
+    final hasData = today.totalSteps > 0 || today.totalTimeInMotionMinutes > 0;
+    return NotificationContext(
+      stepsToday: today.totalSteps,
+      activeMinutesToday: today.totalTimeInMotionMinutes,
+      hasDataToday: hasData,
+      median7Day: med7,
+      medianPrior23Day: medPrior,
+      lastDataAgo: DateTime.now().difference(gen.device.lastDataReceived),
+    );
+  }
 
   // ── Internals ──────────────────────────────────────────────────────────
 
@@ -338,9 +372,12 @@ class FacilityMockData {
       lastSeenAgo: const Duration(minutes: 47),
     ),
     'pt_002': _ActivitySpec(
+      // Robert Chen — "below typical activity" demo case.
+      // Baseline lifted from spec target (220) so today (142) lands well
+      // below the 70% threshold even after seeded jitter on the median.
       targetStepsToday: 142,
       targetActiveMinToday: 11,
-      historicalBaselineSteps: 220,
+      historicalBaselineSteps: 280,
       stepsPerActiveMinute: 12.9,
       batteryMv: 3520,
       signalDbm: -91,
@@ -374,10 +411,13 @@ class FacilityMockData {
       lastSeenAgo: const Duration(minutes: 58),
     ),
     'pt_006': _ActivitySpec(
+      // Frank Kowalski — "declining trend" demo case. Peak bumped from
+      // 620 -> 950 so the slope across the comparison windows lands
+      // unambiguously below the 85% threshold.
       targetStepsToday: 198,
       targetActiveMinToday: 14,
       historicalBaselineSteps: 210,
-      historicalPeakSteps: 620,
+      historicalPeakSteps: 950,
       hasDecayingTrend: true,
       stepsPerActiveMinute: 14.1,
       batteryMv: 3470,

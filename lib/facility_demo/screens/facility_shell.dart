@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../theme/app_theme.dart';
 import '../data/facility_mock_data.dart';
 import '../state/facility_selection.dart';
+import '../state/notification_state.dart';
 import '../widgets/facility_top_bar.dart';
 import 'patient_census_view.dart';
 import 'patient_detail_view.dart';
@@ -21,16 +22,19 @@ class FacilityShell extends StatefulWidget {
 
 class _FacilityShellState extends State<FacilityShell> {
   late final FacilitySelection _selection;
+  late final NotificationState _notifications;
 
   @override
   void initState() {
     super.initState();
     _selection = FacilitySelection(widget.data);
+    _notifications = NotificationState();
   }
 
   @override
   void dispose() {
     _selection.dispose();
+    _notifications.dispose();
     super.dispose();
   }
 
@@ -49,6 +53,7 @@ class _FacilityShellState extends State<FacilityShell> {
                   PatientCensusView(
                     data: widget.data,
                     selection: _selection,
+                    notifications: _notifications,
                   ),
                   // Patient overlay when one is selected.
                   ListenableBuilder(
@@ -73,6 +78,7 @@ class _FacilityShellState extends State<FacilityShell> {
                                 key: ValueKey(_selection.selectedPatientId),
                                 data: widget.data,
                                 selection: _selection,
+                                notifications: _notifications,
                               ),
                       );
                     },
@@ -94,10 +100,12 @@ class _PatientOverlay extends StatelessWidget {
     super.key,
     required this.data,
     required this.selection,
+    required this.notifications,
   });
 
   final FacilityMockData data;
   final FacilitySelection selection;
+  final NotificationState notifications;
 
   @override
   Widget build(BuildContext context) {
@@ -132,6 +140,7 @@ class _PatientOverlay extends StatelessWidget {
                       PatientDetailView(
                         data: data,
                         selection: selection,
+                        notifications: notifications,
                       ),
                       // Close (X) button top-right of the card.
                       Positioned(

@@ -4,8 +4,11 @@ import '../../screens/device_screen.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/patient_dashboard.dart';
 import '../data/facility_mock_data.dart';
+import '../data/notification_engine.dart';
 import '../models/patient.dart';
 import '../state/facility_selection.dart';
+import '../state/notification_state.dart';
+import '../widgets/notification_review_panel.dart';
 
 /// Right pane (or full-screen overlay on medium screens) of the facility
 /// shell. Empty state when no patient selected; full reuse of the existing
@@ -15,17 +18,19 @@ class PatientDetailView extends StatelessWidget {
     super.key,
     required this.data,
     required this.selection,
+    required this.notifications,
     this.showBackButton = false,
   });
 
   final FacilityMockData data;
   final FacilitySelection selection;
+  final NotificationState notifications;
   final bool showBackButton;
 
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: selection,
+      listenable: Listenable.merge([selection, notifications]),
       builder: (context, _) {
         final id = selection.selectedPatientId;
         if (id == null) {
@@ -35,6 +40,7 @@ class PatientDetailView extends StatelessWidget {
         return _PatientView(
           data: data,
           patient: patient,
+          notifications: notifications,
           showBackButton: showBackButton,
           onBack: selection.clearPatient,
         );
@@ -47,12 +53,14 @@ class _PatientView extends StatelessWidget {
   const _PatientView({
     required this.data,
     required this.patient,
+    required this.notifications,
     required this.showBackButton,
     required this.onBack,
   });
 
   final FacilityMockData data;
   final Patient patient;
+  final NotificationState notifications;
   final bool showBackButton;
   final VoidCallback onBack;
 
@@ -73,6 +81,9 @@ class _PatientView extends StatelessWidget {
     final unitDisplay =
         data.allUnits().firstWhere((u) => u.id == patient.unitId).displayName;
 
+    final computed = notificationsForPatient(data, patient.id);
+    final active = notifications.activeOf(computed);
+
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(36, 28, 36, 48),
       child: Column(
@@ -87,7 +98,14 @@ class _PatientView extends StatelessWidget {
             unit: unitDisplay,
             room: patient.room,
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 20),
+          if (active.isNotEmpty) ...[
+            NotificationReviewPanel(
+              notifications: active,
+              state: notifications,
+            ),
+            const SizedBox(height: 24),
+          ],
           PatientDashboard(
             device: device,
             today: today,

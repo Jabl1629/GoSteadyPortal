@@ -5,6 +5,46 @@ import '../models/unit.dart';
 
 enum FacilityCheckState { all, none, partial }
 
+enum CensusSortMode {
+  notificationsFirst,
+  nameAZ,
+  mostActive,
+  leastActive;
+
+  String get label {
+    switch (this) {
+      case CensusSortMode.notificationsFirst:
+        return 'Needs review first';
+      case CensusSortMode.nameAZ:
+        return 'Name (A–Z)';
+      case CensusSortMode.mostActive:
+        return 'Most active today';
+      case CensusSortMode.leastActive:
+        return 'Least active today';
+    }
+  }
+}
+
+enum CensusFilterMode {
+  all,
+  withNotifications,
+  criticalOnly,
+  noNotifications;
+
+  String get label {
+    switch (this) {
+      case CensusFilterMode.all:
+        return 'All residents';
+      case CensusFilterMode.withNotifications:
+        return 'Needs review';
+      case CensusFilterMode.criticalOnly:
+        return 'Critical only';
+      case CensusFilterMode.noNotifications:
+        return 'All clear';
+    }
+  }
+}
+
 /// State for the facility/unit selector dropdown plus the currently
 /// drilled-in patient. Single source of truth shared by the top bar,
 /// census view, and detail view.
@@ -18,11 +58,27 @@ class FacilitySelection extends ChangeNotifier {
 
   Set<String> _selectedUnitIds;
   String? _selectedPatientId;
+  CensusSortMode _sortMode = CensusSortMode.notificationsFirst;
+  CensusFilterMode _filterMode = CensusFilterMode.all;
 
   // ── Read ───────────────────────────────────────────────────────────────
 
   Set<String> get selectedUnitIds => _selectedUnitIds;
   String? get selectedPatientId => _selectedPatientId;
+  CensusSortMode get sortMode => _sortMode;
+  CensusFilterMode get filterMode => _filterMode;
+
+  void setSortMode(CensusSortMode mode) {
+    if (_sortMode == mode) return;
+    _sortMode = mode;
+    notifyListeners();
+  }
+
+  void setFilterMode(CensusFilterMode mode) {
+    if (_filterMode == mode) return;
+    _filterMode = mode;
+    notifyListeners();
+  }
 
   bool isUnitSelected(String unitId) => _selectedUnitIds.contains(unitId);
 

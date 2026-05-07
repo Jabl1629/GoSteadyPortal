@@ -3,12 +3,14 @@ import 'package:intl/intl.dart';
 
 import '../../theme/app_theme.dart';
 import '../data/facility_mock_data.dart';
+import '../models/notification.dart';
 import '../models/patient.dart';
 
 /// Single tile in the Patient Census wall. Layout per spec §5.5:
-///   name
+///   name (+ alert icon if any active notifications)
 ///   unit · room
 ///   {steps} steps   {minutes} min active
+///   review-needed caption (only if active notifications)
 ///
 /// "No data today" state when both metrics are zero.
 class PatientTile extends StatelessWidget {
@@ -18,17 +20,28 @@ class PatientTile extends StatelessWidget {
     required this.unitDisplay,
     required this.selected,
     required this.onTap,
+    this.activeNotifications = const [],
   });
 
   final PatientSummary summary;
   final String unitDisplay; // resolved unit name (e.g. "Memory Care")
   final bool selected;
   final VoidCallback onTap;
+  final List<PatientNotification> activeNotifications;
+
+  /// Highest-severity color from the active notifications, or null if none.
+  Color? get _alertColor {
+    if (activeNotifications.isEmpty) return null;
+    final hasCritical = activeNotifications
+        .any((n) => n.severity == NotificationSeverity.critical);
+    return hasCritical ? AppTheme.statusAlert : AppTheme.statusWarn;
+  }
 
   @override
   Widget build(BuildContext context) {
     final patient = summary.patient;
     final stepsFmt = NumberFormat('#,##0').format(summary.stepsToday);
+    final alertColor = _alertColor;
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -55,14 +68,29 @@ class PatientTile extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                patient.displayName,
-                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text(
+                      patient.displayName,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                          ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+                  ),
+                  if (alertColor != null) ...[
+                    const SizedBox(width: 8),
+                    Icon(
+                      Icons.notification_important_rounded,
+                      size: 20,
+                      color: alertColor,
+                    ),
+                  ],
+                ],
               ),
               const SizedBox(height: 2),
               Text(
@@ -106,10 +134,47 @@ class PatientTile extends StatelessWidget {
                     ),
                   ),
                 ),
+              if (alertColor != null) ...[
+                const SizedBox(height: 12),
+                _ReviewCaption(
+                  count: activeNotifications.length,
+                  color: alertColor,
+                ),
+              ],
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+class _ReviewCaption extends StatelessWidget {
+  const _ReviewCaption({required this.count, required this.color});
+  final int count;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = count == 1 ? '1 notification' : '$count notifications';
+    return Row(
+      children: [
+        Container(
+          width: 6,
+          height: 6,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          'Review needed · $label',
+          style: TextStyle(
+            color: color,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.1,
+          ),
+        ),
+      ],
     );
   }
 }
