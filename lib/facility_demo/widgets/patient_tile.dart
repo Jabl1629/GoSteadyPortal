@@ -37,6 +37,17 @@ class PatientTile extends StatelessWidget {
     return hasCritical ? AppTheme.statusAlert : AppTheme.statusWarn;
   }
 
+  /// Short caption text. Single notification: just its label. Multiple:
+  /// label of the most-severe one + "+N more".
+  static String _captionText(List<PatientNotification> ns) {
+    if (ns.isEmpty) return '';
+    final sorted = [...ns]..sort((a, b) =>
+        a.severity.index.compareTo(b.severity.index));
+    final primary = sorted.first.type.label;
+    if (sorted.length == 1) return primary;
+    return '$primary  +${sorted.length - 1} more';
+  }
+
   @override
   Widget build(BuildContext context) {
     final patient = summary.patient;
@@ -142,7 +153,7 @@ class PatientTile extends StatelessWidget {
               if (alertColor != null) ...[
                 const SizedBox(height: 12),
                 _ReviewCaption(
-                  count: activeNotifications.length,
+                  text: _captionText(activeNotifications),
                   color: alertColor,
                 ),
               ],
@@ -155,13 +166,12 @@ class PatientTile extends StatelessWidget {
 }
 
 class _ReviewCaption extends StatelessWidget {
-  const _ReviewCaption({required this.count, required this.color});
-  final int count;
+  const _ReviewCaption({required this.text, required this.color});
+  final String text;
   final Color color;
 
   @override
   Widget build(BuildContext context) {
-    final label = count == 1 ? '1 notification' : '$count notifications';
     return Row(
       children: [
         Container(
@@ -170,13 +180,17 @@ class _ReviewCaption extends StatelessWidget {
           decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
         const SizedBox(width: 8),
-        Text(
-          'Review needed · $label',
-          style: TextStyle(
-            color: color,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.1,
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.1,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
         ),
       ],
