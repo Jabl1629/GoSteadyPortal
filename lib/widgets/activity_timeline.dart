@@ -362,9 +362,12 @@ class TrendChartCard extends StatelessWidget {
             } else if (e.minValue != null && e.maxValue != null) {
               final lo = e.minValue!.toStringAsFixed(2);
               final hi = e.maxValue!.toStringAsFixed(2);
-              text = '${e.tooltip}\n$avgStr m/s avg · $lo–$hi range';
+              text = '${e.tooltip}\n'
+                  'avg  $avgStr m/s\n'
+                  'min  $lo m/s\n'
+                  'max  $hi m/s';
             } else {
-              text = '${e.tooltip}\n$avgStr m/s';
+              text = '${e.tooltip}\navg  $avgStr m/s';
             }
           } else {
             final v = rod.toY.round();
