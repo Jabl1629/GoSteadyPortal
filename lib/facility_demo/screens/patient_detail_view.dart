@@ -84,38 +84,49 @@ class _PatientView extends StatelessWidget {
     final computed = notificationsForPatient(data, patient.id);
     final active = notifications.activeOf(computed);
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(36, 28, 36, 48),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (showBackButton) ...[
-            _BackToCensusButton(onTap: onBack),
-            const SizedBox(height: 12),
-          ],
-          _PatientHeader(
-            name: patient.displayName,
-            unit: unitDisplay,
-            room: patient.room,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isPhone = constraints.maxWidth < 600;
+        return SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(
+            isPhone ? 18 : 36,
+            isPhone ? 56 : 28, // extra top room for the close X on phone
+            isPhone ? 18 : 36,
+            isPhone ? 28 : 48,
           ),
-          const SizedBox(height: 20),
-          if (active.isNotEmpty) ...[
-            NotificationReviewPanel(
-              notifications: active,
-              state: notifications,
-            ),
-            const SizedBox(height: 24),
-          ],
-          PatientDashboard(
-            device: device,
-            today: today,
-            last7: last7,
-            last30: last30,
-            last6Months: last6m,
-            onDeviceTap: () => _openDeviceScreen(context),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (showBackButton) ...[
+                _BackToCensusButton(onTap: onBack),
+                const SizedBox(height: 12),
+              ],
+              _PatientHeader(
+                name: patient.displayName,
+                unit: unitDisplay,
+                room: patient.room,
+                compact: isPhone,
+              ),
+              const SizedBox(height: 20),
+              if (active.isNotEmpty) ...[
+                NotificationReviewPanel(
+                  notifications: active,
+                  state: notifications,
+                ),
+                const SizedBox(height: 24),
+              ],
+              PatientDashboard(
+                device: device,
+                today: today,
+                last7: last7,
+                last30: last30,
+                last6Months: last6m,
+                onDeviceTap: () => _openDeviceScreen(context),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -125,11 +136,13 @@ class _PatientHeader extends StatelessWidget {
     required this.name,
     required this.unit,
     required this.room,
+    this.compact = false,
   });
 
   final String name;
   final String unit;
   final String room;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -139,7 +152,7 @@ class _PatientHeader extends StatelessWidget {
         Text(
           name,
           style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                fontSize: 30,
+                fontSize: compact ? 24 : 30,
                 fontWeight: FontWeight.w500,
               ),
         ),

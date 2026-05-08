@@ -50,45 +50,58 @@ class _PatientDashboardState extends State<PatientDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        DeviceStatusBar(
-          device: widget.device,
-          onTap: widget.onDeviceTap ?? () {},
-        ),
-        const SizedBox(height: 24),
-        TodayCard(today: widget.today),
-        const SizedBox(height: 32),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final stackedHeader = constraints.maxWidth < 500;
+        final trendsHeader = Text(
+          'Activity Trends',
+          style: Theme.of(context)
+              .textTheme
+              .headlineMedium
+              ?.copyWith(fontSize: 22),
+        );
+        final toggle = TimeRangeToggle(
+          selected: _selectedRange,
+          onChanged: (r) => setState(() => _selectedRange = r),
+        );
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Activity Trends',
-              style: Theme.of(context)
-                  .textTheme
-                  .headlineMedium
-                  ?.copyWith(fontSize: 22),
+            DeviceStatusBar(
+              device: widget.device,
+              onTap: widget.onDeviceTap ?? () {},
             ),
-            const Spacer(),
-            SizedBox(
-              width: 240,
-              child: TimeRangeToggle(
-                selected: _selectedRange,
-                onChanged: (r) => setState(() => _selectedRange = r),
+            const SizedBox(height: 24),
+            TodayCard(today: widget.today),
+            const SizedBox(height: 32),
+            if (stackedHeader) ...[
+              trendsHeader,
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: toggle,
               ),
-            ),
+            ] else
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  trendsHeader,
+                  const Spacer(),
+                  SizedBox(width: 240, child: toggle),
+                ],
+              ),
+            const SizedBox(height: 20),
+            _chartCard(ChartMetric.timeInMotion),
+            const SizedBox(height: 20),
+            _chartCard(ChartMetric.distance),
+            const SizedBox(height: 20),
+            _chartCard(ChartMetric.steps),
+            const SizedBox(height: 20),
+            _chartCard(ChartMetric.gaitSpeed),
           ],
-        ),
-        const SizedBox(height: 20),
-        _chartCard(ChartMetric.timeInMotion),
-        const SizedBox(height: 20),
-        _chartCard(ChartMetric.distance),
-        const SizedBox(height: 20),
-        _chartCard(ChartMetric.steps),
-        const SizedBox(height: 20),
-        _chartCard(ChartMetric.gaitSpeed),
-      ],
+        );
+      },
     );
   }
 }

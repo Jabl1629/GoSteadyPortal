@@ -109,53 +109,71 @@ class _PatientOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      children: [
-        // Dim backdrop — tap dismisses.
-        Positioned.fill(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Below ~600 the overlay goes full-bleed (no backdrop padding, no
+        // rounded card frame) — matches phone-modal expectations.
+        final isPhone = constraints.maxWidth < 600;
+
+        final card = Material(
+          color: AppTheme.warmWhite,
+          elevation: isPhone ? 0 : 16,
+          shadowColor: Colors.black.withOpacity(0.25),
+          borderRadius: isPhone
+              ? BorderRadius.zero
+              : BorderRadius.circular(22),
+          clipBehavior: Clip.antiAlias,
           child: GestureDetector(
+            // Absorb taps so the backdrop dismiss doesn't fire.
+            onTap: () {},
             behavior: HitTestBehavior.opaque,
-            onTap: selection.clearPatient,
-            child: Container(color: Colors.black.withOpacity(0.35)),
+            child: Stack(
+              children: [
+                PatientDetailView(
+                  data: data,
+                  selection: selection,
+                  notifications: notifications,
+                ),
+                // Close (X) button top-right of the card.
+                Positioned(
+                  top: 12,
+                  right: 14,
+                  child: _CloseButton(onTap: selection.clearPatient),
+                ),
+              ],
+            ),
           ),
-        ),
-        // Centered card holding the detail view. Tap inside is absorbed.
-        Padding(
-          padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1180),
-              child: Material(
-                color: AppTheme.warmWhite,
-                elevation: 16,
-                shadowColor: Colors.black.withOpacity(0.25),
-                borderRadius: BorderRadius.circular(22),
-                clipBehavior: Clip.antiAlias,
-                child: GestureDetector(
-                  // Absorb taps so the backdrop dismiss doesn't fire.
-                  onTap: () {},
-                  behavior: HitTestBehavior.opaque,
-                  child: Stack(
-                    children: [
-                      PatientDetailView(
-                        data: data,
-                        selection: selection,
-                        notifications: notifications,
-                      ),
-                      // Close (X) button top-right of the card.
-                      Positioned(
-                        top: 12,
-                        right: 14,
-                        child: _CloseButton(onTap: selection.clearPatient),
-                      ),
-                    ],
-                  ),
+        );
+
+        return Stack(
+          children: [
+            // Dim backdrop — tap dismisses. Lighter on phone since the
+            // card itself fills the screen.
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: selection.clearPatient,
+                child: Container(
+                  color: Colors.black
+                      .withOpacity(isPhone ? 0.0 : 0.35),
                 ),
               ),
             ),
-          ),
-        ),
-      ],
+            if (isPhone)
+              Positioned.fill(child: card)
+            else
+              Padding(
+                padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 1180),
+                    child: card,
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }

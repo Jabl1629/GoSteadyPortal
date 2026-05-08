@@ -138,10 +138,17 @@ class TrendChartCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
-      decoration: BoxDecoration(
-        color: Colors.white,
+    return LayoutBuilder(builder: (context, constraints) {
+      final isNarrow = constraints.maxWidth < 480;
+      return Container(
+        padding: EdgeInsets.fromLTRB(
+          isNarrow ? 18 : 28,
+          isNarrow ? 18 : 24,
+          isNarrow ? 18 : 28,
+          isNarrow ? 18 : 28,
+        ),
+        decoration: BoxDecoration(
+          color: Colors.white,
         borderRadius: BorderRadius.circular(AppTheme.cardRadius),
         boxShadow: AppTheme.cardShadow,
         border: Border.all(color: AppTheme.border.withOpacity(0.5), width: 1),
@@ -184,6 +191,7 @@ class TrendChartCard extends StatelessWidget {
         ],
       ),
     );
+    });
   }
 
   Widget _buildChart() {

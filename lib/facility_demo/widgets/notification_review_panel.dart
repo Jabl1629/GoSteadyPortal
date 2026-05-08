@@ -241,47 +241,63 @@ class _NoteInput extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Expanded(
-          child: TextField(
-            controller: controller,
-            onSubmitted: (_) => onSubmit(),
-            textInputAction: TextInputAction.send,
-            style: const TextStyle(fontSize: 13, color: AppTheme.textDark),
-            decoration: InputDecoration(
-              hintText: 'Add a note before acknowledging…',
-              hintStyle: TextStyle(
-                color: AppTheme.textSoft.withOpacity(0.7),
-                fontSize: 13,
-              ),
-              isDense: true,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-              filled: true,
-              fillColor: AppTheme.warmWhite,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide:
-                    BorderSide(color: AppTheme.border.withOpacity(0.7)),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide:
-                    BorderSide(color: AppTheme.border.withOpacity(0.7)),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide:
-                    BorderSide(color: AppTheme.sage, width: 1.5),
-              ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The Acknowledge button is ~210px wide; under ~520 we stack
+        // it below the input rather than alongside.
+        final stack = constraints.maxWidth < 520;
+        final input = TextField(
+          controller: controller,
+          onSubmitted: (_) => onSubmit(),
+          textInputAction: TextInputAction.send,
+          style: const TextStyle(fontSize: 13, color: AppTheme.textDark),
+          decoration: InputDecoration(
+            hintText: 'Add a note before acknowledging…',
+            hintStyle: TextStyle(
+              color: AppTheme.textSoft.withOpacity(0.7),
+              fontSize: 13,
+            ),
+            isDense: true,
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            filled: true,
+            fillColor: AppTheme.warmWhite,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: AppTheme.border.withOpacity(0.7)),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: AppTheme.border.withOpacity(0.7)),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: AppTheme.sage, width: 1.5),
             ),
           ),
-        ),
-        const SizedBox(width: 10),
-        _AcknowledgeButton(enabled: canSubmit, onTap: onSubmit),
-      ],
+        );
+        final button =
+            _AcknowledgeButton(enabled: canSubmit, onTap: onSubmit);
+
+        if (stack) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              input,
+              const SizedBox(height: 10),
+              button,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(child: input),
+            const SizedBox(width: 10),
+            button,
+          ],
+        );
+      },
     );
   }
 }
