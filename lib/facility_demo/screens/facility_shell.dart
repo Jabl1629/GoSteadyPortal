@@ -67,7 +67,8 @@ class _FacilityShellState extends State<FacilityShell> {
                           return FadeTransition(
                             opacity: anim,
                             child: ScaleTransition(
-                              scale: Tween(begin: 0.985, end: 1.0).animate(anim),
+                              scale:
+                                  Tween(begin: 0.985, end: 1.0).animate(anim),
                               child: child,
                             ),
                           );
@@ -119,9 +120,7 @@ class _PatientOverlay extends StatelessWidget {
           color: AppTheme.warmWhite,
           elevation: isPhone ? 0 : 16,
           shadowColor: Colors.black.withOpacity(0.25),
-          borderRadius: isPhone
-              ? BorderRadius.zero
-              : BorderRadius.circular(22),
+          borderRadius: isPhone ? BorderRadius.zero : BorderRadius.circular(22),
           clipBehavior: Clip.antiAlias,
           child: GestureDetector(
             // Absorb taps so the backdrop dismiss doesn't fire.
@@ -154,8 +153,7 @@ class _PatientOverlay extends StatelessWidget {
                 behavior: HitTestBehavior.opaque,
                 onTap: selection.clearPatient,
                 child: Container(
-                  color: Colors.black
-                      .withOpacity(isPhone ? 0.0 : 0.35),
+                  color: Colors.black.withOpacity(isPhone ? 0.0 : 0.35),
                 ),
               ),
             ),
@@ -202,9 +200,7 @@ class _CloseButtonState extends State<_CloseButton> {
           width: 36,
           height: 36,
           decoration: BoxDecoration(
-            color: _hover
-                ? AppTheme.sage.withOpacity(0.12)
-                : AppTheme.cream,
+            color: _hover ? AppTheme.sage.withOpacity(0.12) : AppTheme.cream,
             shape: BoxShape.circle,
             border: Border.all(
               color: AppTheme.border.withOpacity(0.6),

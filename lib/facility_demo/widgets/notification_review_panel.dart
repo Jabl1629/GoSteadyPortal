@@ -276,8 +276,7 @@ class _NoteInput extends StatelessWidget {
             ),
           ),
         );
-        final button =
-            _AcknowledgeButton(enabled: canSubmit, onTap: onSubmit);
+        final button = _AcknowledgeButton(enabled: canSubmit, onTap: onSubmit);
 
         if (stack) {
           return Column(
@@ -321,8 +320,7 @@ class _AcknowledgeButtonState extends State<_AcknowledgeButton> {
         ? (_hover ? AppTheme.sageDark : AppTheme.sage)
         : AppTheme.border.withOpacity(0.5);
     return MouseRegion(
-      cursor:
-          enabled ? SystemMouseCursors.click : SystemMouseCursors.forbidden,
+      cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.forbidden,
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
       child: GestureDetector(

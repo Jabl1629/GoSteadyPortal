@@ -103,9 +103,7 @@ class _TriggerState extends State<_Trigger> {
           duration: const Duration(milliseconds: 120),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           decoration: BoxDecoration(
-            color: _hover
-                ? AppTheme.sage.withOpacity(0.06)
-                : Colors.white,
+            color: _hover ? AppTheme.sage.withOpacity(0.06) : Colors.white,
             borderRadius: BorderRadius.circular(100),
             border: Border.all(
               color: AppTheme.border.withOpacity(0.7),
@@ -286,8 +284,7 @@ class _FacilityBlock extends StatelessWidget {
             padding: const EdgeInsets.only(left: 28),
             child: _CheckRow(
               label: unit.displayName,
-              counter:
-                  '(${_residentCountForUnit(unit.id)} res.)',
+              counter: '(${_residentCountForUnit(unit.id)} res.)',
               state: selection.isUnitSelected(unit.id)
                   ? FacilityCheckState.all
                   : FacilityCheckState.none,
@@ -348,8 +345,7 @@ class _CheckRowState extends State<_CheckRow> {
                   style: TextStyle(
                     color: AppTheme.textDark,
                     fontSize: 13,
-                    fontWeight:
-                        widget.bold ? FontWeight.w600 : FontWeight.w500,
+                    fontWeight: widget.bold ? FontWeight.w600 : FontWeight.w500,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -377,8 +373,8 @@ class _Checkbox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final filled = state == FacilityCheckState.all ||
-        state == FacilityCheckState.partial;
+    final filled =
+        state == FacilityCheckState.all || state == FacilityCheckState.partial;
     return Container(
       width: 18,
       height: 18,
@@ -386,9 +382,7 @@ class _Checkbox extends StatelessWidget {
         color: filled ? AppTheme.sage : Colors.white,
         borderRadius: BorderRadius.circular(4),
         border: Border.all(
-          color: filled
-              ? AppTheme.sage
-              : AppTheme.border,
+          color: filled ? AppTheme.sage : AppTheme.border,
           width: 1.5,
         ),
       ),

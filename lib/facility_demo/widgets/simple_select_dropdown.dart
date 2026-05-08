@@ -135,9 +135,7 @@ class _TriggerState extends State<_Trigger> {
           duration: const Duration(milliseconds: 120),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           decoration: BoxDecoration(
-            color: _hover
-                ? AppTheme.sage.withOpacity(0.06)
-                : AppTheme.cream,
+            color: _hover ? AppTheme.sage.withOpacity(0.06) : AppTheme.cream,
             borderRadius: BorderRadius.circular(100),
             border: Border.all(color: AppTheme.border.withOpacity(0.6)),
           ),

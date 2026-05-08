@@ -125,7 +125,8 @@ class _UserChip extends StatelessWidget {
           decoration: BoxDecoration(
             color: AppTheme.sage,
             shape: BoxShape.circle,
-            border: Border.all(color: AppTheme.sage.withOpacity(0.25), width: 1),
+            border:
+                Border.all(color: AppTheme.sage.withOpacity(0.25), width: 1),
           ),
           child: Center(
             child: Text(

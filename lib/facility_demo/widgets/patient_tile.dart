@@ -41,8 +41,8 @@ class PatientTile extends StatelessWidget {
   /// label of the most-severe one + "+N more".
   static String _captionText(List<PatientNotification> ns) {
     if (ns.isEmpty) return '';
-    final sorted = [...ns]..sort((a, b) =>
-        a.severity.index.compareTo(b.severity.index));
+    final sorted = [...ns]
+      ..sort((a, b) => a.severity.index.compareTo(b.severity.index));
     final primary = sorted.first.type.label;
     if (sorted.length == 1) return primary;
     return '$primary  +${sorted.length - 1} more';
@@ -68,14 +68,11 @@ class PatientTile extends StatelessWidget {
           constraints: const BoxConstraints(minHeight: 158),
           padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
           decoration: BoxDecoration(
-            color: selected
-                ? AppTheme.sage.withOpacity(0.06)
-                : Colors.white,
+            color: selected ? AppTheme.sage.withOpacity(0.06) : Colors.white,
             borderRadius: BorderRadius.circular(AppTheme.cardRadius),
             border: Border.all(
-              color: selected
-                  ? AppTheme.sage
-                  : AppTheme.border.withOpacity(0.6),
+              color:
+                  selected ? AppTheme.sage : AppTheme.border.withOpacity(0.6),
               width: selected ? 2 : 1,
             ),
             boxShadow: selected ? null : AppTheme.cardShadow,

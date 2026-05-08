@@ -177,8 +177,9 @@ class FacilitySelection extends ChangeNotifier {
   void _ensurePatientStillVisible() {
     final selectedId = _selectedPatientId;
     if (selectedId == null) return;
-    final visible =
-        _data.patientsForSelection(_selectedUnitIds).any((s) => s.patient.id == selectedId);
+    final visible = _data
+        .patientsForSelection(_selectedUnitIds)
+        .any((s) => s.patient.id == selectedId);
     if (!visible) {
       _selectedPatientId = null;
     }

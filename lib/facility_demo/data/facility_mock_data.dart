@@ -83,12 +83,9 @@ class FacilityMockData {
         .map((d) => d.totalSteps)
         .toList()
       ..sort();
-    final med7 = last7Steps.isEmpty
-        ? 0
-        : last7Steps[last7Steps.length ~/ 2];
-    final medPrior = prior23Steps.isEmpty
-        ? 0
-        : prior23Steps[prior23Steps.length ~/ 2];
+    final med7 = last7Steps.isEmpty ? 0 : last7Steps[last7Steps.length ~/ 2];
+    final medPrior =
+        prior23Steps.isEmpty ? 0 : prior23Steps[prior23Steps.length ~/ 2];
     final today = gen.today;
     final hasData = today.totalSteps > 0 || today.totalTimeInMotionMinutes > 0;
     return NotificationContext(
@@ -305,9 +302,7 @@ class FacilityMockData {
       if (s > 0) {
         final intensity = _intensityCurve(h);
         final paceJitter = 0.90 + gaitRng.nextDouble() * 0.20;
-        avgSpeed = baselineGaitSpeedMs *
-            (0.85 + intensity * 0.30) *
-            paceJitter;
+        avgSpeed = baselineGaitSpeedMs * (0.85 + intensity * 0.30) * paceJitter;
         minSpeed = avgSpeed * (0.65 + gaitRng.nextDouble() * 0.10);
         maxSpeed = avgSpeed * (1.20 + gaitRng.nextDouble() * 0.20);
       }
@@ -327,8 +322,9 @@ class FacilityMockData {
       final delta = targetActiveMin - minutesAccum;
       if (delta != 0) {
         // Distribute the delta across active hours.
-        final activeIdxs =
-            List.generate(24, (h) => h).where((h) => hours[h].steps > 0).toList();
+        final activeIdxs = List.generate(24, (h) => h)
+            .where((h) => hours[h].steps > 0)
+            .toList();
         if (activeIdxs.isNotEmpty) {
           final perIdx = delta ~/ activeIdxs.length;
           var rem = delta - (perIdx * activeIdxs.length);
@@ -365,8 +361,7 @@ class FacilityMockData {
       sensorModel: 'BMI270',
       batteryMv: spec.batteryMv,
       signalDbm: spec.signalDbm,
-      lastDataReceived:
-          DateTime.now().subtract(spec.lastSeenAgo),
+      lastDataReceived: DateTime.now().subtract(spec.lastSeenAgo),
     );
   }
 

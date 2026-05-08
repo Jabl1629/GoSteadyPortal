@@ -31,7 +31,8 @@ class NotificationEngine {
   static const double belowTypicalThreshold = 0.70;
   static const double decliningTrendThreshold = 0.85;
 
-  List<PatientNotification> evaluate(String patientId, NotificationContext ctx) {
+  List<PatientNotification> evaluate(
+      String patientId, NotificationContext ctx) {
     final out = <PatientNotification>[];
 
     if (!ctx.hasDataToday) {
@@ -55,8 +56,7 @@ class NotificationEngine {
     if (ctx.median7Day > 0 &&
         ctx.medianPrior23Day > 0 &&
         ctx.median7Day < ctx.medianPrior23Day * decliningTrendThreshold) {
-      final pct =
-          ((1 - (ctx.median7Day / ctx.medianPrior23Day)) * 100).round();
+      final pct = ((1 - (ctx.median7Day / ctx.medianPrior23Day)) * 100).round();
       out.add(PatientNotification(
         patientId: patientId,
         type: NotificationType.decliningTrend,

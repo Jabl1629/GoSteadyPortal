@@ -96,8 +96,8 @@ class TrendChartCard extends StatelessWidget {
       avgN++;
     }
     final avgVal = avgN == 0 ? 0.0 : avgSum / avgN;
-    final loStr = (rangeMin == double.infinity ? avgVal : rangeMin)
-        .toStringAsFixed(2);
+    final loStr =
+        (rangeMin == double.infinity ? avgVal : rangeMin).toStringAsFixed(2);
     final hiStr = rangeMax.toStringAsFixed(2);
     final avgStr = avgVal.toStringAsFixed(2);
     return Row(
@@ -149,48 +149,48 @@ class TrendChartCard extends StatelessWidget {
         ),
         decoration: BoxDecoration(
           color: Colors.white,
-        borderRadius: BorderRadius.circular(AppTheme.cardRadius),
-        boxShadow: AppTheme.cardShadow,
-        border: Border.all(color: AppTheme.border.withOpacity(0.5), width: 1),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _title,
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                            fontSize: 18,
-                          ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      _perLabelHasOwnPrefix ? _perLabel : 'Per $_perLabel',
-                      style: const TextStyle(
-                        color: AppTheme.textSoft,
-                        fontSize: 13,
+          borderRadius: BorderRadius.circular(AppTheme.cardRadius),
+          boxShadow: AppTheme.cardShadow,
+          border: Border.all(color: AppTheme.border.withOpacity(0.5), width: 1),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _title,
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                              fontSize: 18,
+                            ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(height: 2),
+                      Text(
+                        _perLabelHasOwnPrefix ? _perLabel : 'Per $_perLabel',
+                        style: const TextStyle(
+                          color: AppTheme.textSoft,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              if (metric == ChartMetric.gaitSpeed) _gaitSpeedSummary(),
-            ],
-          ),
-          const SizedBox(height: 24),
-          SizedBox(
-            height: 220,
-            child: _buildChart(),
-          ),
-        ],
-      ),
-    );
+                if (metric == ChartMetric.gaitSpeed) _gaitSpeedSummary(),
+              ],
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              height: 220,
+              child: _buildChart(),
+            ),
+          ],
+        ),
+      );
     });
   }
 
@@ -224,7 +224,8 @@ class TrendChartCard extends StatelessWidget {
               interval: 1,
               getTitlesWidget: (value, _) {
                 final i = value.toInt();
-                if (i < 0 || i >= entries.length) return const SizedBox.shrink();
+                if (i < 0 || i >= entries.length)
+                  return const SizedBox.shrink();
                 final showEvery = _labelInterval(entries.length);
                 if (i % showEvery != 0) return const SizedBox.shrink();
                 return Padding(
@@ -356,8 +357,7 @@ class TrendChartCard extends StatelessWidget {
       touchTooltipData: BarTouchTooltipData(
         getTooltipColor: (_) => AppTheme.textDark,
         tooltipRoundedRadius: 10,
-        tooltipPadding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        tooltipPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         getTooltipItem: (group, _, rod, __) {
           final i = group.x;
           if (i < 0 || i >= entries.length) return null;
@@ -575,9 +575,8 @@ AxisTitles _leftTitlesFractional(double yMax) => AxisTitles(
         interval: yMax / 4,
         getTitlesWidget: (value, _) {
           if (value == 0) return const SizedBox.shrink();
-          final label = yMax <= 1.0
-              ? value.toStringAsFixed(2)
-              : value.toStringAsFixed(1);
+          final label =
+              yMax <= 1.0 ? value.toStringAsFixed(2) : value.toStringAsFixed(1);
           return Padding(
             padding: const EdgeInsets.only(right: 10),
             child: Text(label, style: _axisStyle),

@@ -49,8 +49,7 @@ class DailyActivity {
 
   int get totalSteps => hours.fold(0, (sum, h) => sum + h.steps);
 
-  double get totalDistanceFt =>
-      hours.fold(0.0, (sum, h) => sum + h.distanceFt);
+  double get totalDistanceFt => hours.fold(0.0, (sum, h) => sum + h.distanceFt);
 
   int get totalTimeInMotionMinutes =>
       hours.fold(0, (sum, h) => sum + h.timeInMotionMinutes);
@@ -75,18 +74,14 @@ class DailyActivity {
   double get minGaitSpeedMs {
     final active = hours.where((h) => h.minGaitSpeedMs > 0);
     if (active.isEmpty) return 0;
-    return active
-        .map((h) => h.minGaitSpeedMs)
-        .reduce((a, b) => a < b ? a : b);
+    return active.map((h) => h.minGaitSpeedMs).reduce((a, b) => a < b ? a : b);
   }
 
   /// Fastest sustained speed across the day's active hours.
   double get maxGaitSpeedMs {
     final active = hours.where((h) => h.maxGaitSpeedMs > 0);
     if (active.isEmpty) return 0;
-    return active
-        .map((h) => h.maxGaitSpeedMs)
-        .reduce((a, b) => a > b ? a : b);
+    return active.map((h) => h.maxGaitSpeedMs).reduce((a, b) => a > b ? a : b);
   }
 }
 

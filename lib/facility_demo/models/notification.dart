@@ -24,7 +24,8 @@ class PatientNotification {
   final String patientId;
   final NotificationType type;
   final NotificationSeverity severity;
-  final String detail; // one-line context, e.g. "0 steps today · last data 9h ago"
+  final String
+      detail; // one-line context, e.g. "0 steps today · last data 9h ago"
 
   const PatientNotification({
     required this.patientId,

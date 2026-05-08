@@ -87,8 +87,7 @@ class PatientCensusView extends StatelessWidget {
 
   static void _applySort(List<_CensusRow> rows, CensusSortMode mode) {
     int byName(_CensusRow a, _CensusRow b) =>
-        a.summary.patient.displayName
-            .compareTo(b.summary.patient.displayName);
+        a.summary.patient.displayName.compareTo(b.summary.patient.displayName);
 
     int severityRank(_CensusRow r) {
       if (r.active.any((n) => n.severity == NotificationSeverity.critical)) {
@@ -107,11 +106,11 @@ class PatientCensusView extends StatelessWidget {
       case CensusSortMode.nameAZ:
         rows.sort(byName);
       case CensusSortMode.mostActive:
-        rows.sort((a, b) =>
-            b.summary.stepsToday.compareTo(a.summary.stepsToday));
+        rows.sort(
+            (a, b) => b.summary.stepsToday.compareTo(a.summary.stepsToday));
       case CensusSortMode.leastActive:
-        rows.sort((a, b) =>
-            a.summary.stepsToday.compareTo(b.summary.stepsToday));
+        rows.sort(
+            (a, b) => a.summary.stepsToday.compareTo(b.summary.stepsToday));
     }
   }
 }
@@ -224,10 +223,8 @@ class _Grid extends StatelessWidget {
                 child: PatientTile(
                   summary: r.summary,
                   unitDisplay: unitDisplayFor(data, r.summary.patient.unitId),
-                  selected:
-                      selection.selectedPatientId == r.summary.patient.id,
-                  onTap: () =>
-                      selection.selectPatient(r.summary.patient.id),
+                  selected: selection.selectedPatientId == r.summary.patient.id,
+                  onTap: () => selection.selectPatient(r.summary.patient.id),
                   activeNotifications: r.active,
                 ),
               ),

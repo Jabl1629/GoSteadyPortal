@@ -8,7 +8,7 @@ class FacilityUser {
   final String displayName;
   final String title;
   final String clientId; // matches the architecture's tenancy boundary
-  final String role;     // "facility_admin" — demo only ever uses this
+  final String role; // "facility_admin" — demo only ever uses this
 
   const FacilityUser({
     required this.displayName,
