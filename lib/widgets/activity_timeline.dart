@@ -6,7 +6,7 @@ import '../models/activity.dart';
 import '../theme/app_theme.dart';
 
 /// Which metric the chart displays.
-enum ChartMetric { steps, distance, timeInMotion }
+enum ChartMetric { steps, distance, timeInMotion, gaitSpeed }
 
 /// A single trend chart card. Renders a bar chart for the given metric
 /// across the selected time range. Instantiate once per metric.
@@ -34,6 +34,8 @@ class TrendChartCard extends StatelessWidget {
         return 'Distance Traveled';
       case ChartMetric.timeInMotion:
         return 'Time in Motion';
+      case ChartMetric.gaitSpeed:
+        return 'Gait Speed';
     }
   }
 
@@ -45,19 +47,18 @@ class TrendChartCard extends StatelessWidget {
         return 'ft';
       case ChartMetric.timeInMotion:
         return 'min';
+      case ChartMetric.gaitSpeed:
+        return 'm/s';
     }
   }
 
   String get _perLabel {
-    switch (timeRange) {
-      case TimeRange.day:
-        return 'hour';
-      case TimeRange.week:
-      case TimeRange.month:
-        return 'day';
-      case TimeRange.sixMonth:
-        return 'week';
-    }
+    final base = switch (timeRange) {
+      TimeRange.day => 'hour',
+      TimeRange.week || TimeRange.month => 'day',
+      TimeRange.sixMonth => 'week',
+    };
+    return metric == ChartMetric.gaitSpeed ? 'Average per $base' : 'Per $base';
   }
 
   Color get _barColor {
@@ -68,6 +69,8 @@ class TrendChartCard extends StatelessWidget {
         return const Color(0xFF5A8E6A);
       case ChartMetric.timeInMotion:
         return const Color(0xFF6B9E7D);
+      case ChartMetric.gaitSpeed:
+        return const Color(0xFF4A7C8E); // slate-teal — distinct clinical metric
     }
   }
 
@@ -79,6 +82,8 @@ class TrendChartCard extends StatelessWidget {
         return const Color(0xFF72A883);
       case ChartMetric.timeInMotion:
         return const Color(0xFF8AB898);
+      case ChartMetric.gaitSpeed:
+        return const Color(0xFF6FA4B5);
     }
   }
 
@@ -124,9 +129,15 @@ class TrendChartCard extends StatelessWidget {
     final entries = _extractData();
     if (entries.isEmpty) return const SizedBox.shrink();
 
-    final values = entries.map((e) => e.value).toList();
-    final maxVal = values.fold<double>(0, (m, v) => v > m ? v : m);
-    final yMax = _niceMax(maxVal);
+    final isGaitSpeed = metric == ChartMetric.gaitSpeed;
+    // For gait speed, the y-axis ceiling should accommodate the max
+    // (peak) value, not just the avg. For other metrics the avg IS the
+    // value being plotted.
+    final ceilingValues = entries
+        .map((e) => isGaitSpeed ? (e.maxValue ?? e.value) : e.value)
+        .toList();
+    final maxVal = ceilingValues.fold<double>(0, (m, v) => v > m ? v : m);
+    final yMax = isGaitSpeed ? _niceMaxFractional(maxVal) : _niceMax(maxVal);
     final barWidth = _barWidth(entries.length);
 
     return BarChart(
@@ -139,7 +150,8 @@ class TrendChartCard extends StatelessWidget {
         titlesData: FlTitlesData(
           topTitles: _noTitles,
           rightTitles: _noTitles,
-          leftTitles: _leftTitles(yMax),
+          leftTitles:
+              isGaitSpeed ? _leftTitlesFractional(yMax) : _leftTitles(yMax),
           bottomTitles: AxisTitles(
             sideTitles: SideTitles(
               showTitles: true,
@@ -160,7 +172,7 @@ class TrendChartCard extends StatelessWidget {
         ),
         barTouchData: _touchData(entries),
         barGroups: List.generate(entries.length, (i) {
-          return _makeBar(i, values[i], barWidth);
+          return _makeBar(i, entries[i], barWidth, isGaitSpeed);
         }),
       ),
     );
@@ -187,6 +199,8 @@ class TrendChartCard extends StatelessWidget {
     return List.generate(24, (h) {
       final a = byHour[h];
       double val = 0;
+      double? minVal;
+      double? maxVal;
       if (a != null) {
         switch (metric) {
           case ChartMetric.steps:
@@ -195,9 +209,19 @@ class TrendChartCard extends StatelessWidget {
             val = a.distanceFt;
           case ChartMetric.timeInMotion:
             val = a.timeInMotionMinutes.toDouble();
+          case ChartMetric.gaitSpeed:
+            val = a.avgGaitSpeedMs;
+            minVal = a.minGaitSpeedMs;
+            maxVal = a.maxGaitSpeedMs;
         }
       }
-      return _DataPoint(label: _fmtHour(h), value: val, tooltip: _fmtHour(h));
+      return _DataPoint(
+        label: _fmtHour(h),
+        value: val,
+        tooltip: _fmtHour(h),
+        minValue: minVal,
+        maxValue: maxVal,
+      );
     });
   }
 
@@ -205,6 +229,8 @@ class TrendChartCard extends StatelessWidget {
       {required bool shortLabel}) {
     return days.map((d) {
       double val;
+      double? minVal;
+      double? maxVal;
       switch (metric) {
         case ChartMetric.steps:
           val = d.totalSteps.toDouble();
@@ -212,18 +238,30 @@ class TrendChartCard extends StatelessWidget {
           val = d.totalDistanceFt;
         case ChartMetric.timeInMotion:
           val = d.totalTimeInMotionMinutes.toDouble();
+        case ChartMetric.gaitSpeed:
+          val = d.avgGaitSpeedMs;
+          minVal = d.minGaitSpeedMs;
+          maxVal = d.maxGaitSpeedMs;
       }
       final label = shortLabel
           ? DateFormat('E').format(d.date)
           : DateFormat('M/d').format(d.date);
       final tip = DateFormat('MMM d').format(d.date);
-      return _DataPoint(label: label, value: val, tooltip: tip);
+      return _DataPoint(
+        label: label,
+        value: val,
+        tooltip: tip,
+        minValue: minVal,
+        maxValue: maxVal,
+      );
     }).toList();
   }
 
   List<_DataPoint> _fromWeekly(List<WeeklyActivity> weeks) {
     return weeks.map((w) {
       double val;
+      double? minVal;
+      double? maxVal;
       switch (metric) {
         case ChartMetric.steps:
           val = w.totalSteps.toDouble();
@@ -231,10 +269,20 @@ class TrendChartCard extends StatelessWidget {
           val = w.totalDistanceFt;
         case ChartMetric.timeInMotion:
           val = w.totalTimeInMotionMinutes.toDouble();
+        case ChartMetric.gaitSpeed:
+          val = w.avgGaitSpeedMs;
+          minVal = w.minGaitSpeedMs;
+          maxVal = w.maxGaitSpeedMs;
       }
       final label = DateFormat('MMM').format(w.weekStart);
       final tip = 'Week of ${DateFormat('MMM d').format(w.weekStart)}';
-      return _DataPoint(label: label, value: val, tooltip: tip);
+      return _DataPoint(
+        label: label,
+        value: val,
+        tooltip: tip,
+        minValue: minVal,
+        maxValue: maxVal,
+      );
     }).toList();
   }
 
@@ -248,11 +296,28 @@ class TrendChartCard extends StatelessWidget {
         getTooltipItem: (group, _, rod, __) {
           final i = group.x;
           if (i < 0 || i >= entries.length) return null;
-          final valStr = metric == ChartMetric.distance
-              ? '${NumberFormat('#,##0').format(rod.toY.round())} $_unit'
-              : '${rod.toY.round()} $_unit';
+          final e = entries[i];
+          String text;
+          if (metric == ChartMetric.gaitSpeed) {
+            final avgStr = e.value.toStringAsFixed(2);
+            if (e.value <= 0) {
+              text = '${e.tooltip}\nno walking';
+            } else if (e.minValue != null && e.maxValue != null) {
+              final lo = e.minValue!.toStringAsFixed(2);
+              final hi = e.maxValue!.toStringAsFixed(2);
+              text = '${e.tooltip}\n$avgStr m/s avg · $lo–$hi range';
+            } else {
+              text = '${e.tooltip}\n$avgStr m/s';
+            }
+          } else {
+            final v = rod.toY.round();
+            final valStr = metric == ChartMetric.distance
+                ? '${NumberFormat('#,##0').format(v)} $_unit'
+                : '$v $_unit';
+            text = '${e.tooltip}\n$valStr';
+          }
           return BarTooltipItem(
-            '${entries[i].tooltip}\n$valStr',
+            text,
             const TextStyle(
               color: Colors.white,
               fontSize: 12,
@@ -265,28 +330,45 @@ class TrendChartCard extends StatelessWidget {
     );
   }
 
-  BarChartGroupData _makeBar(int x, double y, double width) =>
-      BarChartGroupData(
-        x: x,
-        barRods: [
-          BarChartRodData(
-            toY: y,
-            width: width,
-            borderRadius: const BorderRadius.only(
-              topLeft: Radius.circular(5),
-              topRight: Radius.circular(5),
-            ),
-            gradient: y > 0
-                ? LinearGradient(
-                    begin: Alignment.bottomCenter,
-                    end: Alignment.topCenter,
-                    colors: [_barColor, _barColorLight],
-                  )
-                : null,
-            color: y > 0 ? null : AppTheme.border.withOpacity(0.3),
+  BarChartGroupData _makeBar(
+    int x,
+    _DataPoint e,
+    double width,
+    bool isGaitSpeed,
+  ) {
+    final y = e.value;
+    return BarChartGroupData(
+      x: x,
+      barRods: [
+        BarChartRodData(
+          toY: y,
+          width: width,
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(5),
+            topRight: Radius.circular(5),
           ),
-        ],
-      );
+          gradient: y > 0
+              ? LinearGradient(
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
+                  colors: [_barColor, _barColorLight],
+                )
+              : null,
+          color: y > 0 ? null : AppTheme.border.withOpacity(0.3),
+          // Gait speed: faded "ghost" bar showing the period's max behind
+          // the solid avg bar. The eye reads bar-top = avg, faded
+          // top-edge = peak.
+          backDrawRodData: isGaitSpeed && (e.maxValue ?? 0) > y
+              ? BackgroundBarChartRodData(
+                  show: true,
+                  toY: e.maxValue!,
+                  color: _barColorLight.withOpacity(0.28),
+                )
+              : null,
+        ),
+      ],
+    );
+  }
 
   static String _fmtHour(int h) {
     if (h == 0) return '12a';
@@ -314,11 +396,15 @@ class _DataPoint {
   final String label;
   final double value;
   final String tooltip;
+  final double? minValue;
+  final double? maxValue;
 
   const _DataPoint({
     required this.label,
     required this.value,
     required this.tooltip,
+    this.minValue,
+    this.maxValue,
   });
 }
 
@@ -342,6 +428,19 @@ double _niceMax(double raw) {
   return (padded / magnitude).ceil() * magnitude.toDouble();
 }
 
+/// Nicely-rounded ceiling for fractional metrics (gait speed in m/s).
+/// Picks 0.5 / 1.0 / 1.5 / 2.0 / 3.0 etc. based on the input range.
+double _niceMaxFractional(double raw) {
+  if (raw <= 0) return 1.0;
+  final padded = raw * 1.10;
+  if (padded <= 0.5) return 0.5;
+  if (padded <= 1.0) return 1.0;
+  if (padded <= 1.5) return 1.5;
+  if (padded <= 2.0) return 2.0;
+  if (padded <= 3.0) return 3.0;
+  return ((padded * 2).ceil() / 2).toDouble();
+}
+
 AxisTitles _leftTitles(double yMax) => AxisTitles(
       sideTitles: SideTitles(
         showTitles: true,
@@ -352,6 +451,26 @@ AxisTitles _leftTitles(double yMax) => AxisTitles(
           final label = value >= 1000
               ? '${(value / 1000).toStringAsFixed(1)}k'
               : value.round().toString();
+          return Padding(
+            padding: const EdgeInsets.only(right: 10),
+            child: Text(label, style: _axisStyle),
+          );
+        },
+      ),
+    );
+
+/// Fractional left-axis labels (gait speed). Two decimals when the ceiling
+/// is below 1; one decimal otherwise.
+AxisTitles _leftTitlesFractional(double yMax) => AxisTitles(
+      sideTitles: SideTitles(
+        showTitles: true,
+        reservedSize: 48,
+        interval: yMax / 4,
+        getTitlesWidget: (value, _) {
+          if (value == 0) return const SizedBox.shrink();
+          final label = yMax <= 1.0
+              ? value.toStringAsFixed(2)
+              : value.toStringAsFixed(1);
           return Padding(
             padding: const EdgeInsets.only(right: 10),
             child: Text(label, style: _axisStyle),

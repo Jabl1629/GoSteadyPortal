@@ -50,59 +50,45 @@ class _PatientDashboardState extends State<PatientDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final isWide = constraints.maxWidth >= 900;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        DeviceStatusBar(
+          device: widget.device,
+          onTap: widget.onDeviceTap ?? () {},
+        ),
+        const SizedBox(height: 24),
+        TodayCard(today: widget.today),
+        const SizedBox(height: 32),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            DeviceStatusBar(
-              device: widget.device,
-              onTap: widget.onDeviceTap ?? () {},
+            Text(
+              'Activity Trends',
+              style: Theme.of(context)
+                  .textTheme
+                  .headlineMedium
+                  ?.copyWith(fontSize: 22),
             ),
-            const SizedBox(height: 28),
-            TodayCard(today: widget.today),
-            const SizedBox(height: 36),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Text(
-                  'Activity Trends',
-                  style: Theme.of(context)
-                      .textTheme
-                      .headlineMedium
-                      ?.copyWith(fontSize: 22),
-                ),
-                const Spacer(),
-                SizedBox(
-                  width: 240,
-                  child: TimeRangeToggle(
-                    selected: _selectedRange,
-                    onChanged: (r) => setState(() => _selectedRange = r),
-                  ),
-                ),
-              ],
+            const Spacer(),
+            SizedBox(
+              width: 240,
+              child: TimeRangeToggle(
+                selected: _selectedRange,
+                onChanged: (r) => setState(() => _selectedRange = r),
+              ),
             ),
-            const SizedBox(height: 20),
-            _chartCard(ChartMetric.timeInMotion),
-            const SizedBox(height: 20),
-            if (isWide)
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(child: _chartCard(ChartMetric.distance)),
-                  const SizedBox(width: 20),
-                  Expanded(child: _chartCard(ChartMetric.steps)),
-                ],
-              )
-            else ...[
-              _chartCard(ChartMetric.distance),
-              const SizedBox(height: 20),
-              _chartCard(ChartMetric.steps),
-            ],
           ],
-        );
-      },
+        ),
+        const SizedBox(height: 20),
+        _chartCard(ChartMetric.timeInMotion),
+        const SizedBox(height: 20),
+        _chartCard(ChartMetric.distance),
+        const SizedBox(height: 20),
+        _chartCard(ChartMetric.steps),
+        const SizedBox(height: 20),
+        _chartCard(ChartMetric.gaitSpeed),
+      ],
     );
   }
 }

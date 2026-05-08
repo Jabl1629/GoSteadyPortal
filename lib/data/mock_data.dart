@@ -64,12 +64,32 @@ class MockDataSource {
     // Group into 7-day chunks starting from the oldest day.
     for (var i = 0; i < days.length; i += 7) {
       final chunk = days.sublist(i, min(i + 7, days.length));
+      // Time-weighted average gait speed across the week.
+      var weightedNum = 0.0;
+      var weightedDen = 0;
+      var weekMin = double.infinity;
+      var weekMax = 0.0;
+      for (final d in chunk) {
+        if (d.totalTimeInMotionMinutes <= 0) continue;
+        final dayAvg = d.avgGaitSpeedMs;
+        if (dayAvg <= 0) continue;
+        weightedNum += dayAvg * d.totalTimeInMotionMinutes;
+        weightedDen += d.totalTimeInMotionMinutes;
+        if (d.minGaitSpeedMs > 0 && d.minGaitSpeedMs < weekMin) {
+          weekMin = d.minGaitSpeedMs;
+        }
+        if (d.maxGaitSpeedMs > weekMax) weekMax = d.maxGaitSpeedMs;
+      }
+      final weekAvg = weightedDen == 0 ? 0.0 : weightedNum / weightedDen;
       weeks.add(WeeklyActivity(
         weekStart: chunk.first.date,
         totalSteps: chunk.fold(0, (s, d) => s + d.totalSteps),
         totalDistanceFt: chunk.fold(0.0, (s, d) => s + d.totalDistanceFt),
         totalTimeInMotionMinutes:
             chunk.fold(0, (s, d) => s + d.totalTimeInMotionMinutes),
+        avgGaitSpeedMs: weekAvg,
+        minGaitSpeedMs: weekMin == double.infinity ? 0 : weekMin,
+        maxGaitSpeedMs: weekMax,
       ));
     }
     return weeks;
@@ -120,11 +140,21 @@ class MockDataSource {
     // Roughly 1 minute of motion per 15 steps, capped at 55 min/hr.
     final motionMinutes = min((steps / 15).round(), 55);
 
+    // Gait speed in m/s — typical walker user range. Modulated by
+    // intensity so peak hours show stronger pace.
+    final paceJitter = 0.85 + _rng.nextDouble() * 0.30;
+    final avgSpeed = 0.65 * (0.85 + intensity * 0.30) * paceJitter;
+    final minSpeed = avgSpeed * (0.65 + _rng.nextDouble() * 0.10);
+    final maxSpeed = avgSpeed * (1.20 + _rng.nextDouble() * 0.20);
+
     return HourlyActivity(
       hour: hour,
       steps: steps,
       distanceFt: distanceFt,
       timeInMotionMinutes: motionMinutes,
+      avgGaitSpeedMs: avgSpeed,
+      minGaitSpeedMs: minSpeed,
+      maxGaitSpeedMs: maxSpeed,
     );
   }
 

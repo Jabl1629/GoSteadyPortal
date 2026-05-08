@@ -28,7 +28,7 @@ class TodayCard extends StatelessWidget {
     final steps = today.totalSteps;
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(32, 28, 32, 30),
+      padding: const EdgeInsets.fromLTRB(32, 20, 32, 22),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(AppTheme.cardRadius),
         boxShadow: AppTheme.cardShadowElevated,
@@ -50,11 +50,11 @@ class TodayCard extends StatelessWidget {
             'Today\'s Activity',
             style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                   color: Colors.white,
-                  fontSize: 22,
+                  fontSize: 20,
                   fontWeight: FontWeight.w500,
                 ),
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 14),
           IntrinsicHeight(
             child: Row(
               children: [

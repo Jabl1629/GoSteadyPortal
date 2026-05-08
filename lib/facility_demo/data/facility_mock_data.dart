@@ -120,7 +120,13 @@ class FacilityMockData {
 
   _PatientGenerated _generateFor(String patientId) {
     final spec = _activitySpecs[patientId]!;
+    // Two independent seeded streams — keeping gait-speed RNG separate
+    // means adding/changing the gait-speed feature doesn't shift
+    // step/distance/minutes generation, which would otherwise reshuffle
+    // which patients trigger which notifications (the demo cases are
+    // tuned around specific seeded outputs).
     final rng = Random(patientId.hashCode);
+    final gaitRng = Random(patientId.hashCode ^ 0x7AE8D);
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
 
@@ -131,11 +137,14 @@ class FacilityMockData {
       final amplitude = _historicalAmplitude(spec, dayOffset);
       final dayVariance = 0.75 + rng.nextDouble() * 0.5; // 0.75–1.25
       final dailySteps = (amplitude * dayVariance).round();
+      final dayGait = _historicalGaitSpeed(spec, dayOffset);
       history.add(_buildDay(
         date: date,
         targetSteps: dailySteps,
         cadence: spec.stepsPerActiveMinute,
+        baselineGaitSpeedMs: dayGait,
         rng: rng,
+        gaitRng: gaitRng,
       ));
     }
 
@@ -144,20 +153,41 @@ class FacilityMockData {
       date: startOfToday,
       targetSteps: spec.targetStepsToday,
       cadence: spec.stepsPerActiveMinute,
+      baselineGaitSpeedMs: spec.baselineGaitSpeedMs,
       targetActiveMin: spec.targetActiveMinToday,
       rng: rng,
+      gaitRng: gaitRng,
     );
 
     // Aggregate history into 26 weeks (oldest first).
     final weeks = <WeeklyActivity>[];
     for (var i = 0; i < history.length; i += 7) {
       final chunk = history.sublist(i, min(i + 7, history.length));
+      var weightedNum = 0.0;
+      var weightedDen = 0;
+      var weekMin = double.infinity;
+      var weekMax = 0.0;
+      for (final d in chunk) {
+        if (d.totalTimeInMotionMinutes <= 0) continue;
+        final dayAvg = d.avgGaitSpeedMs;
+        if (dayAvg <= 0) continue;
+        weightedNum += dayAvg * d.totalTimeInMotionMinutes;
+        weightedDen += d.totalTimeInMotionMinutes;
+        if (d.minGaitSpeedMs > 0 && d.minGaitSpeedMs < weekMin) {
+          weekMin = d.minGaitSpeedMs;
+        }
+        if (d.maxGaitSpeedMs > weekMax) weekMax = d.maxGaitSpeedMs;
+      }
+      final weekAvg = weightedDen == 0 ? 0.0 : weightedNum / weightedDen;
       weeks.add(WeeklyActivity(
         weekStart: chunk.first.date,
         totalSteps: chunk.fold(0, (s, d) => s + d.totalSteps),
         totalDistanceFt: chunk.fold(0.0, (s, d) => s + d.totalDistanceFt),
         totalTimeInMotionMinutes:
             chunk.fold(0, (s, d) => s + d.totalTimeInMotionMinutes),
+        avgGaitSpeedMs: weekAvg,
+        minGaitSpeedMs: weekMin == double.infinity ? 0 : weekMin,
+        maxGaitSpeedMs: weekMax,
       ));
     }
 
@@ -186,14 +216,29 @@ class FacilityMockData {
     return peak + (base - peak) * progress;
   }
 
+  /// Gait speed counterpart of [_historicalAmplitude]. For a declining
+  /// patient, gait speed slopes from `historicalPeakGaitSpeedMs` down to
+  /// `baselineGaitSpeedMs` over the 182-day window.
+  double _historicalGaitSpeed(_ActivitySpec spec, int dayOffset) {
+    if (!spec.hasDecayingTrend || spec.historicalPeakGaitSpeedMs <= 0) {
+      return spec.baselineGaitSpeedMs;
+    }
+    final progress = (182 - dayOffset) / 181.0;
+    final peak = spec.historicalPeakGaitSpeedMs;
+    final base = spec.baselineGaitSpeedMs;
+    return peak + (base - peak) * progress;
+  }
+
   /// Build a single 24-hour day, distributed by the intensity curve and
   /// (optionally) re-scaled so the day's totals exactly match the targets.
   DailyActivity _buildDay({
     required DateTime date,
     required int targetSteps,
     required double cadence,
+    required double baselineGaitSpeedMs,
     int? targetActiveMin,
     required Random rng,
+    required Random gaitRng,
   }) {
     if (targetSteps == 0) {
       return DailyActivity(
@@ -251,11 +296,29 @@ class FacilityMockData {
       if (motionMin > 55) motionMin = 55;
       stepsAccum += s;
       minutesAccum += motionMin;
+      // Gait speed only when the patient walked this hour. Modulate by
+      // intensity so peak hours show stronger pace, plus jitter. Uses an
+      // isolated RNG stream so this never shifts step/distance generation.
+      double avgSpeed = 0;
+      double minSpeed = 0;
+      double maxSpeed = 0;
+      if (s > 0) {
+        final intensity = _intensityCurve(h);
+        final paceJitter = 0.90 + gaitRng.nextDouble() * 0.20;
+        avgSpeed = baselineGaitSpeedMs *
+            (0.85 + intensity * 0.30) *
+            paceJitter;
+        minSpeed = avgSpeed * (0.65 + gaitRng.nextDouble() * 0.10);
+        maxSpeed = avgSpeed * (1.20 + gaitRng.nextDouble() * 0.20);
+      }
       hours.add(HourlyActivity(
         hour: date.add(Duration(hours: h)),
         steps: s,
         distanceFt: distance,
         timeInMotionMinutes: motionMin,
+        avgGaitSpeedMs: avgSpeed,
+        minGaitSpeedMs: minSpeed,
+        maxGaitSpeedMs: maxSpeed,
       ));
     }
 
@@ -282,6 +345,9 @@ class FacilityMockData {
               steps: hours[h].steps,
               distanceFt: hours[h].distanceFt,
               timeInMotionMinutes: newMin,
+              avgGaitSpeedMs: hours[h].avgGaitSpeedMs,
+              minGaitSpeedMs: hours[h].minGaitSpeedMs,
+              maxGaitSpeedMs: hours[h].maxGaitSpeedMs,
             );
           }
         }
@@ -370,6 +436,7 @@ class FacilityMockData {
       batteryMv: 3550,
       signalDbm: -82,
       lastSeenAgo: const Duration(minutes: 47),
+      baselineGaitSpeedMs: 0.65,
     ),
     'pt_002': _ActivitySpec(
       // Robert Chen — "below typical activity" demo case.
@@ -382,6 +449,7 @@ class FacilityMockData {
       batteryMv: 3520,
       signalDbm: -91,
       lastSeenAgo: const Duration(hours: 1, minutes: 12),
+      baselineGaitSpeedMs: 0.55,
     ),
     'pt_003': _ActivitySpec(
       targetStepsToday: 0,
@@ -391,6 +459,7 @@ class FacilityMockData {
       batteryMv: 3120, // low — offline-y
       signalDbm: -108,
       lastSeenAgo: const Duration(hours: 9, minutes: 22),
+      baselineGaitSpeedMs: 0.62,
     ),
     'pt_004': _ActivitySpec(
       targetStepsToday: 894,
@@ -400,6 +469,7 @@ class FacilityMockData {
       batteryMv: 3580,
       signalDbm: -75,
       lastSeenAgo: const Duration(minutes: 31),
+      baselineGaitSpeedMs: 0.85,
     ),
     'pt_005': _ActivitySpec(
       targetStepsToday: 521,
@@ -409,11 +479,14 @@ class FacilityMockData {
       batteryMv: 3540,
       signalDbm: -84,
       lastSeenAgo: const Duration(minutes: 58),
+      baselineGaitSpeedMs: 0.70,
     ),
     'pt_006': _ActivitySpec(
       // Frank Kowalski — "declining trend" demo case. Peak bumped from
       // 620 -> 950 so the slope across the comparison windows lands
-      // unambiguously below the 85% threshold.
+      // unambiguously below the 85% threshold. Gait speed also declines
+      // (0.78 -> 0.50 m/s over 6 months) so the new gait-speed chart
+      // visibly tells the same story.
       targetStepsToday: 198,
       targetActiveMinToday: 14,
       historicalBaselineSteps: 210,
@@ -423,6 +496,8 @@ class FacilityMockData {
       batteryMv: 3470,
       signalDbm: -97,
       lastSeenAgo: const Duration(hours: 2, minutes: 5),
+      baselineGaitSpeedMs: 0.50,
+      historicalPeakGaitSpeedMs: 0.78,
     ),
     'pt_007': _ActivitySpec(
       targetStepsToday: 612,
@@ -432,6 +507,7 @@ class FacilityMockData {
       batteryMv: 3560,
       signalDbm: -80,
       lastSeenAgo: const Duration(minutes: 22),
+      baselineGaitSpeedMs: 0.75,
     ),
     'pt_008': _ActivitySpec(
       targetStepsToday: 445,
@@ -441,6 +517,7 @@ class FacilityMockData {
       batteryMv: 3540,
       signalDbm: -86,
       lastSeenAgo: const Duration(minutes: 39),
+      baselineGaitSpeedMs: 0.65,
     ),
     'pt_009': _ActivitySpec(
       targetStepsToday: 234,
@@ -450,6 +527,7 @@ class FacilityMockData {
       batteryMv: 3500,
       signalDbm: -89,
       lastSeenAgo: const Duration(hours: 1, minutes: 4),
+      baselineGaitSpeedMs: 0.55,
     ),
     'pt_010': _ActivitySpec(
       targetStepsToday: 156,
@@ -459,6 +537,7 @@ class FacilityMockData {
       batteryMv: 3490,
       signalDbm: -94,
       lastSeenAgo: const Duration(hours: 1, minutes: 38),
+      baselineGaitSpeedMs: 0.50,
     ),
   };
 }
@@ -474,6 +553,14 @@ class _ActivitySpec {
   final int signalDbm;
   final Duration lastSeenAgo;
 
+  /// Today / recent-baseline average gait speed in m/s. Walker users
+  /// typically span ~0.4–0.9 m/s.
+  final double baselineGaitSpeedMs;
+
+  /// 6-months-ago peak gait speed for patients with `hasDecayingTrend`.
+  /// Ignored otherwise.
+  final double historicalPeakGaitSpeedMs;
+
   _ActivitySpec({
     required this.targetStepsToday,
     required this.targetActiveMinToday,
@@ -484,6 +571,8 @@ class _ActivitySpec {
     required this.batteryMv,
     required this.signalDbm,
     required this.lastSeenAgo,
+    required this.baselineGaitSpeedMs,
+    this.historicalPeakGaitSpeedMs = 0,
   });
 }
 
