@@ -137,7 +137,11 @@ class PatientTile extends StatelessWidget {
                     ),
                   ],
                 )
-              else
+              // When the resident has no activity but no review notification
+              // either, show a soft empty-data line. When a notification is
+              // active, the colored review caption below already conveys
+              // the state — skip the italic to avoid duplication.
+              else if (activeNotifications.isEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: 2),
                   child: Text(
