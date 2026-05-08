@@ -61,6 +61,55 @@ class TrendChartCard extends StatelessWidget {
     return metric == ChartMetric.gaitSpeed ? 'Average per $base' : 'Per $base';
   }
 
+  /// Whether the chart-card subtitle should be prefixed with "Per".
+  /// Gait speed already says "Average per …" so the prefix is suppressed.
+  bool get _perLabelHasOwnPrefix => metric == ChartMetric.gaitSpeed;
+
+  /// Right-aligned summary chip for the gait-speed chart card. Surfaces
+  /// the period's min–max range and time-averaged value so the audience
+  /// gets the clinical headline at a glance — the per-bucket bars are
+  /// then just "where it sat hour-by-hour."
+  Widget _gaitSpeedSummary() {
+    final entries = _extractData();
+    final active = entries.where((e) => e.value > 0).toList();
+    if (active.isEmpty) {
+      return Text(
+        'No walking yet',
+        style: TextStyle(
+          color: AppTheme.textSoft.withOpacity(0.7),
+          fontSize: 12,
+          fontWeight: FontWeight.w500,
+          fontStyle: FontStyle.italic,
+        ),
+      );
+    }
+    double rangeMin = double.infinity;
+    double rangeMax = 0;
+    double avgSum = 0;
+    var avgN = 0;
+    for (final e in active) {
+      final lo = e.minValue ?? e.value;
+      final hi = e.maxValue ?? e.value;
+      if (lo > 0 && lo < rangeMin) rangeMin = lo;
+      if (hi > rangeMax) rangeMax = hi;
+      avgSum += e.value;
+      avgN++;
+    }
+    final avgVal = avgN == 0 ? 0.0 : avgSum / avgN;
+    final loStr = (rangeMin == double.infinity ? avgVal : rangeMin)
+        .toStringAsFixed(2);
+    final hiStr = rangeMax.toStringAsFixed(2);
+    final avgStr = avgVal.toStringAsFixed(2);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _SummaryStat(label: 'Range', value: '$loStr–$hiStr', unit: 'm/s'),
+        const SizedBox(width: 16),
+        _SummaryStat(label: 'Avg', value: avgStr, unit: 'm/s'),
+      ],
+    );
+  }
+
   Color get _barColor {
     switch (metric) {
       case ChartMetric.steps:
@@ -100,19 +149,32 @@ class TrendChartCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            _title,
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  fontSize: 18,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _title,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                            fontSize: 18,
+                          ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _perLabelHasOwnPrefix ? _perLabel : 'Per $_perLabel',
+                      style: const TextStyle(
+                        color: AppTheme.textSoft,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
                 ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            'Per $_perLabel',
-            style: const TextStyle(
-              color: AppTheme.textSoft,
-              fontSize: 13,
-            ),
+              ),
+              if (metric == ChartMetric.gaitSpeed) _gaitSpeedSummary(),
+            ],
           ),
           const SizedBox(height: 24),
           SizedBox(
@@ -130,13 +192,8 @@ class TrendChartCard extends StatelessWidget {
     if (entries.isEmpty) return const SizedBox.shrink();
 
     final isGaitSpeed = metric == ChartMetric.gaitSpeed;
-    // For gait speed, the y-axis ceiling should accommodate the max
-    // (peak) value, not just the avg. For other metrics the avg IS the
-    // value being plotted.
-    final ceilingValues = entries
-        .map((e) => isGaitSpeed ? (e.maxValue ?? e.value) : e.value)
-        .toList();
-    final maxVal = ceilingValues.fold<double>(0, (m, v) => v > m ? v : m);
+    final maxVal =
+        entries.map((e) => e.value).fold<double>(0, (m, v) => v > m ? v : m);
     final yMax = isGaitSpeed ? _niceMaxFractional(maxVal) : _niceMax(maxVal);
     final barWidth = _barWidth(entries.length);
 
@@ -172,7 +229,7 @@ class TrendChartCard extends StatelessWidget {
         ),
         barTouchData: _touchData(entries),
         barGroups: List.generate(entries.length, (i) {
-          return _makeBar(i, entries[i], barWidth, isGaitSpeed);
+          return _makeBar(i, entries[i], barWidth);
         }),
       ),
     );
@@ -330,12 +387,7 @@ class TrendChartCard extends StatelessWidget {
     );
   }
 
-  BarChartGroupData _makeBar(
-    int x,
-    _DataPoint e,
-    double width,
-    bool isGaitSpeed,
-  ) {
+  BarChartGroupData _makeBar(int x, _DataPoint e, double width) {
     final y = e.value;
     return BarChartGroupData(
       x: x,
@@ -355,16 +407,6 @@ class TrendChartCard extends StatelessWidget {
                 )
               : null,
           color: y > 0 ? null : AppTheme.border.withOpacity(0.3),
-          // Gait speed: faded "ghost" bar showing the period's max behind
-          // the solid avg bar. The eye reads bar-top = avg, faded
-          // top-edge = peak.
-          backDrawRodData: isGaitSpeed && (e.maxValue ?? 0) > y
-              ? BackgroundBarChartRodData(
-                  show: true,
-                  toY: e.maxValue!,
-                  color: _barColorLight.withOpacity(0.28),
-                )
-              : null,
         ),
       ],
     );
@@ -389,6 +431,60 @@ class TrendChartCard extends StatelessWidget {
     if (count <= 24) return 3;
     if (count <= 31) return 5;
     return 4; // 6M weekly
+  }
+}
+
+class _SummaryStat extends StatelessWidget {
+  const _SummaryStat({
+    required this.label,
+    required this.value,
+    required this.unit,
+  });
+
+  final String label;
+  final String value;
+  final String unit;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          label.toUpperCase(),
+          style: const TextStyle(
+            color: AppTheme.textSoft,
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.8,
+          ),
+        ),
+        const SizedBox(height: 2),
+        RichText(
+          text: TextSpan(
+            children: [
+              TextSpan(
+                text: value,
+                style: const TextStyle(
+                  color: AppTheme.textDark,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              TextSpan(
+                text: ' $unit',
+                style: const TextStyle(
+                  color: AppTheme.textSoft,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 }
 
