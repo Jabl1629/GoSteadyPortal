@@ -1,0 +1,11 @@
+{
+  "name": "GoSteady Portal",
+  "short_name": "GoSteady",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#FFFCF7",
+  "theme_color": "#4A7C59",
+  "description": "GoSteady caregiver monitoring portal.",
+  "orientation": "portrait-primary",
+  "prefer_related_applications": false
+}
