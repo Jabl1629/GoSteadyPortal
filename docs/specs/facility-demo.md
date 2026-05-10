@@ -459,24 +459,70 @@ work continues independently in Phase 2B.
 
 | Step | Output | Status |
 |---|---|---|
-| 0 | Spec doc reviewed and approved | ⬜ (this) |
-| 1 | Cut `feature/facility-demo` from `feature/infra-scaffold` post-merge | ✅ done (HEAD `7805127`) |
-| 2 | Commit this spec to `feature/facility-demo` | ⬜ |
-| 3 | Scaffold `lib/facility_demo/` directory + `main_demo.dart` empty entrypoint | ⬜ |
-| 4 | `FacilityMockData` with seed patients (data-only, no UI) | ⬜ |
-| 5 | `FacilityShell` + Patient Census view (no detail panel yet) | ⬜ |
-| 6 | Facility/Unit selector dropdown wired to selection state | ⬜ |
-| 7 | Patient Detail panel — extract `DashboardScreen` body, scope to selected patient | ⬜ |
-| 8 | Mock auth + login screen | ⬜ |
-| 9 | Pixel polish + responsive breakpoints | ⬜ |
-| 10 | Build + test on conference-grade resolution; final dry-run | ⬜ |
+| 0 | Spec doc reviewed and approved | ✅ 2026-05-06 |
+| 1 | Cut `feature/facility-demo` from `feature/infra-scaffold` post-merge | ✅ HEAD `7805127` |
+| 2 | Commit this spec to `feature/facility-demo` | ✅ `d475644` |
+| 3 | Scaffold `lib/facility_demo/` directory + `main_demo.dart` empty entrypoint | ✅ |
+| 4 | `FacilityMockData` with seed patients (data-only, no UI) | ✅ |
+| 5 | `FacilityShell` + Patient Census view (no detail panel yet) | ✅ |
+| 6 | Facility/Unit selector dropdown wired to selection state | ✅ |
+| 7 | Patient Detail panel — extract `DashboardScreen` body, scope to selected patient | ✅ |
+| 8 | Mock auth + login screen | ✅ |
+| 9 | Pixel polish + responsive breakpoints | ✅ phone/tablet/desktop verified |
+| 10 | Build + test on conference-grade resolution; final dry-run | ✅ |
 
-Each step lands as one or a few commits. No deploy step — the demo runs
-locally on the laptop driving the projector.
+### Iterations after the initial implementation
+
+| Date | Commit | What landed |
+|---|---|---|
+| 2026-05-06 | `65b797d` | Switched layout from master-detail split-pane to full-grid census + overlay-on-click pattern |
+| 2026-05-06 | `f012b4a` | Three notification rules (No activity today / Below typical / Declining trend) + Sort/Filter dropdowns + Notification Review panel with Acknowledge + Save Note |
+| 2026-05-06 | `14278ac` | Uniform tile heights regardless of notification presence |
+| 2026-05-06 | `65f82d7` | Tile caption shows specific notification label rather than count |
+| 2026-05-06 | `beb47df` | Replaced separate dismiss + send buttons with one "Acknowledge + Save Note" action |
+| 2026-05-08 | `b3d0cd8` + `b739028` | Gait-speed chart added; cleaner range/avg summary chip; tooltip restructured to avg / min / max stacked |
+| 2026-05-08 | `0761175` + `83783b4` | Full mobile + tablet responsive pass — `?w=NUMBER` URL viewport override for autonomous testing, top-bar collapse, full-bleed phone overlay, stacked Acknowledge button, tile dedupe |
+| 2026-05-08 | `46717e3` | `dart format` cleanup |
 
 ---
 
-## 12. What this spec is NOT
+## 12. Deploy
+
+### Live URL
+**https://jabl1629.github.io/GoSteadyPortal/**
+
+Hosted on GitHub Pages from the `gh-pages` branch root. Repo is public, so the
+URL is open — no auth needed at the page level (the demo's "Sign in to demo"
+button is mock auth that always succeeds).
+
+### How re-deploy works
+
+```bash
+./tools/deploy-demo.sh
+```
+
+The script:
+1. Builds with `flutter build web -t lib/facility_demo/main_demo.dart --base-href /GoSteadyPortal/`
+2. Clones a fresh checkout to `/tmp/gh-pages-deploy` (avoids touching the
+   iCloud-synced primary repo)
+3. Creates an orphan `gh-pages` branch, copies the build artifacts to root,
+   adds `.nojekyll` so GitHub doesn't rewrite asset paths
+4. Force-pushes to `origin/gh-pages`
+
+GitHub Pages picks up the push within ~30–90 seconds.
+
+### Pages config (one-time, already done)
+
+```bash
+gh api -X POST repos/Jabl1629/GoSteadyPortal/pages \
+  -f "source[branch]=gh-pages" -f "source[path]=/"
+```
+
+HTTPS enforced. No CNAME (using the default `*.github.io` domain).
+
+---
+
+## 13. What this spec is NOT
 
 - Not a Phase 2A spec. The mock data shapes here are **draft input** to Phase
   2A's API contract design. Anything that locks in here gets reviewed when
@@ -484,8 +530,8 @@ locally on the laptop driving the projector.
 - Not a Phase 2B spec. The demo establishes the visual + interaction patterns
   for the facility view; the real Phase 2B will swap mocks for live API and
   add the deferred features (alerts inbox, role-aware navigation, etc).
-- Not a hosting / CI spec. The demo runs as `flutter build web` on a laptop.
-  Phase 3A (S3 + CloudFront + WAF) is unrelated.
+- Not Phase 3A. Phase 3A is the production hosting story (S3 + CloudFront +
+  WAF + ACM cert at `portal.gosteady.co`). GitHub Pages is just for the demo.
 
 ---
 

@@ -2,6 +2,10 @@
 
 Caregiver monitoring dashboard for the GoSteady smart walker cap. Built in Flutter so V1 runs as a responsive web app and the same codebase can be compiled to native iOS and Android when we need it.
 
+> 🟢 **Live facility demo:** [jabl1629.github.io/GoSteadyPortal](https://jabl1629.github.io/GoSteadyPortal/)
+>
+> Built from `feature/facility-demo` and deployed via GitHub Pages. Mock auth, static seeded data, fully responsive (works on iPhone/iPad). See [`docs/specs/facility-demo.md`](docs/specs/facility-demo.md) for the spec and [`tools/deploy-demo.sh`](tools/deploy-demo.sh) to redeploy.
+
 ## V1 Scope
 
 V1 is intentionally narrow. It shows two things:
