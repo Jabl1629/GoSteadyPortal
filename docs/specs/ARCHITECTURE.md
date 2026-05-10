@@ -1162,7 +1162,7 @@ Structured JSON via Lambda Powertools:
 
 ---
 
-### Phase 1.6 — Observability Foundation ✅ **Deployed (dev) 2026-04-30, follow-up 2026-05-05**
+### Phase 1.6 — Observability Foundation ✅ **Deployed (dev) 2026-04-30, follow-ups 2026-05-05 + 2026-05-10**
 
 **Spec:** [`phase-1.6-observability.md`](phase-1.6-observability.md)
 
@@ -1200,6 +1200,13 @@ Structured JSON via Lambda Powertools:
 - Per-Device Detail dashboard's "Recent activity sessions" Logs Insights query field names aligned with the audit log shape (camelCase, matching DDB column names) instead of the original firmware-side snake_case schema.
 - Bench-validated against 5 real walks (35 / 40 / 10 / 81 / 60 steps; one classified outdoor at R=0.4033, the others indoor R=0.02–0.09). All 9 columns render in the dashboard widget after a hard-refresh.
 - Concurrent firmware-side fix to a stale `stop_done_sem` race in `gosteady_session_stop()` — see [firmware coord §C8 (joint entry, 2026-05-05)](../firmware-coordination/2026-04-17-cloud-contracts.md). The dashboards were what surfaced this bug — without the per-device drill-down view, the silent skip of activity uplinks would have continued unnoticed.
+
+**2026-05-10 follow-up — Per-Device Detail dashboard widget period: 60 min → 1 min** — surfaced when the bench unit was first plugged in for hardening work and the dashboard appeared empty despite a healthy heartbeat clearly publishing PUBACK in the firmware logs:
+
+- All six metric widgets in [`infra/lib/constructs/dashboards/per-device.ts`](../../infra/lib/constructs/dashboards/per-device.ts) (BatteryPct, RsrpDbm, SnrDb, WatchdogHits, FaultCountersFatal, FaultCountersWatchdog) had `period: cdk.Duration.minutes(60)` baked in. CloudWatch then snapped the dashboard's selected time-range preset (`1h`, `12h`, etc.) backward to the previous full hour boundary, *excluding the in-progress hour-bucket containing the most recent heartbeat*. With heartbeats firing once per hour, this meant a freshly-arrived data point was invisible until the bucket completed (up to ~60 min later). Result: dashboard read as "device is not communicating" for the entire interval between heartbeat publish and bucket close, despite the data being present in CloudWatch the whole time (verified directly via `cloudwatch:GetMetricData`).
+- Fix: all six widget metrics dropped to `period: cdk.Duration.minutes(1)`. Each heartbeat now renders as a dot in the minute-bucket it actually arrived; default time-range presets work intuitively. CloudWatch's 1-minute aggregation is free at this volume (≤24 datapoints/day/serial).
+- Side benefit: makes the M14.5 site-survey dashboard usable as a real "is this device alive right now" view. Before this fix, an operator looking at the dashboard mid-hour after every heartbeat would see "No data available" and assume the unit had silently died.
+- **Open follow-up surfaced during the same investigation, NOT in this commit:** `activity_reject_count` metric (emitted by activity-processor on payload validation failures like `bad_timestamp`, `bad_session_uuid`, etc.) has no alarm subscriber. Today's bench session produced an `activity_reject` for `bad_timestamp:Invalid isoformat string: ''` (firmware bug — empty `session_start` when motion-triggered auto-start fires before LTE-M attaches and cellular UTC is unavailable). The handler returned 200 OK with a WARNING-level log → no Lambda Errors counter, no ERROR-pattern match → entire firmware-side bug class is invisible to the alarm catalog. Should be added: a CloudWatch alarm on `GoSteady/Processing/dev > activity_reject_count > 0` with the same SNS routing as the existing `activity-processor-unmapped-serial` alarm. **Sibling firmware fix lands separately (firmware will populate `session_start` retroactively at session-stop using the cellular UTC available by then).**
 
 ---
 
