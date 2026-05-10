@@ -147,6 +147,37 @@ export class HandlerAlarms extends Construct {
             'Device published activity without an active DeviceAssignment ' +
             '(orphan serial). Row dropped cleanly; investigate provisioning.',
         });
+
+        // Activity-reject (firmware coord §C10.2). activity-processor logs
+        // payload-validation failures at WARNING and returns 200 OK to the
+        // IoT Rule — invisible to Lambda Errors and to the ERROR-pattern
+        // filter above. The handler already emits an EMF
+        // `activity_reject_count` metric in `GoSteady/Processing/{env}`
+        // (dimensioned by `service` = function name); we just attach an
+        // alarm subscriber so the firmware-side bug class becomes visible.
+        // First trigger that surfaced this gap: empty `session_start` when
+        // motion-triggered auto-start fires before LTE-M attaches (fixed
+        // firmware-side; this alarm catches future regressions).
+        const rejectAlarm = new cloudwatch.Alarm(this, 'ActivityProcessorActivityReject', {
+          alarmName: `gosteady-${env}-activity-processor-activity-reject`,
+          alarmDescription:
+            `${fn}: payload-validation rejection (e.g. bad_timestamp, ` +
+            'bad_session_uuid). Handler returns 200 OK so Lambda Errors stays ' +
+            '0 — this alarm is the only signal. Inspect /aws/lambda/' +
+            `${fn} for the activity_reject warning line and reason field.`,
+          metric: new cloudwatch.Metric({
+            namespace: `GoSteady/Processing/${env}`,
+            metricName: 'activity_reject_count',
+            dimensionsMap: { service: fn },
+            statistic: 'Sum',
+            period: cdk.Duration.minutes(5),
+          }),
+          threshold: 0,
+          comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+          evaluationPeriods: 1,
+          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        });
+        rejectAlarm.addAlarmAction(snsAction);
       }
 
       if (fn.endsWith('-snippet-parser')) {
