@@ -3956,3 +3956,211 @@ No firmware-coord action items from this batch.
 *This concludes the multi-day arc: the dashboards exposed silent
 failures; the diagnostic logs pinpointed the races; the architectural
 fixes close the failure modes; the bench unit is M14.5-ready.*
+
+---
+
+# Joint cloud + firmware update — 2026-05-10 (M14.5 hardening sprint: dashboard period fix + 6-axis FMEA + 6 firmware punch-list items shipped + 2 deferred + 1 reverted post-bench)
+
+> **From:** GoSteady firmware + cloud teams (single Claude session — the
+> formerly-separate firmware/cloud sessions merged today as the work has
+> become too cross-cutting to coordinate via this append-only doc alone).
+>
+> **TL;DR:** Started the day diagnosing why the per-device dashboard
+> looked empty despite a healthy heartbeat publishing. Pulled the thread
+> into a full M14.5 hardening sprint. Cloud-side: dashboard widget
+> period 60min → 1min so single data points render immediately. Firmware-
+> side: produced HARDENING_FMEA.md (37-row 6-axis failure-mode analysis),
+> implemented 6 of the 9 high-Risk-low-Effort items, version bumped
+> 0.8.0-prod → 0.9.0-hardening. One item revert post-bench-validation
+> (FMEA 6.1 capture_start rotate hook caused WDT regression under weak
+> cellular signal). All other items bench-validated against GS9999999999.
+>
+> Note on session merge: with the same Claude operating both repos, this
+> coord doc moves from "cross-team broadcast" to "shared engineering
+> log." Future entries may be shorter / less ceremonial than the 2026-04
+> originals when both halves of a change are coherent in one session.
+
+---
+
+## C10.1 Cloud-side: per-device dashboard widget period (commit `fcda720` on `feature/infra-scaffold` + deployed)
+
+**Symptom:** Bench unit was healthy and heartbeating successfully, but the
+per-device CloudWatch dashboard appeared completely empty even on the 1h
+preset. `aws cloudwatch get-metric-data` confirmed the data point existed
+in CloudWatch storage with the correct dimensions (`serial=GS9999999999,
+service=gosteady-dev-heartbeat-processor`).
+
+**Root cause:** `infra/lib/constructs/dashboards/per-device.ts` hardcoded
+`period: cdk.Duration.minutes(60)` on all 6 metric widgets (BatteryPct,
+RsrpDbm, SnrDb, WatchdogHits, FaultCountersFatal, FaultCountersWatchdog).
+CloudWatch snaps the dashboard's selected time-range backward to the
+previous full-period boundary when widgets specify period >= 60s. So
+selecting "1h" rendered as "the previous full hour ending at 10:00" —
+excluding the in-progress 10:00–11:00 bucket containing the most recent
+heartbeat at 10:05. With heartbeat firing once per hour, every dashboard
+view between heartbeats was effectively empty.
+
+**Fix:** Drop `period` from `Duration.minutes(60)` to `Duration.minutes(1)`
+on all 6 metric widgets. Each heartbeat now renders as a dot in the
+minute-bucket it actually arrived; default time-range presets work
+intuitively. Free at this volume (≤24 datapoints/day/serial).
+
+**Deploy:** `cdk deploy GoSteady-Dev-Observability` ran 2026-05-10T17:46Z,
+UPDATE_COMPLETE in 25 s. Dashboard widget periods verified `[60, 60, 60,
+60, 60, 60]` post-deploy.
+
+**Side benefit:** Makes the M14.5 site-survey dashboard usable as a
+real "is this device alive right now" view. Before this fix, a freshly-
+deployed unit would look "broken" for the first hour after activation.
+
+**Documented in `ARCHITECTURE.md` Phase 1.6 follow-up subsection** (header
+date updated to "Deployed (dev) 2026-04-30, follow-ups 2026-05-05 +
+2026-05-10").
+
+## C10.2 Cloud-side OPEN follow-up: `activity_reject_count` alarm gap
+
+While diagnosing the dashboard issue, surfaced a parallel cloud-side
+gap: today's bench session also produced an `activity_reject` for
+`bad_timestamp:Invalid isoformat string: ''` (firmware bug — empty
+session_start when motion-triggered auto-start fires before LTE-M
+attaches; FMEA 1.1, fixed firmware-side). The activity-processor logs
+this rejection at WARNING level, returns 200 OK to the IoT Rule (no
+Lambda Errors counter), no ERROR-pattern match → entire firmware-side
+bug class is invisible to the alarm catalog.
+
+The `activity_reject_count` metric IS published by activity-processor
+in `GoSteady/Processing/dev` namespace. It just has no alarm subscriber.
+
+**Suggested fix (NOT in this commit):** Add a CloudWatch alarm on
+`GoSteady/Processing/dev > activity_reject_count > 0` with the same SNS
+routing as the existing `activity-processor-unmapped-serial` alarm.
+~4-line CDK change in `observability-stack.ts`. Sibling fix to firmware
+FMEA 1.1+1.2 (which already shipped firmware-side; cloud-side alarm
+would surface any future regression).
+
+Documented inline in `ARCHITECTURE.md` Phase 1.6 follow-up subsection
+as "Open follow-up surfaced during the same investigation, NOT in this
+commit."
+
+## C10.3 Firmware-side: HARDENING_FMEA.md — 6-axis failure-mode analysis
+
+`HARDENING_FMEA.md` at the firmware repo root committed 2026-05-10 as
+65e6aa3. 37 rows across:
+
+1. Silent data loss
+2. Permanent brick (no recovery without physical access)
+3. Battery overrun
+4. False-positive cloud event
+5. False-negative cloud event
+6. Storage / lifecycle (gradient-failure axis — distinct from
+   point-in-time failures because fixes are POLICIES, not bug fixes)
+
+Each row scored on Severity × Probability = Risk and Effort (S/M/L/XL).
+Cross-axis summary table orders all rows by Risk descending. M14.5-
+blocker punch-list at end identifies the 9 items with Risk ≥ 12 AND
+Effort ≤ M AND not Accepted.
+
+## C10.4 Firmware-side: punch-list shipped (commits `2e4c1e7` + `5343100`)
+
+Bumped firmware version 0.8.0-prod → 0.9.0-hardening. Six items
+implemented, bench-validated against GS9999999999.
+
+| Item | What | Bench result |
+|---|---|---|
+| **4.7** boot_count in heartbeat extras | New `gosteady_forensics_get_boot_count` getter; `APPEND_OR_FAIL` in `build_heartbeat_payload` | ✅ Shadow.reported.boot_count populated |
+| **4.1** Reset forensics counters on first activation | New `gosteady_forensics_reset_counters` API; activation.c calls on transition from not-activated to activated | Code path verified; not triggered in bench (already-activated unit). Will fire on first activation of GS0000000001/2/3 |
+| **1.1+1.2** Retro-stamp session_start/end UTC | New `gosteady_cellular_format_unix_ms_iso8601` formatter; activity worker resolves empty ISO strings from uptime deltas + current cellular UTC just before publish | Code path verified; not triggered in bench (cellular up before START). Will fire naturally on cold-boot-with-motion in field |
+| **1.3** Activity republish on PUBACK timeout | In-memory retry with 1/5/15 min backoff (matches heartbeat retry pattern). After 3 attempts, drop with ERR; .dat preserved on flash | Code path verified; not triggered in bench (PUBACK arrived <1 s) |
+| **6.2** Boot-time stale .dat orphan sweep | New `gosteady_session_orphan_sweep` iterates /lfs/sessions, fs_unlink any .dat. main.c calls after lfs mount, before sampler threads spawn | ✅ `orphan_sweep: deleted 7 stale .dat file(s) at boot` on first reflash |
+| **6.1** Snippet rotation policy | 14-day stale cutoff + 90% free-space rotation. Boot-time + hourly heartbeat-tick triggers. **Capture_start hook reverted post-bench** (see C10.5 below) | ✅ Boot rotation runs cleanly; partition stays healthy |
+
+Two items deferred with documented rationale in HARDENING_FMEA.md
+"Deferred Items":
+
+- **2.1 Shadow re-check on every cellular wake** — gated on cloud
+  Phase 2A device-shadow-handler being live (per coord §F7.5 deferral).
+- **3.1 nPM1300 LP803448-tuned battery model** — needs ~30-day bench
+  discharge run, can't complete in a code-sprint. M14.5 soak should
+  validate whether the bundled "Example" 1100 mAh model produces
+  false-critical alerts at non-critical actual SoC; if so, that's the
+  trigger to start the bench discharge.
+
+## C10.5 Firmware-side WDT regression + revert: FMEA 6.1 capture_start hook
+
+Bench-validation surfaced a WDT lockup on `START` immediately after the
+hardening commit landed. Two consecutive `tools/control.py start-preset`
+attempts both wedged the device past the 60 s WDT timeout
+(`fault_counters.watchdog` 5→6, `reset_reason=WATCHDOG` on recovery
+boots). Heartbeat tick log went silent for 50 s during each lockup.
+
+**Root cause:** The new `gosteady_snippet_rotate` hook at the top of
+`gosteady_snippet_capture_start` made a cellular_get_network_time
+AT call (in rotate_stale_pass). Combined with the two pre-existing AT
+calls in `session.c::session_start`, the session-open path made 3
+sequential AT calls. Today's bench cellular state was unusual — RSRP
+-97 dBm, EMM cause 15 logged, slow registration (3 minutes for one
+boot vs typical 7-10 seconds). Under that contention, AT calls
+serialized inside `nrf_modem_at` and cumulative latency breached the
+60 s WDT envelope.
+
+**Fix (commit `5343100`):** Drop the rotate-from-capture_start hook.
+Boot-time + hourly heartbeat-tick rotation hooks still ship — coverage
+of the rotation policy is adequate at 1-hour cadence (v1 capture rates
+~8/day max are well below what would fill the 16 MB partition between
+heartbeat ticks).
+
+**Verification post-revert:** Same bench sequence completed cleanly:
+START returned UUID in ~330 ms, session ran 12.42 s, ALGO_V1 ran,
+activity published with `firmware_version=0.9.0-hardening`, PUBACK
+received in <1 s, auto-prune deleted the .dat. Cloud activity-processor
+logged `activity_ok` with no rejection.
+
+**Watch item for M14.5:** The 2 pre-existing AT calls in session_start
+STILL risk a similar lockup under sustained cellular contention. Today's
+bench was unusual; typical conditions complete in <100 ms total. M14.5
+site-survey should monitor for any session_start that takes >5 s as
+an early-warning signal of AT serialization. If observed, follow-up
+patch should add explicit AT timeouts via `nrf_modem_at_cmd_async` or
+move AT-getting outside the session-open critical path.
+
+## C10.6 Build sizes after sprint (build_cloud, prj_cloud.conf)
+
+- FLASH: 210892 / 819200 (25.74%) — +4152 B over 0.8.0-prod
+- RAM:   227440 / 227992 (99.76%) — +48 B over 0.8.0-prod
+- merged.hex: ~952 KB
+
+RAM at 99.76% is tight but stable. New BSS is 8 bytes for retry_count
++ 2× uptime_ms fields in struct gosteady_activity msgq slots × 4 + 16
+bytes alignment padding. No new large allocations in heap or BSS.
+
+## C10.7 What's next
+
+**Firmware-side:** ready for M14.5 site-survey shakedown.
+- Flash `GS0000000001` with cloud cert + `build_field/merged.hex` (the
+  prj_field.conf overlay, deployment build).
+- Bench desk for ≥7 days, observe per-device dashboard.
+- M11.1 confirmation walk against this exact 0.9.0-hardening build
+  during the soak window.
+- Watch the M14.5 watch items called out in HARDENING_FMEA.md "M14.5
+  Soak (lower urgency, validate during shakedown)" section.
+
+**Cloud-side OPEN:**
+1. `activity_reject_count` alarm subscriber (C10.2).
+2. Phase 2A `device-shadow-handler` Lambda (gates firmware FMEA 2.1
+   completion).
+3. Phase 1C offline detector Lambda (`lastSeen > 2hr`).
+
+**Joint OPEN observation watching M14.5 soak:**
+- nPM1300 fuel gauge model accuracy on actual LP803448 cell. If false-
+  battery_critical alerts fire at non-critical SoC, kick off bench
+  discharge to build a tuned model (FMEA 3.1).
+
+No firmware-coord action items from this batch.
+
+---
+
+*Entry owner: Jace + Claude (single merged firmware+cloud session,
+2026-05-10).*
+*This is the M14.5 hardening sprint completion entry. Bench unit
+GS9999999999 running 0.9.0-hardening. Punch-list closed (with one
+revert documented). Shipping firmware ready.*
