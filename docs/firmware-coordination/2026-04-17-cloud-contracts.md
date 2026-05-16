@@ -4164,3 +4164,421 @@ No firmware-coord action items from this batch.
 *This is the M14.5 hardening sprint completion entry. Bench unit
 GS9999999999 running 0.9.0-hardening. Punch-list closed (with one
 revert documented). Shipping firmware ready.*
+
+
+---
+---
+
+# Joint cloud + firmware update — 2026-05-16 (informal site-survey aftermath: §C10.5 AT-serialization watch-item empirically validated; SIM-data-exhaustion was the trigger; scoped patch + cloud follow-ups)
+
+> **From:** GoSteady firmware + cloud teams (single Claude session, both hats).
+>
+> **Context:** Bench unit `GS9999999999` (running 0.9.0-hardening) was carried
+> around a conference 2026-05-11 → 2026-05-12 as an informal pre-M14.5 stress
+> exposure. The cap was mostly not on a walker — the goal was just to see how
+> the wake/sleep/session/upload state machine behaved during continuous low-
+> motion exposure across two days with degrading cellular coverage. Device
+> eventually wedged hard enough to need a power cycle. Then this morning,
+> 2026-05-16, even after a clean power cycle the device produced no cloud
+> traffic. The investigation that followed found two distinct failures, one
+> of which had been explicitly predicted six days earlier.
+>
+> **TL;DR:** Onomondo SIM exhausted its data quota mid-conference. That alone
+> only explains the cellular-publish failure (clean root cause for current
+> silence: EMM cause 19 / PDN reject). It does NOT directly explain why the
+> firmware locked up and needed a power cycle. The lockup is a **separate
+> failure mode**: the two `AT+CCLK?` calls in `session_start`'s critical
+> path block synchronously, and under sustained modem contention (which
+> the SIM-rejection-loop creates very efficiently) they exceed the 60 s WDT
+> envelope. This is exactly the §C10.5 "M14.5 watch item" — now with a real
+> reproducer. Proposed patch: timeout-wrapped AT calls. Also one cloud-side
+> alarm gap closed today (commit `3c47f0d`) + one new gap surfaced
+> (device-offline alarm).
+
+---
+
+## C11.1 Informal site-survey timeline (conference, May 11-12)
+
+Cap was healthy through 2026-05-11 morning (RSRP -85, hourly heartbeats on
+schedule). Through the day:
+
+| Phase | Window | Observation |
+|---|---|---|
+| Healthy | 05-11 00:33 → 13:36 UTC | 60-min heartbeats, RSRP -85 to -87, 33 walk sessions captured + uploaded |
+| Signal degrades | 05-11 14:37 → 19:38 | RSRP collapses -86 → -95 → -113 → -117; first `signal_weak` synthetic alert at 15:37 |
+| Retry storm | 05-11 23:35 → 05-12 02:17 | Off-cadence heartbeats at 71m → 8m → 12m → 4m → 15m intervals; firmware's linear-backoff retry path firing under PUBACK timeouts; 5 consecutive `signal_lost` synthetics |
+| Overnight sleep | 05-12 02:17 → 14:59 | 12.7 h gap; battery dropped only 1.9 % = device sleeping correctly |
+| Resumption | 05-12 14:59 → 19:43 | Hourly cadence, 35 more sessions, 15 more snippets |
+| **Last heartbeat reached cloud** | **05-12 19:43:53 UTC** | RSRP -125, final `signal_lost` alert fired |
+| Activity still landing | 05-12 19:43 → 20:20:57 | **4 more activity uplinks PUBACK'd after the "last" heartbeat** — activity-worker thread's connect cycle was finding cellular when heartbeat-worker's wasn't |
+| Silence | 05-12 20:20:57 → 05-16 11:13 | No cloud traffic for ~3 days 15 h |
+
+**Cloud-side aggregate over the two days:**
+- 68 activity sessions, 8,777 steps
+- 38 snippets uploaded, all parsed cleanly (zero `SnippetValidationError`)
+- 40 heartbeats logged, Shadow updated on each
+- 17 synthetic signal alerts (4 weak + 13 lost) — threshold detector working as designed
+- Zero IoT Rule failures, zero DLQ messages, zero Lambda ERROR-level logs across all 6 handlers
+- Zero `activity_reject_count`, zero `unmapped_serial_count`
+
+The data path was healthy end-to-end. Everything that reached the broker was processed cleanly.
+
+---
+
+## C11.2 What the boot at 2026-05-16 11:13 told us
+
+User power-cycled this morning ~1 h before investigation. First boot
+forensics line was the smoking gun:
+
+```
+<inf> gs_forensics: hwinfo reset_cause=0x00000010
+<wrn> gs_forensics: previous reset was WATCHDOG — count now 8
+<inf> gs_forensics: forensics: boot=89 reset=WATCHDOG faults=4 wdt=8
+<inf> gs_session: orphan_sweep: deleted 3 stale .dat file(s) at boot
+```
+
+Compared to Shadow's stale 2026-05-12 19:43 snapshot (`boot_count=86,
+fault_counters.watchdog=7, fault_counters.fatal=3`):
+
+| Counter | At conference end | This morning | Delta during silence |
+|---|---|---|---|
+| `boot_count` | 86 | 89 | **+3 reboots** |
+| `fault_counters.watchdog` | 7 | 8 | **+1 watchdog fire** |
+| `fault_counters.fatal` | 3 | 4 | **+1 fatal panic** |
+| Orphan `.dat` files | (unknown) | 3 cleaned at boot | 3 sessions wedged mid-write |
+
+The cap reset itself three times between the user's perceived "needed a
+power cycle" moment and this morning's manual cycle. One of those resets
+was a watchdog fire; one was a fatal panic; the third (POWER_ON or one of
+the above) is unattributable without persisted per-event detail.
+
+**Auto-prune-on-publish-success + orphan_sweep (FMEA 6.2 from M14.5 sprint)
+worked exactly as designed** — the 3 stale `.dat` files from wedged
+sessions were cleaned at the next clean boot with no manual intervention.
+That hardening item is now field-validated.
+
+---
+
+## C11.3 Why the device couldn't talk to cloud this morning (not the lockup)
+
+This morning's symptom was simpler than the conference lockup: device alive
++ ticking, but **zero MQTT publishes**. Cloud-side metrics showed zero
+`Connect.Success` AND zero `Connect.AuthError` for the device across the
+last 12 h — the broker wasn't even seeing TLS handshake attempts. uart0
+log showed the cause:
+
+```
+<wrn> lte_lc: Registration rejected, EMM cause: 15 (×2)  — "No suitable cells in TA"
+<wrn> lte_lc: Registration rejected, EMM cause: 11 (×1)  — "PLMN not allowed"
+<wrn> lte_lc: Registration rejected, EMM cause: 19 (×10+) — "ESM failure / PDN rejected"
+```
+
+EMM cause 19 dominated. The modem was finding cells, finding PLMNs (no
+sustained cause 11), rotating between LTE-M and NB-IoT, getting to
+`rrc=connected` — but every PDN/APN context request came back rejected.
+That's a textbook **SIM-side authorization issue**, not a signal problem
+and not a firmware bug.
+
+User confirmed the SIM was an Onomondo physical SIM with 9-digit short ID
+`002595498` (full ICCID `89457300000025954986`). The Onomondo dashboard
+showed `SIMs (0)` — the SIM was never registered to user's account, and
+the prepaid/trial data allocation had been hit during the conference. The
+network sees the IMSI, asks Onomondo "authorized for PDN?", Onomondo
+answers "no active subscription / quota exhausted," network rejects.
+
+User will activate via Onomondo. Cloud-side has nothing to do about this.
+
+---
+
+## C11.4 SIM exhaustion ≠ firmware lockup. The lockup is §C10.5.
+
+This is the important part. **The cellular-publish failure (today's
+symptom) and the firmware-lockup-requiring-power-cycle (the conference
+symptom) are two distinct failures.** SIM exhaustion explains the former
+cleanly. It does NOT directly explain the latter.
+
+The full cascade for the conference lockup:
+
+1. **SIM data quota exhausted** mid-conference (probably May 12 early
+   afternoon — last heartbeat with `RSRP -125` was at 19:43:53; the
+   transition is somewhere in the prior hours)
+2. **Modem enters a perpetual reattach-reject loop.** Every cycle:
+   radio-attach → RRC connected → PDN context request → EMM 19 reject →
+   RRC idle → reattach. Each cycle 5-10 s. **The modem is now never
+   idle.** This is the "sustained cellular contention" precondition
+   §C10.5 specifically called out.
+3. **Walker motion fires wake-on-motion** → main.c auto-start
+   coordinator → `gosteady_session_start()` →  which makes two
+   synchronous `AT+CCLK?` calls via cellular.c to stamp `session_start`:
+   - `gosteady_cellular_get_network_time_unix_ms()` (session.c line 466)
+   - `gosteady_cellular_get_network_time()` (session.c line 504)
+   Both backed by `nrf_modem_at_scanf(...)` which blocks synchronously
+   on the modem's AT processor.
+4. **AT calls queue behind the modem's busy state.** Under sustained
+   PDN-reject contention, the modem's AT response thread is starved.
+   The synchronous `nrf_modem_at_scanf` call doesn't return.
+5. **The blocked call eventually exceeds 60 s.** Watchdog fires. The
+   M10.7.3 supervisor-thread design kicks the watchdog independently,
+   but some path (mutex held, sem held, modem-API internal serialization)
+   couples the wedge to the supervisor — this was observed empirically
+   in the M14.5 hardening sprint's FMEA 6.1 revert (§C10.5: "AT calls
+   serialized inside `nrf_modem_at` and cumulative latency breached the
+   60 s WDT envelope"). Same mechanism here.
+6. **Device reboots.** Boot 87. Modem state clears. Same SIM. Same
+   exhaustion. Same loop on next motion event. Repeats.
+7. Somewhere a different code path under the same contention takes a
+   **fatal panic** (`fault_counters.fatal` 3→4). Reset, recover, repeat.
+   Boots 88, 89.
+8. User power-cycles to break the cycle.
+
+§C10.5 (2026-05-10), six days before the conference, said verbatim:
+
+> "The 2 pre-existing AT calls in session_start STILL risk a similar
+> lockup under sustained cellular contention. Today's bench was unusual;
+> typical conditions complete in <100 ms total. M14.5 site-survey should
+> monitor for any session_start that takes >5 s as an early-warning
+> signal of AT serialization. If observed, follow-up patch should add
+> explicit AT timeouts via `nrf_modem_at_cmd_async` or move AT-getting
+> outside the session-open critical path."
+
+The conference produced exactly the predicted failure mode. **Both fixes
+are needed** — a working SIM removes the specific trigger that produced
+the contention, but any future cellular-contention event (clinic-site
+RF, carrier-side throttle, SIM mid-billing-cycle hiccup, BGP routing
+event between the cell's home network and Onomondo's backend) will
+reproduce the same lockup. SIM activation is the operational fix.
+**Removing the AT-serialization vulnerability is the firmware fix and
+is now an M15 blocker.**
+
+Also worth noting: the FMEA 1.1/1.2 retro-stamp path (which lets
+`session_start` succeed without cellular UTC by stamping the timestamp
+later at `session_stop`) was specifically designed to handle the
+"cellular UTC unavailable" case. But it only fires if the AT call
+*returns* with an error (`-EAGAIN` if unregistered, `-EIO` if scanf
+fails). If the AT call blocks *indefinitely*, the retro-stamp path
+never gets a chance. The proposed patch closes that gap by making
+"block indefinitely" return `-ETIMEDOUT` after a bounded wait.
+
+---
+
+## C11.5 Proposed firmware patch — scoped, not yet committed
+
+**Goal:** make every AT call in `session_start`'s critical path bounded
+in latency, so a busy modem can't wedge the calling thread past the WDT
+envelope.
+
+**Two options, recommend shipping A first then B:**
+
+### Option A (short-term, ~1 day) — timeout wrapper around `nrf_modem_at_cmd_async`
+
+New helper in `src/cellular.c`:
+
+```c
+/* AT command issued via the async API with a bounded wait. Returns
+ * -ETIMEDOUT after `timeout_ms` if the modem hasn't produced a response.
+ * The underlying nrf_modem call may continue and the response may arrive
+ * later — the response handler is gated on `s_at_call_in_flight` so
+ * stale responses are dropped silently. */
+static K_SEM_DEFINE(at_response_sem, 0, 1);
+static K_MUTEX_DEFINE(at_call_lock);
+static atomic_t s_at_call_in_flight = ATOMIC_INIT(0);
+static char s_at_response_buf[NRF_MODEM_AT_MAX_CMD_SIZE];
+
+static void at_async_handler(const char *resp)
+{
+    if (!atomic_get(&s_at_call_in_flight)) {
+        return;  /* late response after caller's timeout; drop */
+    }
+    strncpy(s_at_response_buf, resp, sizeof(s_at_response_buf) - 1);
+    s_at_response_buf[sizeof(s_at_response_buf) - 1] = '\0';
+    atomic_set(&s_at_call_in_flight, 0);
+    k_sem_give(&at_response_sem);
+}
+
+static int at_cmd_with_timeout(const char *cmd, char *out, size_t outlen, int timeout_ms)
+{
+    if (!out || outlen == 0) return -EINVAL;
+    k_mutex_lock(&at_call_lock, K_FOREVER);
+
+    atomic_set(&s_at_call_in_flight, 1);
+    k_sem_reset(&at_response_sem);
+
+    int err = nrf_modem_at_cmd_async(at_async_handler, "%s", cmd);
+    if (err) {
+        atomic_set(&s_at_call_in_flight, 0);
+        k_mutex_unlock(&at_call_lock);
+        return err;
+    }
+
+    err = k_sem_take(&at_response_sem, K_MSEC(timeout_ms));
+    if (err == -EAGAIN) {
+        atomic_set(&s_at_call_in_flight, 0);
+        k_mutex_unlock(&at_call_lock);
+        LOG_WRN("AT cmd timed out after %d ms (modem busy?): %s",
+                timeout_ms, cmd);
+        return -ETIMEDOUT;
+    }
+
+    strncpy(out, s_at_response_buf, outlen - 1);
+    out[outlen - 1] = '\0';
+    k_mutex_unlock(&at_call_lock);
+    return 0;
+}
+```
+
+Then refactor `read_network_time_iso8601()` and
+`gosteady_cellular_get_network_time_unix_ms()` to call `at_cmd_with_timeout()`
+with `timeout_ms=2000` instead of the bare `nrf_modem_at_scanf("AT+CCLK?",...)`.
+On `-ETIMEDOUT`, return `-EAGAIN` to the caller — `session.c` already
+treats `-EAGAIN` as "cellular UTC unavailable, FMEA 1.1 retro-stamp will
+re-attempt at `session_stop`."
+
+**Suggested timeout: 2000 ms.** Far below the 60 s WDT envelope, gives
+the modem comfortable headroom for a normal AT response (typical
+<100 ms per §C10.5), conservative enough to never trigger in healthy
+operation.
+
+**Affected sites:** the two `session_start` AT calls (session.c lines
+466, 504) get the timeout. The two `session_stop` AT calls (session.c
+lines 203, 663) also get the timeout — `session_stop` shouldn't wedge
+either. The cloud-worker thread sites (cloud.c lines 356, 574, 903,
+1123) are lower-priority: they're already on an async worker, so a
+block doesn't wedge sessions. Up to firmware-team taste whether to
+apply the wrapper everywhere or just in the session.c critical path.
+
+### Option B (medium-term, ~3 days) — cache UTC, decouple `session_start` from modem entirely
+
+Add a `s_cached_utc_ms` + `s_cached_utc_local_uptime_ms` pair in
+cellular.c. The cellular reporter thread (already exists) refreshes
+the cache on its current ~60 s cadence when registered. New public
+function `gosteady_cellular_get_cached_utc_ms()` is a pure memory
+read + uptime delta — never makes an AT call, never blocks.
+`session_start` switches to this path.
+
+Benefits:
+- `session_start` becomes lightning-fast (no AT calls at all)
+- Cellular contention has zero effect on session capture
+- Even if cellular dies completely after the cache is populated,
+  sessions still get good-enough timestamps (drift = on the order of
+  ms over hours; activity rollups are minute-granular)
+- Removes a whole class of failure modes, not just this specific one
+
+Downsides:
+- Larger refactor; touches the cellular.c API surface
+- Cache invalidation on long disconnects needs care (stale UTC
+  worse than no UTC after, say, 12 h)
+
+**Recommend: ship Option A first** (small, focused, removes the M15
+blocker, easy to validate on bench). **Schedule Option B for M16+**
+(after clinic ship, when there's appetite for an API refactor).
+
+---
+
+## C11.6 Cloud-side: alarm catalog gap closed (commit `3c47f0d`)
+
+Independently of the firmware-side work above, the cloud-side
+`activity_reject_count` alarm gap flagged in §C10.2 was closed this
+morning before the device investigation started. New alarm
+`gosteady-{env}-activity-processor-activity-reject` watches the existing
+EMF metric in `GoSteady/Processing/{env}` namespace; threshold > 0
+in 5 min; routes to the same ops topic as the sibling
+`unmapped-serial` alarm. Brings the alarm catalog to 30 alarms.
+
+Deploy is pending — `cdk deploy GoSteady-Dev-Observability`, single-
+resource add, non-destructive. ARCHITECTURE.md §1.6 follow-up note
+flipped from "open" → "closed."
+
+---
+
+## C11.7 Cloud-side: NEW gap surfaced — device-offline alarm
+
+A real gap exposed by this incident: **the cap went dark for 3 days
+21 hours and nothing in the alarm catalog noticed.** Shadow's
+`lastSeen` was stuck at `2026-05-12T19:43:53Z` and stayed that way
+through 16 May without producing any operational signal.
+
+Phase 1C ("Scheduled Jobs") in ARCHITECTURE.md §12 is the planned
+home for an offline detector — `lastSeen > 2 h` triggers an alarm.
+1C is currently 🔲 Planned with no concrete schedule. After this
+incident the priority should bump.
+
+Suggested 1C-slim scope:
+- One EventBridge scheduled rule, every 15 min
+- Lambda iterates Device Registry rows with `status =
+  active_monitoring`, queries Shadow `lastSeen`, alarms via the
+  existing ops SNS topic for any device with `now - lastSeen > 2 h`
+- Synthetic-alert path in Alert History (`alert_type=device_offline,
+  source=cloud, severity=warning`) per ARCHITECTURE.md §8
+
+Independently useful regardless of the firmware patch above:
+operators want to know "is the cap online right now" without
+inspecting the dashboard. And there's a real risk class — a cap
+that's silently dead at a clinic — that today has no detection.
+
+---
+
+## C11.8 Validation positives worth recording
+
+Things that worked exactly as designed during the conference + the
+silence and the recovery:
+
+- **Auto-prune-on-publish-success** (FMEA 6.2): the 3 orphan `.dat`
+  files from wedged sessions were cleanly removed by `orphan_sweep`
+  at the next clean boot. No flash-fill, no manual intervention.
+- **Crash forensics persistence** (M10.7.3): watchdog + fatal counts
+  correctly survived 3 reboots in a row. First boot back to cloud
+  (when cellular returns) will carry the updated counters cleanly.
+- **FMEA 1.1/1.2 retro-stamp path is firing right now** — every
+  session opened during today's cellular-down window logs
+  `cellular UTC unavailable (-11) — activity will publish without
+  session_start`, then queues for FMEA 1.3 retry. Once Onomondo
+  is active the queue should drain with retro-filled timestamps.
+- **Snippet path:** zero validation errors across all 38 conference
+  uploads. Byte-exact S3 objects.
+- **Activity path:** zero rejections across 68 sessions.
+- **Threshold detector:** 17 correct synthetic signal alerts at the
+  right thresholds.
+- **All 6 Lambdas:** zero `ERROR`-level log lines, zero Lambda
+  Errors metric increments, DLQ stayed empty.
+- **Per-device dashboard** rendered everything correctly once the
+  May 10 60min → 1min period fix was in place (no rendering
+  surprises this round).
+
+The hardening sprint paid for itself. Without auto-prune + orphan
+sweep + crash forensics persistence, the device might not have
+self-recovered at all.
+
+---
+
+## C11.9 Recommended sequencing
+
+1. **User**: activate Onomondo SIM (out-of-band, dependent on
+   Onomondo support / billing). Cellular returns; expect FMEA 1.3
+   retry queue to drain with retro-filled timestamps; expect
+   Shadow `lastSeen` to catch up.
+
+2. **Cloud**: deploy commit `3c47f0d` (activity_reject alarm) to
+   `GoSteady-Dev-Observability`. Single-resource add, ~30 s.
+
+3. **Firmware** (M15 blocker): apply Option A AT-timeout wrapper
+   per §C11.5. Bench-validate by deliberately starving the modem
+   (e.g., temporarily airplane mode or move cap to a faraday
+   enclosure) and confirming `session_start` returns within
+   ~2.5 s with `start_utc=unavailable` + FMEA 1.1 retro-stamp on
+   the resulting activity row.
+
+4. **Cloud** (post-firmware): scope + ship Phase 1C-slim offline
+   detector per §C11.7. Independent of any firmware change.
+
+5. **Firmware** (M16+): consider Option B cached-UTC refactor per
+   §C11.5 if/when the API surface refactor becomes worth the
+   churn.
+
+---
+
+*Entry owner: Jace + Claude (single merged firmware+cloud session,
+2026-05-16).*
+*This is the post-conference investigation entry. Two distinct
+failures separated: cellular-publish stop (SIM exhaustion, ops fix)
+vs firmware lockup (§C10.5 AT-serialization, firmware fix). Cloud
+alarm catalog gap closed. New cloud alarm gap surfaced.*
