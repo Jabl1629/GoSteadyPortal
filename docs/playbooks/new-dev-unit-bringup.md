@@ -270,17 +270,33 @@ doesn't expose. The standard approach is to temporarily flash Nordic's
 `at_client` sample, run the cert flash, then reflash gosteady. The cert
 survives in CryptoCell-312 across the firmware swap.
 
+**Easiest source: Nordic ships a pre-built at_client hex with the SDK 3.2.1
+firmware bundle.** Use that instead of building yourself:
+
 ```bash
-nrfjprog -f NRF91 \
-  --program /opt/nordic/ncs/v3.2.4/nrf/samples/cellular/at_client/build/zephyr/merged.hex \
-  --chiperase --verify --reset
+# Source path (Nordic-shipped pre-built):
+SRC="/Users/jaceblackburn/Library/Mobile Documents/com~apple~CloudDocs/Documents/GoSteady/[Legacy] firmware_algo_development/nordic resources/thingy91x_mfw-2.0.4_sdk-3.2.1/img_app_bl/thingy91x_at_client_2026-02-24_d8887f6f.hex"
+
+# Copy out of iCloud first to avoid mid-flash download lag:
+cp "$SRC" /tmp/at_client.hex
+
+# Flash:
+nrfjprog -f NRF91 --program /tmp/at_client.hex --chiperase --verify --reset
 ```
 
-> One-time NCS sample build, if not already built:
-> ```bash
-> cd /opt/nordic/ncs/v3.2.4/nrf/samples/cellular/at_client
-> west build -b thingy91x/nrf9151/ns
-> ```
+> **JLinkARM noise is benign.** nrfjprog frequently prints ~10 lines of
+> `[error] [SeggerBackend] - JLinkARM.dll reported error -256 ...` BEFORE
+> the actual flash output. These are part of nrfjprog's chip-family probe
+> sequence — it tries multiple device profiles before settling on NRF91.
+> The flash + verify steps after them are what matter; if those complete
+> with `Applying system reset. Run.`, the flash succeeded.
+
+> Alternative: building at_client from source (`west build -b thingy91x/nrf9151/ns`
+> inside `/opt/nordic/ncs/v3.2.4/nrf/samples/cellular/at_client/`) has been
+> finicky on macOS — homebrew's Python 3.14 gets picked up by mcuboot's sub-
+> build instead of NCS's toolchain Python 3.12, and crashes on missing
+> `pykwalify`. See [Troubleshooting](#troubleshooting) for the env override
+> if you need to build from source. The pre-built hex avoids this entirely.
 
 ### 3.3 Run cert flash tool
 
@@ -299,17 +315,59 @@ What this does (per flash_cert.py docstring):
 Expected output: per-step `OK` lines for each write. Anything else → see
 [Troubleshooting](#troubleshooting).
 
-### 3.4 Reflash gosteady cloud build
+### 3.4 Build gosteady with the right client_id, then flash
+
+> **⚠️ Critical: the existing `build_cloud/merged.hex` is hardcoded for
+> `GS9999999999` (bench unit serial).** Look at `prj_cloud.conf`:
+> `CONFIG_AWS_IOT_CLIENT_ID_STATIC="GS9999999999"`. The firmware uses this
+> Kconfig value as the MQTT client ID AND for constructing every uplink
+> topic (`gs/{client_id}/heartbeat` etc.). If you flash the existing
+> `build_cloud/` to a different unit, the broker will reject the connection
+> with `-128` because the cert + Thing are scoped to one serial but the
+> firmware announces another. **You MUST rebuild with `-DCONFIG_AWS_IOT_CLIENT_ID_STATIC=\"$SERIAL\"`
+> per unit.**
 
 ```bash
-west flash --runner nrfjprog -d ~/Documents/gosteady-firmware/build_cloud \
-  --skip-rebuild --erase
+# Build with the correct serial baked in (out-of-tree build dir per unit
+# avoids clobbering build_cloud/ which is GS9999999999's binary)
+TOOLCHAIN=/opt/nordic/ncs/toolchains/185bb0e3b6
+cd /opt/nordic/ncs/v3.2.4 && \
+PATH="$TOOLCHAIN/opt/python@3.12/bin:$TOOLCHAIN/bin:$TOOLCHAIN/opt/zephyr-sdk/arm-zephyr-eabi/bin:$PATH" \
+ZEPHYR_BASE=/opt/nordic/ncs/v3.2.4/zephyr \
+ZEPHYR_SDK_INSTALL_DIR=$TOOLCHAIN/opt/zephyr-sdk \
+ZEPHYR_TOOLCHAIN_VARIANT=zephyr \
+  $TOOLCHAIN/bin/west build \
+  -d ~/Documents/gosteady-firmware/build_cloud_${SERIAL,,} \
+  -b thingy91x/nrf9151/ns \
+  ~/Documents/gosteady-firmware \
+  -- -DEXTRA_CONF_FILE=prj_cloud.conf \
+     -DCONFIG_AWS_IOT_CLIENT_ID_STATIC=\"$SERIAL\"
+# Build takes ~3-5 min on M1. Out-of-tree build dir = build_cloud_gs9999999998 etc.
+
+# Then flash:
+nrfjprog -f NRF91 \
+  --program ~/Documents/gosteady-firmware/build_cloud_${SERIAL,,}/merged.hex \
+  --chiperase --verify --reset
 ```
 
-> `--erase` wipes the application flash (overwriting `at_client` with
+> **Why the env-var dance:** Nordic's CMake setup on macOS can't find its
+> own Zephyr SDK without `ZEPHYR_SDK_INSTALL_DIR` set, and CMake's
+> `find_program(Python3)` picks up homebrew's Python 3.14 over NCS's
+> Python 3.12 unless the toolchain bin dir is prepended to PATH. The
+> long PATH override + 3 env vars above replicate what VSCode's "nRF
+> Connect for VS Code" extension or Nordic's `nrfutil` would do
+> automatically. See [Troubleshooting](#troubleshooting) for individual
+> error symptoms.
+
+> `--chiperase` wipes the application flash (overwriting `at_client` with
 > gosteady) but does NOT touch CryptoCell-312 (cert survives) nor the
 > external SPI NOR (LittleFS partitions survive — though on a fresh unit
 > there's nothing to preserve there yet).
+
+> **Longer-term firmware improvement worth queueing:** derive client_id at
+> runtime from the cert's CN field (which equals the AWS IoT Thing name).
+> Removes the per-unit rebuild step entirely. Until that lands, expect to
+> rebuild per unit.
 
 ### 3.5 Watch first boot via uart0
 
