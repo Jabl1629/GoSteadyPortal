@@ -80,6 +80,33 @@ export class SecurityStack extends cdk.Stack {
       pendingWindow: cdk.Duration.days(7),
     });
 
+    // Phase 1.7: grant CloudWatch Logs service principal use of the AuditKey
+    // for the audit log group. The Audit stack imports AuditKey via
+    // `fromKeyArn`, which means `addToResourcePolicy` from that stack is a
+    // no-op (the key is owned here, not there). Granting from this side keeps
+    // the key policy under a single owner. Scoped via encryption-context
+    // condition so it only applies to the specific audit log group.
+    this.auditKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowCWLogsForAuditLogGroup',
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.ServicePrincipal(`logs.${this.region}.amazonaws.com`)],
+        actions: [
+          'kms:Encrypt*',
+          'kms:Decrypt*',
+          'kms:ReEncrypt*',
+          'kms:GenerateDataKey*',
+          'kms:Describe*',
+        ],
+        resources: ['*'],
+        conditions: {
+          ArnEquals: {
+            'kms:EncryptionContext:aws:logs:arn': `arn:aws:logs:${this.region}:${this.account}:log-group:gosteady-${p}-audit`,
+          },
+        },
+      }),
+    );
+
     // ── CloudTrail ───────────────────────────────────────────────────
     // Multi-region management-events trail. Destination:
     //   1. S3 bucket (long-term, optionally Object-Locked in prod)

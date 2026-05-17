@@ -75,29 +75,10 @@ export class AuditStack extends cdk.Stack {
           : cdk.RemovalPolicy.DESTROY,
     });
 
-    // Grant the audit key permission to be used by CW Logs for this
-    // specific log group. Without this, CW Logs can't encrypt incoming
-    // events and the PutLogEvents call from the forwarder fails.
-    auditKey.addToResourcePolicy(
-      new iam.PolicyStatement({
-        sid: `AllowCWLogsEncrypt-${env}-AuditLogGroup`,
-        effect: iam.Effect.ALLOW,
-        principals: [new iam.ServicePrincipal(`logs.${this.region}.amazonaws.com`)],
-        actions: [
-          'kms:Encrypt*',
-          'kms:Decrypt*',
-          'kms:ReEncrypt*',
-          'kms:GenerateDataKey*',
-          'kms:Describe*',
-        ],
-        resources: ['*'],
-        conditions: {
-          ArnEquals: {
-            'kms:EncryptionContext:aws:logs:arn': `arn:aws:logs:${this.region}:${this.account}:log-group:${this.auditLogGroup.logGroupName}`,
-          },
-        },
-      }),
-    );
+    // KMS resource-policy grant for CW Logs is owned by the Security stack
+    // (which created the AuditKey). `auditKey` is imported here via
+    // `fromKeyArn`, so `addToResourcePolicy` from this stack would be a
+    // no-op. See security-stack.ts `AllowCWLogsForAuditLogGroup` statement.
 
     // ── Audit cold path: S3 bucket with Object Lock (prod) ─────────
     this.auditBucket = new AuditS3Bucket(this, 'AuditBucket', {
@@ -138,16 +119,15 @@ export class AuditStack extends cdk.Stack {
     });
     this.forwarderFn = forwarder.function;
 
-    // Reserved concurrency = 5 (spec D11). At MVP volume <100 events/min,
-    // plenty of headroom; cap prevents runaway invocation in a bug.
-    new cdk.CfnResource(this, 'ForwarderConcurrency', {
-      type: 'AWS::Lambda::Function',
-      properties: {},
-    });
-    (forwarder.function.node.defaultChild as lambda.CfnFunction).addPropertyOverride(
-      'ReservedConcurrentExecutions',
-      5,
-    );
+    // Spec D11 originally specified ReservedConcurrentExecutions=5 as a
+    // cap against runaway invocation in a forwarder bug. Dropped at deploy
+    // time: this dev account is on the new-account 10-concurrency floor
+    // (`aws lambda get-account-settings` → `ConcurrentExecutions: 10`)
+    // rather than the 1000 default. With 6 existing Lambdas in the account
+    // already competing for that 10, the Lambda service rejects any
+    // ReservedConcurrentExecutions request that would leave <10
+    // UnreservedConcurrentExecutions remaining. Revisit once the account
+    // has a concurrency quota increase (Phase 1.5 prod-hardening territory).
 
     // Forwarder needs to write to the audit log group + create streams
     // there. Scoped to the audit log group's ARN; nothing else.
@@ -242,36 +222,30 @@ export class AuditStack extends cdk.Stack {
       filterName: `gosteady-${env}-audit-to-firehose`,
     });
 
-    // ── Compliance reader IAM role (empty trust policy stub) ──────
-    // Runbook step to attach a real principal once the compliance
-    // reader identity is known. Defining the role + permissions now
-    // means future attach is one `update-assume-role-policy` call,
-    // not a CDK redeploy.
+    // ── Compliance reader IAM role (account-root placeholder) ─────
+    // Runbook step replaces the trust policy with a real principal
+    // once the compliance reader identity is known. The placeholder
+    // trusts this account's root, which IAM accepts as a valid
+    // principal at create time. The role remains effectively
+    // unassumable in practice because we don't grant `sts:AssumeRole`
+    // on this role's ARN in any identity policy — and CDK's role
+    // grant API isn't called anywhere. **Caveat:** any IAM identity
+    // in this account that has been granted broad admin permissions
+    // (e.g. `sts:AssumeRole` on `*`) could assume this role. That
+    // risk is acceptable for the placeholder window because (a)
+    // there's no actual audit data yet, and (b) the runbook step is
+    // explicit about replacing this trust policy as part of
+    // compliance-reader onboarding. Earlier attempts to use a more
+    // restrictive placeholder (`Principal: '*'`, ArnPrincipal of a
+    // non-existent role) both failed IAM validation at create time.
     const auditReaderRole = new iam.Role(this, 'AuditReaderRole', {
       roleName: `gosteady-${env}-audit-reader`,
-      // Empty trust policy — no principal can assume this until the
-      // runbook step attaches one. CDK requires *some* principal at
-      // create time; we use the account root with an explicit-deny
-      // condition that always evaluates false, so nobody can actually
-      // assume it without an explicit trust-policy update.
       assumedBy: new iam.AccountRootPrincipal(),
       description:
-        'Read-only audit reader. Trust policy intentionally restricted ' +
-        'pending compliance-reader identity; see docs/playbooks/audit-reader-onboarding.md.',
+        'Read-only audit reader. Trust policy is an account-root placeholder; ' +
+        'replace via `aws iam update-assume-role-policy` once the compliance ' +
+        'reader identity is named. See docs/playbooks/audit-reader-onboarding.md.',
     });
-    // Override the trust policy with a never-assumable shell. The
-    // runbook attaches a real one with `aws iam update-assume-role-policy`.
-    (auditReaderRole.node.defaultChild as iam.CfnRole).assumeRolePolicyDocument = {
-      Version: '2012-10-17',
-      Statement: [
-        {
-          Sid: 'StubDenyAll',
-          Effect: 'Deny',
-          Principal: '*',
-          Action: 'sts:AssumeRole',
-        },
-      ],
-    };
 
     auditReaderRole.addToPolicy(
       new iam.PolicyStatement({
