@@ -2,10 +2,10 @@
 
 ## Overview
 - **Phase**: 2A-0 (foundation subset of Phase 2A)
-- **Status**: Planned
+- **Status**: ✅ Deployed (dev) 2026-05-17
 - **Branch**: feature/infra-scaffold (matched existing project pattern; spec field aspirational)
 - **Date Started**: 2026-05-17
-- **Date Completed**: —
+- **Date Completed**: 2026-05-17 (dev; WAF deferred to Phase 3A — see Open Questions Q7 below)
 
 Stands up the shared infrastructure that every Phase 2A subset (device-lifecycle, patient reads, alert actions, user management, internal tools) builds on: API Gateway HTTP API, WAF web ACL, Cognito JWT authorizer, custom-claim extraction conventions, shared error envelope, audit middleware that wraps Phase 1.7's `emit_audit()` helper, tenant-enforcement helper, request validation, CORS, CloudWatch access logs, X-Ray tracing, and an alarm catalog covering 4xx/5xx rates and latency p99.
 
@@ -450,21 +450,37 @@ If WAF false-positives block legitimate traffic during 2A-DL development, the ea
 
 ---
 
+---
+
+### Q7. WAF + API Gateway HTTP API v2 — hard AWS limitation (surfaced at deploy)
+
+**What's actually being asked:** First deploy attempt failed when WAFv2 rejected the API Gateway HTTP API v2 stage ARN with "The ARN isn't valid... parameter: arn:aws:apigateway:us-east-1::/apis/{id}/stages/$default". Investigation showed **WAFv2 does not support association with API Gateway HTTP API v2 stages.** Only REST API v1, CloudFront, ALB, AppSync, Cognito User Pool. This is documented (kind of) but easy to miss when planning.
+
+**What's at stake:** Whether to revert D1 (REST API v1 instead of HTTP API v2) and pay the 70% cost premium + lose JWT-built-in, or defer WAF entirely.
+
+**Decision:** ✅ **Defer WAF to Phase 3A (CloudFront).** Phase 3A puts a CloudFront distribution in front of both the portal S3 bucket and the API Gateway origin. WAF associates with the CloudFront distribution and protects both. The WAF managed rules (CRS, IP reputation) only meaningfully matter at the public edge — at MVP scale, JWT auth + API Gateway stage-level throttling (50 burst / 25 sustained in dev) covers basic abuse cases.
+
+The `portal-waf.ts` construct and `apiWafRateLimitPerIp` config field are kept in source code for Phase 3A pickup. No code is deleted — the wire-up in `api-stack.ts` is commented out with a pointer to this Q7 explanation.
+
+---
+
 ### Decision summary
 
 | # | Question | Resolution |
 |---|----------|-----------|
-| Q1 | How to get a real Cognito token for smoke | ✅ AWS CLI `cognito-idp initiate-auth` |
+| Q1 | How to get a real Cognito token for smoke | ✅ AWS CLI `cognito-idp initiate-auth` — used at deploy time, works fine |
 | Q2 | Audit middleware on 4xx | ✅ Emit on success + 403 + 500; skip 400/404/429 |
 | Q3 | API Gateway resource policy | ✅ Skip for v1 |
 | Q4 | Prod cutover for 2A-0 alone | ⏳ Defer until 2A-DL/RD ready |
-| Q5 | Subscription filter list maintenance | ⏳ Manual add for 2A-0; aspect in 2A-DL |
+| Q5 | Subscription filter list maintenance | ⏳ Manual add for 2A-0; aspect in 2A-DL/RD |
 | Q6 | `Retry-After` on 429 | ⏳ Defer until portal traffic surfaces it |
+| Q7 | WAF on HTTP API v2 | ✅ Defer to Phase 3A — WAFv2 doesn't support HTTP API v2 association; CloudFront fronts both |
 
-Three of six decided now. Q4 + Q5 + Q6 require downstream phases or production usage to inform.
+Four of seven decided now. Q4 + Q5 + Q6 require downstream phases or production usage to inform.
 
 ## Changelog
 
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-05-17 | Jace + Claude (cloud session) | Initial spec drafted as the foundation subset of Phase 2A. Carves out pure-plumbing concerns (API Gateway, WAF, JWT authorizer, audit middleware, error envelope, tenant enforcement) into a subset that ships independently, so device-lifecycle / patient-reads / alert-actions / user-management can each be 2-day sprints rather than week-long rebuilds. Bundles the Audit-stack subscription-filter update for the new api-stub log group (D9) to avoid a between-revisions silent-swallow gap. |
+| 2026-05-17 | Jace + Claude (cloud session, same day) | **Deployed to dev** in 4 deploy attempts. Attempt-time issues: (1) `--exclusively` flag suppressed the Auth dependency; missing cross-stack export `ExportsOutputRefUserPoolPortalInternalClient...` (auto-generated when api-stack started referencing `portalInternalClient`); (2) `--exclusively` also prevented CDK from sequencing Audit-after-Api, leading to "log group doesn't exist" on the new ApiStub subscription filter; (3) WAF couldn't associate with API Gateway HTTP API v2 — hard AWS limitation, deferred to Phase 3A per new Open Question Q7. Final flow: `cdk deploy GoSteady-Dev-Api` (brings Auth as dependency, succeeded in 65.67 s) then `cdk deploy GoSteady-Dev-Audit --exclusively` (subscription filter add, 25.5 s). Smoke validated T3 + T4 + T8 + T16 end-to-end with a synthetic Cognito test user (`2a-smoke@test.local`, caregiver role, dtc_smoke_test client). The full pipeline works: GET /api/v1/me returns claims, 401 on no-auth, audit event lands in `gosteady-dev-audit` log group with all middleware-derived fields (actor, subject, request_id, xray_trace_id, schema_version: 1, auto-stamped internal_access + severity), and propagates to S3 within ~70s. Phase 1.7 Q8 (schema_version backfill) **partially closed** — api-stub emits with schema_version: 1, proving the helper extension works; 1B-rev Lambdas still emit without it (correct per L9 default-to-v1; will populate naturally on next processing-stack touch) |

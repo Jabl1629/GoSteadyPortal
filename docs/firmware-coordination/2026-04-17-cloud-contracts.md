@@ -5259,3 +5259,138 @@ Same as §C14 — 1.7 is pure cloud-side. The audit pipeline runs entirely downs
 *Closes §C13.4 option 2 fully for dev. Deploy chronology + smoke results
 captured for any future Phase 1.7.1 work (Athena + 1B-rev redeploy)
 and for prod cutover whenever first-prod-customer threshold appears.*
+
+
+---
+---
+
+# Cloud team update — 2026-05-17 (Phase 2A planned + split into 6 subsets; 2A-0 foundation DEPLOYED to dev)
+
+> **From:** GoSteady cloud team.
+>
+> **TL;DR:** Same day, picked up the next cloud item per §C13.4. Reviewed
+> the existing 2A device-lifecycle spec (drafted 2026-04-17), found 10
+> gaps + the need for a shared foundation. Split Phase 2A into 6 subsets
+> (2A-0/DL/RD/AA/UM/INT), drafted the new 2A-0 spec, revised 2A-DL to
+> close the gaps, implemented 2A-0, deployed to dev, and smoke-validated
+> end-to-end. Foundation is now ready for 2A-DL (next session) to plug
+> in business endpoints. No firmware action items.
+
+---
+
+## C16.1 Subset breakdown (the planning piece)
+
+Phase 2A is the broad "Portal API" surface. Reviewing the existing
+device-lifecycle spec in context, we identified that 4 other planned
+2A surfaces (patient reads, alert actions, user management, internal
+tools) would each duplicate the API Gateway + WAF + JWT authorizer +
+audit middleware + tenant-enforcement plumbing. Carved out a
+foundation subset (2A-0) so the other 5 each become 2-day sprints
+rather than week-long rebuilds.
+
+| Subset | Status | What it ships |
+|---|---|---|
+| **2A-0** Foundation | ✅ Deployed (dev) 2026-05-17 | API GW + JWT authorizer + audit middleware + error envelope + tenant enforcement + stub `GET /api/v1/me` |
+| **2A-DL** Device Lifecycle | 🔲 Spec revised 2026-05-17 (closes 10 gaps from initial draft) | The 10 endpoints driving the device state machine — closes firmware's `reported.activated_at` Shadow ack loop |
+| **2A-RD** Patient Reads | 🔲 Planned (no spec) | What makes the Flutter dashboard render real data |
+| **2A-AA** Alert Actions | 🔲 Planned (no spec) | Acknowledge + threshold overrides |
+| **2A-UM** User Management | 🔲 Planned (no spec) | Household onboarding (3 patterns from ARCH §4) + invitations |
+| **2A-INT** Internal Tools | 🔲 Planned (no spec) | Separate Flutter build flag + cross-tenant reads |
+
+Ship order: 2A-0 → 2A-DL → (the rest parallelizable).
+
+---
+
+## C16.2 What 2A-0 actually shipped
+
+Spec: [`docs/specs/phase-2a-foundation.md`](../specs/phase-2a-foundation.md).
+Commits on `feature/infra-scaffold`:
+- `c6b61ee` — phase-2a: split into 6 subsets; draft 2A-0 foundation spec + revise 2A-DL spec to close 10 gaps
+- (this entry's sibling) — phase-2a-0: implementation + deploy + doc sync
+
+Resources deployed in `GoSteady-Dev-Api`:
+- 1 API Gateway HTTP API v2 (`gosteady-dev-api`)
+- 1 Cognito User Pool JWT authorizer (Portal-Customer + Portal-Internal audiences)
+- 1 route + integration + Lambda permission for `GET /api/v1/me`
+- 1 stub Lambda (`gosteady-dev-api-stub`)
+- 1 structured-JSON access log group
+- 4 CloudWatch alarms (5xx rate, 4xx burst, p99 latency, stub Errors)
+- Stage-level throttling: dev 50 burst / 25 sustained, prod 200 / 100
+
+Audit-stack subscription filter list extended to include `gosteady-dev-api-stub` so any future audit emissions from the stub (or future 2A handlers built on the same `_shared/api_audit.py` middleware) flow into the existing Phase 1.7 pipeline automatically.
+
+API URL (dev): `https://eg06m6p2k5.execute-api.us-east-1.amazonaws.com`
+
+---
+
+## C16.3 Deploy chronology — 4 attempts to CREATE_COMPLETE
+
+Same pattern as Phase 1.7's deploy (4 attempts), and the same lesson:
+**live deploy catches issues that synth + tsc don't**.
+
+| Attempt | What failed | Fix |
+|---|---|---|
+| 1 | `cdk deploy GoSteady-Dev-Audit GoSteady-Dev-Api --exclusively` — CDK ran Audit first; ApiStub subscription filter failed because the api-stub log group didn't exist yet (Api stack hadn't run) | Deploy Api before Audit |
+| 2 | `cdk deploy GoSteady-Dev-Api --exclusively` — failed on missing cross-stack export `ExportsOutputRefUserPoolPortalInternalClient...`. The `--exclusively` flag had suppressed Auth (the dependency that needed to be updated to publish the new export) | Drop `--exclusively` so CDK brings in Auth as a dependency |
+| 3 | `cdk deploy GoSteady-Dev-Api` (with Auth dependency) — Auth update succeeded, Api fresh-create failed on WAF association: WAFv2 cannot associate with API Gateway HTTP API v2 stages. Hard AWS limitation, surfaced as "The ARN isn't valid... parameter: arn:aws:apigateway:us-east-1::/apis/{id}/stages/$default" | **Defer WAF to Phase 3A** (CloudFront association point). Remove WAF wire-up from `api-stack.ts`, keep `portal-waf.ts` construct in source for Phase 3A pickup |
+| 4 | Same command, post-WAF removal | ✅ CREATE_COMPLETE in 65.67 s |
+
+Then: `cdk deploy GoSteady-Dev-Audit --exclusively` (with api-stub log group now existing) — 25.5 s, single subscription filter add + Lambda permission.
+
+---
+
+## C16.4 Smoke results — T3/T4/T8/T16 pass
+
+Set up a smoke test user:
+- `aws cognito-idp admin-create-user` → `2a-smoke@test.local`
+- `aws cognito-idp admin-set-user-password` (permanent)
+- `aws dynamodb put-item gosteady-dev-role-assignments` — caregiver role, `dtc_smoke_test` client, `fac_smoke_001` facility, `cen_smoke_001` census
+
+Then:
+- `aws cognito-idp initiate-auth USER_PASSWORD_AUTH` → IdToken
+- `curl -H "Authorization: Bearer $TOKEN" $API_URL/api/v1/me`
+
+| Check | Result |
+|---|---|
+| T3 with valid token | ✅ 200 with `{userId, email, clientId, role: "caregiver", facilities: ["fac_smoke_001"], censuses: ["cen_smoke_001"], internalAccess: false, mfaEnrolled: false}` |
+| T4 without Authorization header | ✅ 401 with API Gateway's own envelope `{"message": "Unauthorized"}`. Documented: JWT authorizer rejects pre-Lambda so our custom envelope doesn't apply on this path; it applies on 403s when handler runs and raises `ApiError` |
+| T8 audit event in `gosteady-dev-audit` log group | ✅ `auth.session.read` event with full middleware-derived payload: `audit: true`, **`schema_version: 1`** (proves Phase 1.7 Q8 helper extension works), `event`, `actor: {userId, role, clientId}`, `subject: {userId, clientId}`, `action: "read"` (derived from HTTP method), `request_id` (API GW ID), `xray_trace_id`, auto-stamped `internal_access: false` + `severity: "info"` |
+| T16 audit event in S3 | ✅ New `.gz` object at `audit/year=2026/month=05/day=17/` ~70s after publish (Firehose 60s buffer) |
+
+End-to-end pipeline through the new API foundation works.
+
+---
+
+## C16.5 Two ARCHITECTURE.md §16 follow-ups picked up at this stage
+
+**Phase 1.7 Q7 (S3 double-gzip + envelope)** — unchanged. Audit objects from api-stub use the same Firehose pipeline as the Phase 1.7 handlers, so they share the same wrapping. Phase 1.7.1 fix.
+
+**Phase 1.7 Q8 (schema_version backfill)** — **partially closed**. The api-stub Lambda's emissions DO carry `schema_version: 1` (confirmed in T8 above), proving the `_shared/observability.py:emit_audit` extension works correctly. The 4 existing 1B-rev handlers still emit without the field (correct per L9 — readers default to v1). They'll populate naturally on the next routine processing-stack touch; no forced redeploy.
+
+---
+
+## C16.6 §C13.4 sequencing — updated again
+
+| Option | Status |
+|---|---|
+| 1. Phase 1C-slim (Offline Detector) | Pending — still on the queue |
+| 2. Phase 1.7 Audit Logging | ✅ FULLY CLOSED (deployed 2026-05-17 dev) |
+| **3. Phase 2A device-lifecycle subset** | **2A-0 foundation ✅ deployed 2026-05-17 dev; 2A-DL implementation next** |
+
+The §C13.4 status table is now mostly closed. Next session: implement 2A-DL device-lifecycle on top of 2A-0. After 2A-DL deploys + smoke validates, **physical-device end-to-end test is the natural checkpoint** — firmware's `reported.activated_at` Shadow ack loop will close for the first time (provision bench unit via API → activate cmd lands on `gs/{serial}/cmd` → device echoes `last_cmd_id` → cloud transitions to `active_monitoring`).
+
+---
+
+## C16.7 No firmware action required
+
+2A-0 is pure cloud-side foundation. The stub endpoint mirrors JWT claims back and doesn't touch IoT topics, device shadows, or handler IO. Firmware backlog items (§C11.5 Option B cached-UTC, `client_id`-from-cert-CN at runtime) unchanged.
+
+The next entry (§C17) will follow the 2A-DL deploy and include the physical-device smoke checkpoint — that's the first cloud-side change with a real firmware contract since §C12 (the AT-timeout firmware patch).
+
+---
+
+*Entry owner: Jace + Claude (cloud session, 2026-05-17).*
+*Closes §C13.4 option 3 (foundation half). Spec sweep covers ARCH §5/
+§12/§15/§17 + spec changelog Q7 + this §C16. WAF deferral to Phase 3A
+is the only architectural deviation from the original 2A-0 plan;
+documented inline.*
