@@ -44,9 +44,20 @@ def _scrub(value: Any) -> Any:
 
 
 class ScrubbingFormatter(LambdaPowertoolsFormatter):
-    """Powertools formatter with PII redaction applied to every log record."""
+    """
+    Powertools formatter with PII redaction applied to every log record —
+    EXCEPT audit-tagged records, which retain identifiers by design (Phase 1.7 L4).
+
+    Audit events explicitly carry identifiers (`patientId`, `userId`, `email`
+    for auth events, etc.) — that's the entire forensic value. Scrubbing them
+    would silently break the compliance audit trail. The bypass is keyed on
+    a top-level `audit:true` marker present on every audit emission via
+    `emit_audit()` below.
+    """
 
     def serialize(self, log: dict) -> str:  # type: ignore[override]
+        if isinstance(log, dict) and log.get("audit") is True:
+            return json.dumps(log, default=str)
         return json.dumps(_scrub(log), default=str)
 
 
@@ -102,6 +113,11 @@ def audit_logger() -> Logger:
     return get_logger()
 
 
+#: Current audit schema version. Bump when changing the on-wire shape.
+#: Readers should default to 1 for events without an explicit field.
+AUDIT_SCHEMA_VERSION = 1
+
+
 def emit_audit(
     event: str,
     *,
@@ -111,16 +127,27 @@ def emit_audit(
     before: dict[str, Any] | None = None,
     after: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
+    request_id: str | None = None,
 ) -> None:
     """
     Emit a single structured audit log entry.
 
-    Phase 1.7 will subscribe-filter this entry from CloudWatch into the
-    dedicated audit log group + S3 Object Lock destination. Until then
-    these lines live in the regular handler log group.
+    Phase 1.7 routes these entries via subscription filter into the dedicated
+    `gosteady-{env}-audit` log group, where a Firehose subscription delivers
+    them to the audit S3 bucket (Object Lock compliance mode in prod).
+
+    The PII scrubber that ScrubbingFormatter applies to operational logs is
+    bypassed for any record with `audit:true` — audit events must retain
+    identifiers (patientId / userId / email / etc.) to be useful as
+    compliance evidence. L4 of phase-1.7-audit.md.
+
+    The `internal_access` + elevated-severity tags are auto-stamped by the
+    audit-forwarder Lambda (centralized defense in depth — see D8 of the
+    1.7 spec), not by callers here.
     """
     payload: dict[str, Any] = {
         "audit": True,
+        "schema_version": AUDIT_SCHEMA_VERSION,
         "event": event,
         "actor": actor or {"system": SERVICE},
         "subject": subject or {},
@@ -133,4 +160,7 @@ def emit_audit(
         payload["after"] = after
     if extra is not None:
         payload["extra"] = extra
-    get_logger().info("audit_event", extra=_scrub(payload))
+    if request_id is not None:
+        payload["request_id"] = request_id
+    # No pre-scrub: ScrubbingFormatter detects `audit:true` and skips scrubbing.
+    get_logger().info("audit_event", extra=payload)

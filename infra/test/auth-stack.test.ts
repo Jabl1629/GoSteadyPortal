@@ -41,6 +41,9 @@ describe('AuthStack', () => {
     powertoolsLayerArn:
       'arn:aws:lambda:us-east-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-arm64:32',
       costAnomalyEnabled: false,
+      auditBucketObjectLockEnabled: false,
+      auditBucketObjectLockYears: 6,
+      auditHotRetentionDays: 90,
   };
 
   const security = new SecurityStack(app, 'TestSecurity', { config });

@@ -27,6 +27,7 @@ import { NotificationStack } from '../lib/stacks/notification-stack.js';
 import { HostingStack } from '../lib/stacks/hosting-stack.js';
 import { IntegrationStack } from '../lib/stacks/integration-stack.js';
 import { ObservabilityStack } from '../lib/stacks/observability-stack.js';
+import { AuditStack } from '../lib/stacks/audit-stack.js';
 
 const app = new cdk.App();
 
@@ -149,5 +150,24 @@ new ObservabilityStack(app, `${prefix}-Observability`, {
   config,
   description: `GoSteady Observability — ${config.envName}`,
 });
+
+// ── Audit (Phase 1.7) ──────────────────────────────────────────────
+// Routes audit-shape log entries from existing handler log groups into
+// a dedicated CW log group, then onward via Firehose to an S3 bucket
+// with Object Lock compliance retention (prod) or plain SSE-KMS (dev).
+// Imports the AuditKey CMK from Security (Phase 1.5) by name; no other
+// cross-stack imports. Subscription-filter sources are handler log
+// groups referenced by name (mirrors the Observability decoupling).
+const audit = new AuditStack(app, `${prefix}-Audit`, {
+  env,
+  config,
+  description: `GoSteady Audit Logging — ${config.envName}`,
+});
+audit.addDependency(security); // depends on AuditKey CMK export
+// Soft dep on Auth + Processing + Ingestion: the source handler log
+// groups must exist before subscription filters can attach. CFN-level
+// dependency isn't expressed (filters reference log groups by name),
+// but ordering is enforced by deploy sequence: Auth + Processing +
+// Ingestion are well-established before Audit ever deploys.
 
 app.synth();

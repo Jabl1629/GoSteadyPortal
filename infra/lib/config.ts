@@ -133,6 +133,24 @@ export interface GoSteadyEnvConfig {
    * Explorer in console, flip this to true, redeploy Observability stack.
    */
   readonly costAnomalyEnabled: boolean;
+  /**
+   * Whether to enable S3 Object Lock (compliance mode) on the audit-logs
+   * bucket (Phase 1.7 L5). Prod-only; dev gets normal SSE-KMS so test
+   * data churn is cleanable. Object Lock must be set at bucket-create
+   * time and is irreversible.
+   */
+  readonly auditBucketObjectLockEnabled: boolean;
+  /**
+   * S3 Object Lock retention in years for audit objects (Phase 1.7 L3).
+   * Only applied when `auditBucketObjectLockEnabled` is true.
+   */
+  readonly auditBucketObjectLockYears: number;
+  /**
+   * Audit CloudWatch Log Group hot-path retention in days (Phase 1.7 L4 hot side;
+   * ARCHITECTURE.md §11 retention table). S3 is the cold path; this is the
+   * window Logs Insights queries cover for compliance/ops triage.
+   */
+  readonly auditHotRetentionDays: number;
 }
 
 /**
@@ -174,6 +192,11 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     // Cost Explorer not enabled in this dev account at deploy time
     // (2026-04-29). Flip to true after the one-time console opt-in.
     costAnomalyEnabled: false,
+    // Phase 1.7 L5: Object Lock prod-only — irreversible bucket-level
+    // setting; dev must remain cleanable for test data churn.
+    auditBucketObjectLockEnabled: false,
+    auditBucketObjectLockYears: 6,
+    auditHotRetentionDays: 90,
   },
   prod: {
     envName: 'Production',
@@ -211,5 +234,11 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     // Cost Explorer not enabled in this dev account at deploy time
     // (2026-04-29). Flip to true after the one-time console opt-in.
     costAnomalyEnabled: false,
+    // Phase 1.7 L5: prod gets Object Lock compliance mode, 6yr retention.
+    // Bucket becomes non-destroyable until all object retention windows
+    // expire. Tamper-evident audit storage is the entire point.
+    auditBucketObjectLockEnabled: true,
+    auditBucketObjectLockYears: 6,
+    auditHotRetentionDays: 90,
   },
 };
