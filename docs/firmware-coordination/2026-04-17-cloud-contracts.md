@@ -4582,3 +4582,245 @@ self-recovered at all.
 failures separated: cellular-publish stop (SIM exhaustion, ops fix)
 vs firmware lockup (§C10.5 AT-serialization, firmware fix). Cloud
 alarm catalog gap closed. New cloud alarm gap surfaced.*
+
+
+---
+---
+
+# Joint cloud + firmware update — 2026-05-17 (§C11.5 patch shipped + bench-validated on GS9999999998; two latent bugs caught in the process)
+
+> **From:** GoSteady firmware + cloud teams (single Claude session).
+>
+> **Closes:** §C11.5 Option A (AT-timeout wrapper) — the M15 blocker. Also
+> closes §C11.9 step 3 ("Firmware: apply Option A AT-timeout wrapper").
+>
+> **TL;DR:** New dev unit `GS9999999998` brought up per the playbook
+> [`docs/playbooks/new-dev-unit-bringup.md`](../playbooks/new-dev-unit-bringup.md),
+> firmware patched per §C11.5 design, built + flashed + bench-validated.
+> Firmware version bumped 0.9.0-hardening → **0.10.0-at-timeout**
+> (firmware commit
+> [`95f87e6`](https://github.com/Jabl1629/gosteady-firmware/commit/95f87e6)
+> on `gosteady-firmware/main`). Two latent bugs surfaced during bench
+> validation — exactly the value of doing this on hardware — both fixed
+> before the commit landed. Failure-path (actual `-ETIMEDOUT` firing under
+> sustained modem contention) is NOT bench-validated; will be exercised
+> naturally during the next M14.5 site-survey or by deliberate stress.
+
+---
+
+## C12.1 What shipped
+
+Firmware commit
+[`95f87e6`](https://github.com/Jabl1629/gosteady-firmware/commit/95f87e6)
+on `gosteady-firmware/main`:
+
+- `src/cellular.c` — new `at_cmd_with_timeout()` wrapper (+ supporting
+  worker logic folded into the existing `reporter_thread` to fit in the
+  RAM budget — see §C12.2 below). Two CCLK call sites
+  (`read_network_time_iso8601()` and
+  `gosteady_cellular_get_network_time_unix_ms()`) now route through it.
+  `read_signal()` (CESQ) left bare since it runs only on the reporter and
+  is not in `session_start`'s critical path. A bare-AT variant
+  `read_network_time_iso8601_bare()` was added for the reporter's own
+  `log_signal_and_time()` use — see §C12.4.
+- `src/version.h` — `GS_FIRMWARE_VERSION_STR "0.10.0-at-timeout"` plus
+  changelog entry pointing back at §C11.5.
+
+Build / link results:
+- merged.hex: 994,046 bytes (vs 991,242 for 0.9.0-hardening, +2,804 B)
+- RAM: 99.85 % used (vs 99.76 % pre-patch, +216 B; **336 B headroom**)
+- FLASH: comfortably under cap
+
+---
+
+## C12.2 RAM constraint forced consolidation (not a dedicated AT worker)
+
+The §C11.5 sketch assumed a dedicated 2 KB-stack AT worker thread.
+First build attempt overflowed the RAM region by 2,008 bytes — pre-patch
+was already at 99.76 % per coord §C10.6's footprint table. The
+dedicated thread alone (`k_thread` struct + 2 KB stack + sem/mutex
+overhead) would have needed ~2.7 KB of new RAM.
+
+Resolution: fold the AT-cmd dispatch into the existing `reporter_thread`
+(which has a 2 KB stack already and is also an AT-running worker — it's
+the right semantic home). Single thread now does both jobs. Saves the
+entire second thread's overhead.
+
+Reporter's main loop, post-patch:
+- Top of every iteration: check "periodic poll due?" → if yes, do it.
+- Otherwise: `k_sem_take(at_request_sem, K_MSEC(time_until_next_poll))`.
+  - Sem fires → service AT cmd via `at_worker_service_one()`.
+  - Sem times out → loop back to top, where poll is now due.
+
+This serializes AT-cmd handling with the periodic signal+time poll —
+which is correct, since the modem AT processor serializes anyway.
+
+Documented inline in `cellular.c` so future RAM headroom doesn't
+mysteriously make someone want to split the threads again.
+
+---
+
+## C12.3 Latent bug #1 caught at bench: the 5 s settle starved AT requests
+
+First post-patch boot produced a spurious `at cmd timed out after 2000 ms
+(modem contention?): AT+CCLK?` warning ~2 s after `cellular registered`.
+Modem signal was fine (-87 dBm). The "contention" was self-inflicted.
+
+Root cause: the reporter's `(void)k_sem_take(&registered_sem, K_FOREVER);
+k_msleep(5000);` post-registration settle. During those 5 s,
+`gs_cloud`'s post-registration AT+CCLK? request gave `at_request_sem`,
+but the reporter was sleeping and didn't service it. Caller timed out.
+
+Fix: the settle is now a loop that does `k_sem_take(at_request_sem,
+K_MSEC(remaining_settle_ms))` and services any AT requests that arrive
+during the wait. Settle period still bounded at 5 s in wall-clock terms;
+just no longer blocks AT requests.
+
+After this fix: `network time available` lands 0.5 s after
+`registered_roaming` (down from spurious 2.5 s timeout).
+
+---
+
+## C12.4 Latent bug #2 caught at bench: reporter self-deadlock through the wrapper
+
+After fix #1, observed *one* `at cmd timed out` warning per ~60 s
+cadence. Looked like an intermittent issue; closer inspection showed it
+correlated exactly with the reporter's periodic poll.
+
+Root cause: `log_signal_and_time()` runs on the reporter thread. It
+called `read_network_time_iso8601()` which (per the patch) now goes
+through `at_cmd_with_timeout()`. The wrapper gives `at_request_sem`
+(which only the reporter consumes) and blocks on `at_response_sem`. The
+reporter — already blocked inside the wrapper — never services its own
+sem give. Deadlock until the 2 s wrapper timeout fires.
+
+So `log_signal_and_time()` fired its own AT timeout every minute as
+a "graceful degradation" of a real self-deadlock. Spurious warnings,
+correct outcomes (network_time still got read on the next iteration),
+but ugly.
+
+Fix: extracted `read_network_time_iso8601_bare()` — a private static
+helper that uses bare `nrf_modem_at_scanf` (no wrapper). Reporter's
+`log_signal_and_time()` calls the bare variant. External callers
+(`gosteady_cellular_get_network_time()` and the public
+`get_network_time_unix_ms()`) continue to use the wrapped path.
+
+This is the same pattern `read_signal()` (CESQ) already uses — bare
+because it runs only on the reporter. Worth keeping in mind for any
+future AT call added inside the reporter thread: **AT calls invoked
+from the reporter must bypass the wrapper, or they self-deadlock.**
+
+After this fix: **zero AT timeouts** on the validation boot. Clean
+sustained operation.
+
+---
+
+## C12.5 Validation results (GS9999999998, boot=6, 2026-05-16T21:01:20Z)
+
+| Check | Result |
+|---|---|
+| Build | merged.hex 994 KB; RAM 99.85 %; FLASH well under cap |
+| Boot | `boot_count=6, fault_counters={fatal:0, asserts:0, watchdog:0}, watchdog_hits=0, reset_reason=SOFTWARE` |
+| Cellular registration | `registered_roaming` at boot+5.06 s on iBasis trial |
+| Settle period | 5 s; AT requests serviced during settle (no starvation) |
+| `gs_cloud` first AT+CCLK? | succeeded within wrapper timeout; no "modem contention?" warning |
+| Reporter periodic poll | ran at boot+10 s; `signal: rsrp=-91 dBm snr=1 dB` populated `s_rsrp_dbm/s_snr_db/s_signal_valid` so `gs_cloud` could read them |
+| First heartbeat publish | PUBACK at boot+19.9 s; payload includes `firmware: "0.10.0-at-timeout"` |
+| Cloud-side Shadow | `fw=0.10.0-at-timeout, ts=2026-05-16T21:01:20Z, boot=6` — confirms broker accepted the publish and IoT Rule + heartbeat-processor updated Shadow |
+| DLQ + Lambda errors | both 0 |
+| AT timeouts during this boot | **0** (after bug fixes #1 and #2) |
+
+---
+
+## C12.6 What was NOT bench-validated
+
+The failure path itself — the actual `-ETIMEDOUT` return under sustained
+real modem contention (e.g. exhausted SIM, weak signal triggering tight
+PDN-reject loop) — was **not** reproduced on bench. Reproducing it
+cleanly requires either:
+
+1. Faraday-cage-style RF isolation
+2. SIM exhaustion (the May 11-12 conference repro — destructive of the
+   active SIM)
+3. Airplane-mode toggling via AT cmd injection (no current path —
+   gosteady firmware doesn't expose an AT passthrough)
+4. A `CONFIG_GOSTEADY_AT_TIMEOUT_TEST_HOOK`-style test variant that
+   injects a delay in `at_worker_service_one()` — would be a useful
+   future test harness; left for a separate commit
+
+That said, the timeout path WAS exercised end-to-end during the patch
+development cycle — both latent bugs (§C12.3 and §C12.4) produced
+real `-ETIMEDOUT` returns through the wrapper, with logs and graceful
+degradation matching the design. So we have indirect evidence the path
+works as intended, just not under the "real" contention condition.
+
+The natural next validation moment: the next M14.5-style site-survey
+where cellular contention may occur organically. Or a deliberate
+SIM-exhaustion stress test, once an Onomondo SIM is at end-of-quota
+and OK to push over.
+
+---
+
+## C12.7 Updates to coord §C11.9 sequencing
+
+| § | Item | Status |
+|---|---|---|
+| C11.9.1 | User: activate Onomondo SIM | Pending (out-of-band) |
+| C11.9.2 | Cloud: deploy commit `3c47f0d` (activity_reject alarm) | Pending (small, non-destructive deploy) |
+| **C11.9.3** | **Firmware: apply §C11.5 Option A AT-timeout wrapper** | **✅ DONE — commit `95f87e6` on `gosteady-firmware/main`, bench-validated on GS9999999998 2026-05-16** |
+| C11.9.4 | Cloud: scope + ship Phase 1C-slim offline detector | Pending |
+| C11.9.5 | Firmware: §C11.5 Option B (cached-UTC refactor) | Backlog (M16+; not currently scoped) |
+
+---
+
+## C12.8 Surfaced for the playbook
+
+The new-dev-unit-bringup playbook is now empirically grounded in two
+real bring-ups (`GS9999999999` historical + `GS9999999998` today).
+Updates landed in cloud-portal commit
+[`76eb14d`](https://github.com/Jabl1629/GoSteadyPortal/commit/76eb14d):
+
+- at_client pre-built hex source documented (avoids the macOS
+  Python 3.14 / pykwalify pitfall on building from source)
+- JLinkARM `-256` noise flagged as benign
+- `prj_cloud.conf` per-unit `CONFIG_AWS_IOT_CLIENT_ID_STATIC` rebuild
+  flagged as critical (longer-term: derive from cert CN at runtime)
+- Full env-var dance for `west build` documented (PATH override,
+  ZEPHYR_BASE, ZEPHYR_SDK_INSTALL_DIR, ZEPHYR_TOOLCHAIN_VARIANT)
+
+Should-add to playbook (TODO):
+- New §3.4.5 noting that **per-unit rebuild also requires `--bare`-style
+  AT-call hygiene for any future reporter-thread additions** (§C12.4
+  lesson) — anyone adding a new AT call inside `log_signal_and_time()`
+  or another reporter-only function must use bare nrf_modem_at_scanf or
+  reproduce the self-deadlock surface area.
+
+---
+
+## C12.9 Cadence
+
+This entry closes the loop on §C11.5 → §C11.9.3. No firmware action
+items currently outstanding from this batch.
+
+**Next coord-doc-affecting work:**
+
+1. **Cloud: Phase 1C-slim offline detector** (per §C11.7 / §C11.9.4) —
+   independent of firmware; will surface a §C13 when scoped + shipped.
+2. **Firmware: §C11.5 Option B (cached UTC)** — backlog; would simplify
+   the reporter and remove the self-deadlock surface area entirely.
+   Will surface a §C14-equivalent when picked up.
+3. **Firmware: client_id-from-cert-CN refactor** — removes per-unit
+   rebuild step from new-dev-unit-bringup playbook. Backlog; not yet
+   scoped.
+4. **Real-world §C11.5 failure-path validation** — opportunistic; will
+   happen organically on the next M14.5-style stress or whenever the
+   iBasis trial hits its end-of-quota.
+
+---
+
+*Entry owner: Jace + Claude (single merged firmware+cloud session,
+2026-05-17).*
+*Closes §C11.5 / §C11.9.3. Two latent bugs caught at bench (§C12.3,
+§C12.4) before commit landed. Firmware 0.10.0-at-timeout live on
+GS9999999998. Conference-class lockup mode now closed via firmware
+fix (in addition to operational SIM fix).*
