@@ -4824,3 +4824,148 @@ items currently outstanding from this batch.
 §C12.4) before commit landed. Firmware 0.10.0-at-timeout live on
 GS9999999998. Conference-class lockup mode now closed via firmware
 fix (in addition to operational SIM fix).*
+
+
+---
+---
+
+# Cloud team update — 2026-05-17 (activity_reject alarm deployed; closes §C11.9.2 + doc sync sweep)
+
+> **From:** GoSteady cloud team.
+>
+> **TL;DR:** Two follow-ups from this morning's §C12 entry:
+>
+> 1. Deployed commit `3c47f0d` (activity_reject alarm) to
+>    `GoSteady-Dev-Observability` — single-resource UPDATE, ~26 s, no
+>    other changes. Alarm catalog now at 30 in Observability stack.
+>    **Closes §C11.9.2.**
+> 2. Doc sync sweep across ARCHITECTURE.md, GOSTEADY_CONTEXT.md, the
+>    new-dev-unit-bringup playbook, and this coord doc to reflect
+>    today's session shipments (§C11/§C12 + activity_reject deploy
+>    + 0.10.0-at-timeout firmware). Captures the §C12.4 reporter-thread
+>    AT-call hygiene rule in the playbook so the next person extending
+>    `cellular.c` doesn't re-hit the self-deadlock.
+
+---
+
+## C13.1 activity_reject alarm — DEPLOYED
+
+```
+GoSteady-Dev-Observability | 0/4 | 8:40:46 AM | CREATE_IN_PROGRESS   | AWS::CloudWatch::Alarm     | HandlerAlarms/ActivityProcessorActivityReject
+GoSteady-Dev-Observability | 2/4 | 8:40:49 AM | CREATE_COMPLETE      | AWS::CloudWatch::Alarm     | HandlerAlarms/ActivityProcessorActivityReject
+ ✅  GoSteady-Dev-Observability
+Deployment time: 25.6s
+```
+
+Live CloudWatch state (verified via `aws cloudwatch describe-alarms
+--alarm-names gosteady-dev-activity-processor-activity-reject`):
+
+| Property | Value |
+|---|---|
+| State | `INSUFFICIENT_DATA` (correct — no `activity_reject_count` data points since deploy; metric only fires on validation failures, none in this window) |
+| Namespace | `GoSteady/Processing/dev` |
+| MetricName | `activity_reject_count` |
+| Dimensions | `service=gosteady-dev-activity-processor` |
+| Threshold | 0 |
+| ComparisonOperator | `GreaterThanThreshold` |
+| Period | 300 s |
+| AlarmActions | `arn:aws:sns:us-east-1:460223323193:gosteady-dev-cost-alarms` (ops topic) |
+
+Total alarm count in dev: **31** (30 Observability + 1 Phase 1.5
+billing). The "29" referenced in §C7.1 was original-1.6-deploy state;
+the 2026-05-10 watchdog-hits-rate alarm bumped it to 29 (already
+counted), and today's activity_reject brings it to 30 in Observability.
+
+---
+
+## C13.2 §C11.9 sequencing — updated status
+
+| § | Item | Status |
+|---|---|---|
+| C11.9.1 | User: activate Onomondo SIM | Pending (out-of-band, user action) |
+| **C11.9.2** | **Cloud: deploy commit `3c47f0d` (activity_reject alarm)** | **✅ DONE 2026-05-17** |
+| C11.9.3 | Firmware: §C11.5 Option A AT-timeout wrapper | ✅ DONE 2026-05-16 (commit `95f87e6`, bench-validated) |
+| C11.9.4 | Cloud: scope + ship Phase 1C-slim offline detector | Pending — likely the next cloud-side dev item |
+| C11.9.5 | Firmware: §C11.5 Option B (cached-UTC refactor) | Backlog (M16+) |
+
+Three of five sequencing items now closed. C11.9.4 (Phase 1C-slim
+offline detector) is the natural next cloud-side increment — closes
+the §C11.7 gap of "device went dark for 3 days, no alarm noticed."
+
+---
+
+## C13.3 Doc sync sweep — what changed
+
+Today's session shipped a lot of state across ARCHITECTURE.md,
+GOSTEADY_CONTEXT.md, the playbook, and this coord doc. Sweeping for
+consistency since multiple docs reference the same facts (alarm count,
+firmware version, AT-serialization status).
+
+**`docs/specs/ARCHITECTURE.md` (cloud-portal repo):**
+- §12 Phase 1.6 — alarm catalog line updated: "29 alarms in original
+  1.6 deploy; 30 after 2026-05-17 follow-up"
+- §12 Phase 1.6 follow-up (activity_reject) — updated to record deploy
+  date 2026-05-17 + commit `3c47f0d` + final alarm counts (30
+  Observability + 1 billing = 31 total)
+- §16 Open Questions — added two new resolved entries:
+  - `activity_reject_count` no-alarm gap → resolved
+  - `session_start` AT-call serialization (§C10.5 watch-item) →
+    resolved by firmware 0.10.0-at-timeout
+- §17 Spec Index — Phase 1.6 row updated to "30 alarms"; new
+  "Playbooks" subsection added pointing at the new-dev-unit-bringup
+  playbook
+
+**`docs/playbooks/new-dev-unit-bringup.md` (cloud-portal repo):**
+- §3.4 — new callout block on reporter-thread AT-call hygiene rule
+  (the §C12.4 self-deadlock lesson). Explains why
+  `read_network_time_iso8601_bare()` exists and warns against future
+  reporter-thread AT calls going through the wrapper.
+
+**`GOSTEADY_CONTEXT.md` (gosteady-firmware repo):**
+- Header — firmware version bumped `0.9.0-hardening` → `0.10.0-at-timeout`
+- "Current state" date 2026-05-10 → 2026-05-17
+- Current-state paragraph — both dev units now described
+  (`GS9999999999` historical + `GS9999999998` running 0.10.0-at-timeout
+  with working J-Link)
+- M14.5 watch items — AT-serialization watch item marked CLOSED with
+  ref to §C12
+- Cloud-side OPEN follow-ups — `activity_reject_count` marked DONE
+  with deploy date; Phase 1C offline detector remains open
+
+**`docs/firmware-coordination/2026-04-17-cloud-contracts.md` (this
+file):**
+- This §C13 entry
+
+---
+
+## C13.4 What's next
+
+Cloud-side options (in rough priority order):
+
+1. **Phase 1C-slim (Offline Detector)** — 1-2 day sprint. EventBridge
+   scheduled rule + Lambda that scans Device Registry for
+   `active_monitoring` devices with `lastSeen > 2 h` and fires a
+   synthetic alert. Closes the §C11.7 ops gap and gives operators
+   confidence that any future silent failure will alarm. Independent
+   of any other phase; would be a satisfying solo cloud increment.
+2. **Phase 1.7 Audit Logging spec + deploy** — gates Phase 2A. Spec
+   not yet written. ~Half-day spec + half-day deploy.
+3. **Phase 2A device-lifecycle subset** — `device-api` + `device-
+   shadow-handler` + `discharge-cascade`. Unblocks firmware's
+   `reported.activated_at` Shadow-side ack (currently dormant on
+   cloud per coord §C6.3).
+
+Firmware-side: backlog items remain (§C11.5 Option B cached-UTC,
+`client_id` from cert CN at runtime). No urgent firmware action.
+
+Real-world §C11.5 failure-path validation continues to be
+opportunistic — will happen on the next M14.5-style stress or on
+SIM-exhaustion stress test.
+
+---
+
+*Entry owner: Jace + Claude (single merged firmware+cloud session,
+2026-05-17).*
+*Closes §C11.9.2 (activity_reject deploy). Doc-sync sweep across all
+four canonical files ensures any fresh-session Claude or human picks
+up today's state without re-deriving from logs.*

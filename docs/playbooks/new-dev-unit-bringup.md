@@ -369,6 +369,32 @@ nrfjprog -f NRF91 \
 > Removes the per-unit rebuild step entirely. Until that lands, expect to
 > rebuild per unit.
 
+> **Hazard for anyone modifying `src/cellular.c` — reporter-thread AT
+> hygiene rule (lesson from firmware-coord §C12.4):** the bounded-timeout
+> AT wrapper `at_cmd_with_timeout()` introduced in 0.10.0-at-timeout
+> dispatches AT commands to a worker that runs INSIDE the reporter
+> thread (consolidated to save RAM, per §C12.2). This means:
+>
+> **The reporter thread itself MUST NOT call `at_cmd_with_timeout()`.**
+>
+> If it does, the wrapper gives `at_request_sem` (which only the reporter
+> consumes), then blocks on `at_response_sem` — but the reporter is the
+> only thing that would service the request, and it's now blocked in the
+> wrapper waiting for itself. The 2 s timeout saves the system from a
+> true deadlock by degrading to a spurious `at cmd timed out (modem
+> contention?)` warning every cycle, but the AT call returns
+> `-ETIMEDOUT` even on healthy cellular.
+>
+> **Pattern:** any AT call invoked from the reporter (or any function
+> the reporter calls — currently `log_signal_and_time()` →
+> `read_network_time_iso8601_bare()` and `read_signal()`) MUST use bare
+> `nrf_modem_at_scanf` directly, NOT the wrapper. Look at the
+> `_bare` suffix on `read_network_time_iso8601_bare()` for the model.
+>
+> If you add a third AT call inside `log_signal_and_time()` or any other
+> reporter-only function: bypass the wrapper, or extract its logic into
+> a non-reporter context.
+
 ### 3.5 Watch first boot via uart0
 
 In one terminal:
