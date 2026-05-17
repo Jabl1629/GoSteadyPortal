@@ -45,6 +45,10 @@ AUDIT_CENSUS_ROSTER_READ = "census.roster.read"
 AUDIT_AUTH_LOGIN = "auth.login"
 AUDIT_AUTH_LOGIN_FAILED = "auth.login_failed"
 AUDIT_AUTH_MFA_CHALLENGE = "auth.mfa_challenge"
+AUDIT_AUTH_SESSION_READ = "auth.session.read"  # Phase 2A-0 stub endpoint (GET /api/v1/me)
+
+# ── API middleware (Phase 2A-0) ───────────────────────────────────────
+AUDIT_HANDLER_ERROR = "audit.handler.error"  # uncaught handler exception
 
 # ── Role assignment (Phase 2A) ────────────────────────────────────────
 AUDIT_ROLE_ASSIGNED = "role.assigned"
@@ -82,6 +86,8 @@ KNOWN_AUDIT_EVENTS = frozenset(
         AUDIT_AUTH_LOGIN,
         AUDIT_AUTH_LOGIN_FAILED,
         AUDIT_AUTH_MFA_CHALLENGE,
+        AUDIT_AUTH_SESSION_READ,
+        AUDIT_HANDLER_ERROR,
         AUDIT_ROLE_ASSIGNED,
         AUDIT_ROLE_REVOKED,
     }

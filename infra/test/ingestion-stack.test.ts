@@ -48,6 +48,10 @@ describe('IngestionStack — Phase 1A revision', () => {
       auditBucketObjectLockEnabled: false,
       auditBucketObjectLockYears: 6,
       auditHotRetentionDays: 90,
+      apiThrottleBurst: 50,
+      apiThrottleRate: 25,
+      apiWafRateLimitPerIp: 2000,
+      apiLatencyP99AlarmMs: 2000,
   };
 
   const security = new SecurityStack(app, 'TestSecurityForIngestion', { config });

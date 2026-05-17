@@ -152,6 +152,10 @@ export class AuditStack extends cdk.Stack {
       `gosteady-${env}-alert-handler`,
       `gosteady-${env}-snippet-parser`,
       `gosteady-${env}-cognito-pre-token`,
+      // Phase 2A-0 (2026-05-17): api-stub Lambda emits auth.session.read
+      // audit events. Bundled into this list per spec D9 to avoid a
+      // between-revisions silent-swallow gap (Migration Pattern 18.8).
+      `gosteady-${env}-api-stub`,
     ];
 
     const forwarderDestination = new logsDestinations.LambdaDestination(forwarder.function);

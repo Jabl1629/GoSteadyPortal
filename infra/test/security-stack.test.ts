@@ -37,6 +37,10 @@ describe('SecurityStack (dev profile)', () => {
       auditBucketObjectLockEnabled: false,
       auditBucketObjectLockYears: 6,
       auditHotRetentionDays: 90,
+      apiThrottleBurst: 50,
+      apiThrottleRate: 25,
+      apiWafRateLimitPerIp: 2000,
+      apiLatencyP99AlarmMs: 2000,
     },
   });
   const template = Template.fromStack(stack);
@@ -145,6 +149,10 @@ describe('SecurityStack (prod profile — Object Lock enabled)', () => {
       auditBucketObjectLockEnabled: false,
       auditBucketObjectLockYears: 6,
       auditHotRetentionDays: 90,
+      apiThrottleBurst: 50,
+      apiThrottleRate: 25,
+      apiWafRateLimitPerIp: 2000,
+      apiLatencyP99AlarmMs: 2000,
     },
   });
   const template = Template.fromStack(stack);

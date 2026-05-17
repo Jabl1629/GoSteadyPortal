@@ -151,6 +151,22 @@ export interface GoSteadyEnvConfig {
    * window Logs Insights queries cover for compliance/ops triage.
    */
   readonly auditHotRetentionDays: number;
+  /**
+   * API Gateway HTTP API throttling — burst requests per second (Phase 2A-0).
+   */
+  readonly apiThrottleBurst: number;
+  /**
+   * API Gateway HTTP API throttling — sustained requests per second (Phase 2A-0).
+   */
+  readonly apiThrottleRate: number;
+  /**
+   * WAF rate-limit rule: requests per 5 min window per source IP (Phase 2A-0).
+   */
+  readonly apiWafRateLimitPerIp: number;
+  /**
+   * API Gateway p99 latency alarm threshold (ms) — Phase 2A-0.
+   */
+  readonly apiLatencyP99AlarmMs: number;
 }
 
 /**
@@ -197,6 +213,11 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     auditBucketObjectLockEnabled: false,
     auditBucketObjectLockYears: 6,
     auditHotRetentionDays: 90,
+    // Phase 2A-0 (2026-05-17) — API foundation throttling + WAF tuning.
+    apiThrottleBurst: 50,
+    apiThrottleRate: 25,
+    apiWafRateLimitPerIp: 2000,
+    apiLatencyP99AlarmMs: 2000,
   },
   prod: {
     envName: 'Production',
@@ -240,5 +261,11 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     auditBucketObjectLockEnabled: true,
     auditBucketObjectLockYears: 6,
     auditHotRetentionDays: 90,
+    // Phase 2A-0 (2026-05-17) — prod gets higher throttling ceiling +
+    // tighter latency alarm; rate-limit unchanged at MVP.
+    apiThrottleBurst: 200,
+    apiThrottleRate: 100,
+    apiWafRateLimitPerIp: 2000,
+    apiLatencyP99AlarmMs: 1000,
   },
 };
