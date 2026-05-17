@@ -4969,3 +4969,159 @@ SIM-exhaustion stress test.
 *Closes §C11.9.2 (activity_reject deploy). Doc-sync sweep across all
 four canonical files ensures any fresh-session Claude or human picks
 up today's state without re-deriving from logs.*
+
+
+---
+---
+
+# Cloud team update — 2026-05-17 (Phase 1.7 Audit spec drafted + implementation synth-clean; closes §C13.4 option 2)
+
+> **From:** GoSteady cloud team.
+>
+> **TL;DR:** Later the same day after the §C13 activity_reject deploy,
+> picked up §C13.4 option 2 (Phase 1.7 Audit Logging spec + deploy).
+> Spec drafted ([`docs/specs/phase-1.7-audit.md`](../specs/phase-1.7-audit.md))
+> and implementation landed and synth-clean. Not yet deployed — that's
+> the next session. No firmware-side action required from this entry;
+> 1.7 is pure cloud-side infra (subscription filters on existing handler
+> log groups, no handler IO touches).
+
+---
+
+## C14.1 Why 1.7 jumped ahead of 1C-slim
+
+Both items were on the §C13.4 short list. The deciding factor was
+spec discipline: §C13.4 named Phase 1.7 as "gates Phase 2A" (per the
+then-current ARCHITECTURE.md framing). Working through the spec
+clarified that the gate is actually *discipline* (no patient data
+through a UI without proper audit), not a hard technical dep — but
+the gate still applies before first prod customer, same threshold as
+G9 (multi-account separation), Phase 1.5 prod hardening, etc. So 1.7
+becomes mandatory at the same point on the timeline regardless of
+when we ship it.
+
+Given that, the choice was "ship 1.7 now while the architecture is
+fresh, or carry it as a known-required-before-prod item indefinitely."
+Now was the cheaper option — and the 5 architectural decisions that
+shape the design (latency posture, emission mechanism, Object Lock
+mode, read-event scope, compliance reader IAM) were all calls we
+could make confidently today without waiting for a real compliance
+reader or a real Phase 2A handler. 1C-slim slips to next session.
+
+---
+
+## C14.2 What shipped (code, not yet deployed)
+
+| Component | Detail |
+|---|---|
+| Spec | [`docs/specs/phase-1.7-audit.md`](../specs/phase-1.7-audit.md), ~580 lines, follows the same template as 1.6 |
+| New stack | `GoSteady-{Env}-Audit` ([`infra/lib/stacks/audit-stack.ts`](../../infra/lib/stacks/audit-stack.ts)) |
+| New construct | [`infra/lib/constructs/audit-s3-bucket.ts`](../../infra/lib/constructs/audit-s3-bucket.ts) — env-aware Object Lock toggle |
+| New Lambda | [`infra/lambda/audit-forwarder/handler.py`](../../infra/lambda/audit-forwarder/handler.py) — subscription filter forwarder with date-partitioned destination streams |
+| New shared module | [`infra/lambda/_shared/audit_catalog.py`](../../infra/lambda/_shared/audit_catalog.py) — 28 event-name constants |
+| Modified shared module | [`infra/lambda/_shared/observability.py`](../../infra/lambda/_shared/observability.py) — extended `emit_audit` with `schema_version` + `request_id`; fixed scrubber-bypass bug |
+| Config additions | `auditBucketObjectLockEnabled` / `auditBucketObjectLockYears` / `auditHotRetentionDays` in [`infra/lib/config.ts`](../../infra/lib/config.ts) |
+| App wiring | `AuditStack` wired into [`infra/bin/gosteady.ts`](../../infra/bin/gosteady.ts) with explicit dep on `SecurityStack` (AuditKey CMK import) |
+| Test backfills | 5 stack-test fixtures updated for the new env-config fields |
+
+Synthesized resources in `GoSteady-Dev-Audit`:
+- 3 CloudWatch alarms (forwarder errors / Firehose freshness >10min / Firehose delivery failures)
+- 7 subscription filters (6 source handler log groups + 1 audit log group → Firehose)
+- 1 Kinesis Firehose delivery stream (GZIP NDJSON, 1 MB / 60 s buffer)
+- 1 S3 bucket + bucket policy (TLS-only enforced; dev: cleanable, prod will get Object Lock + deny-delete)
+- 2 log groups (audit destination + Firehose error logs)
+- 4 Lambdas (audit-forwarder + 3 CDK helpers)
+- 6 IAM roles + 5 policies + 6 Lambda permissions
+
+Full-app `cdk synth --context env=dev` clean (exit 0); pre-existing
+warnings unchanged (`logRetention` deprecation, Phase 1.6
+WatchdogHitsRate metric-math note). New stack appears in the
+`cdk deploy --all` list as `GoSteady-Dev-Audit`.
+
+---
+
+## C14.3 Two intentional divergences from the spec
+
+Worth flagging so a future reader of the spec isn't confused:
+
+1. **`_shared/audit.py` was cut — extended existing `_shared/observability.py:emit_audit` instead.** The 1B-rev observability module already exposes an `emit_audit()` (which is why audit-shape lines have been flowing in production for weeks already). Creating a parallel module would have meant either deprecating the existing one or running two emission paths that have to stay in sync. Cleaner to extend it with the spec's new fields (`schema_version`, `request_id`) and fix an L4 violation the existing code had (the `ScrubbingFormatter` was scrubbing audit records too, which would have silently broken any future `auth.login` audit event that contains a user's email).
+
+2. **`audit-subscription-filter.ts` reusable construct was cut — inlined the loop in `audit-stack.ts`.** Only used once (a `for` loop over six source handler log groups). The reusable wrapper would have been 6 lines of interface + 3 lines of body for zero callers outside that loop. The inlined version is more readable.
+
+Both choices are folded into the spec's "Files Changed" table under
+an "Architectural divergence" note so the spec stays accurate to
+what actually shipped.
+
+---
+
+## C14.4 Pre-deploy gate (A3) — code-read verified, live-check pending
+
+The whole subscription-filter design assumes 1B-rev's
+`_shared/observability.py:emit_audit` emits a top-level `"audit": true`
+JSON key. Verified at source-code read (line 122): it does. The live
+verification (`aws logs filter-log-events --filter-pattern '{ $.audit
+IS TRUE }'` against the current dev activity-processor log group)
+is the first acceptance step at deploy time.
+
+If the pattern somehow doesn't match (no Phase 1B-rev audit lines in
+the last 24h, or a subtle pattern mismatch), the fix is a small touch
+to `_shared/observability.py` rather than a stack redeploy.
+
+---
+
+## C14.5 What's not in 1.7 (scope-discipline reminders)
+
+These were considered and explicitly out-of-scope:
+
+- **Phase 2A read-event emission.** 1.7 ships the `emit_audit()`
+  helper + schema + event catalog. 2A wires `patient.activity.read`,
+  `patient.detail.read`, `alert.read`, `census.roster.read` into its
+  own API handlers using the helper. Per spec Q4.
+- **Compliance reader's real identity.** The `gosteady-{env}-audit-reader`
+  IAM role exists with an explicit-deny trust policy. Runbook step
+  (`aws iam update-assume-role-policy`) attaches a real principal
+  once the compliance reader is named. Not deploy-blocking.
+- **Athena workgroup + Glue table.** Logs Insights against the hot
+  CW path covers most practical queries (recent 90 days). Athena
+  becomes valuable when querying past 90 days or producing
+  customer-facing audit reports. Phase 1.7.1 or first-need.
+- **Audit-reader-onboarding playbook.** ~1 page when the runbook
+  step is actually needed. Slot into the 1.7 deploy commit.
+
+---
+
+## C14.6 Updated §C13.4 status
+
+| Option | Status |
+|---|---|
+| 1. Phase 1C-slim (Offline Detector) | Pending — natural next cloud-side increment |
+| **2. Phase 1.7 Audit Logging spec + deploy** | **Spec ✅ + impl ✅ (synth-clean) 2026-05-17; deploy pending** |
+| 3. Phase 2A device-lifecycle subset | Pending — unblocks firmware's `reported.activated_at` Shadow-side ack |
+
+Three cloud-side items now half-done (spec + impl, no deploy). Deploy
++ acceptance is a separate session; will surface a §C15 entry on
+completion.
+
+---
+
+## C14.7 No firmware action required
+
+1.7 is pure cloud-side infra:
+- Adds subscription filters on existing handler log groups (read-only
+  side effect from firmware's perspective; doesn't change MQTT topics,
+  doesn't change device-shadow shape, doesn't change handler IO)
+- Adds a new audit log group + S3 bucket + Lambda — all downstream of
+  CloudWatch Logs, invisible to the device path
+- The auto-stamping of `internal_access` for `internal_*` roles will
+  matter once Phase 2A exposes admin API endpoints; until then it's
+  defensive dead code in the forwarder
+
+Firmware backlog items (§C11.5 Option B cached-UTC,
+`client_id`-from-cert-CN at runtime) unchanged.
+
+---
+
+*Entry owner: Jace + Claude (cloud session, 2026-05-17).*
+*Closes §C13.4 option 2 partially — spec ✅ + impl ✅, deploy pending.
+No firmware action items. Two architectural divergences from the
+initial spec sketch documented inline so the spec stays accurate.*

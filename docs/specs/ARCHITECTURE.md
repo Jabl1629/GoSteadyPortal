@@ -505,7 +505,7 @@ Deployed via CDK with `--context env=dev|prod`.
 | 4 | `GoSteady-{Env}-Ingestion` | 1A / 1A-rev / 1B-rev | **Deployed** (1A-rev + 1B-rev ShadowUpdateRule deployed 2026-04-27; Shadow MQTT topic grants added 2026-04-28) | IoT Thing Type, Device Policy (explicit per-topic list for `gs/*` uplinks + `cmd` subscribe; Shadow REST API grants on own thing; **MQTT topic grants on `$aws/things/{thing}/shadow/*` for firmware-side wake-time shadow access**), **5 Topic Rules** (activity / heartbeat / alert / snippet / **shadow_update on `$aws/things/+/shadow/update/documents` → Threshold Detector**), SnippetParser Lambda (Python 3.12 ARM64), Snippet S3 bucket (Standard→Glacier@90d→delete@395d), IoT Jobs config, SQS DLQ, S3 OTA Bucket (FirmwareKey CMK-encrypted), Fleet Provisioning Template | Processing, Security |
 | 5 | `GoSteady-{Env}-Security` | 1.5 | **Deployed** (2026-04-17) | 3 KMS CMKs (identity / firmware / audit), CloudTrail multi-region trail, KMS-encrypted S3 log bucket, SNS cost alarm topic, billing alarm | — |
 | 6 | `GoSteady-{Env}-Observability` | 1.6 | **New** | Powertools layer, X-Ray config, CloudWatch dashboards, alarm catalog | All |
-| 7 | `GoSteady-{Env}-Audit` | 1.7 | **New** | Audit log group (CloudWatch + S3 Object Lock), audit-writer Lambda | Auth, Data |
+| 7 | `GoSteady-{Env}-Audit` | 1.7 | **Planned — spec + impl drafted 2026-05-17, synth-clean, awaiting deploy** | Dedicated audit CW Log Group (AuditKey CMK-encrypted, 90d hot retention), audit-forwarder Lambda (date-partitioned destination streams), 7 subscription filters (6 source handler log groups + 1 audit→Firehose), Kinesis Firehose delivery stream (GZIP NDJSON), S3 audit-logs bucket (Object Lock compliance 6yr in prod / SSE-KMS only in dev), audit-reader IAM role (empty trust policy stub), 3 alarms | Security (AuditKey CMK import) |
 | 8 | `GoSteady-{Env}-Notification` | 2C | Stub | EventBridge bus, SNS topics, SES templates, SQS integration queue | — |
 | 9 | `GoSteady-{Env}-Api` | 2A | Stub | API Gateway HTTP API + WAF, Cognito JWT authorizer, API handler Lambda | Auth, Data, Audit |
 | 10 | `GoSteady-{Env}-Hosting` | 3A | Stub | S3 bucket, CloudFront + OAC + WAF, ACM cert, Route53 alias | — |
@@ -919,6 +919,8 @@ For "delete this patient" requests:
 
 ## 10. Audit Logging
 
+> Detailed implementation, schema versioning, event catalog, IAM, and acceptance tests live in [`phase-1.7-audit.md`](phase-1.7-audit.md). This section is the architectural overview.
+
 ### Scope
 Every read or write of patient-identifying data must produce an audit record. This is application-level audit, separate from CloudTrail (which logs AWS API calls).
 
@@ -1210,13 +1212,39 @@ Structured JSON via Lambda Powertools:
 
 ---
 
-### Phase 1.7 — Audit Logging Infrastructure 🔲 **NEW**
+### Phase 1.7 — Audit Logging Infrastructure 🔲 **Planned — spec drafted + implementation synth-clean (2026-05-17); awaiting deploy**
 
-- Dedicated audit CloudWatch Log Group with restrictive IAM (write-only for handlers, read-only for compliance role)
-- Subscription filter → S3 bucket with Object Lock (compliance mode, 6-year)
-- Audit emission helper in Lambda Powertools wrapper
-- Audit event schema documented and versioned
-- Phase 1B handlers retrofitted to emit audit events on writes
+**Spec:** [`phase-1.7-audit.md`](phase-1.7-audit.md)
+
+**Architecture (two-hop, per spec D6):**
+```
+handler log group  ──(subscription filter `{ $.audit IS TRUE }`)──►
+  audit-forwarder Lambda  ──(PutLogEvents to date-partitioned stream)──►
+    gosteady-{env}-audit log group  ──(subscription filter, all events)──►
+      Kinesis Firehose (GZIP NDJSON, 1 MB / 60 s buffer)  ──►
+        S3 audit-logs bucket (Object Lock compliance 6yr in prod)
+```
+
+**In scope:**
+- Dedicated `gosteady-{env}-audit` CW log group (AuditKey CMK-encrypted, 90d hot retention) with restrictive IAM — only forwarder writes; only audit-reader reads
+- Audit forwarder Lambda — decodes subscription-filter payloads, auto-stamps `internal_access: true` + `severity: elevated` for any `actor.role` starting with `internal_`, writes to UTC-date-partitioned destination streams (`audit-YYYY-MM-DD`) to keep PutLogEvents under the 5 MB/s per-stream cap regardless of total volume (spec D11.5)
+- S3 bucket — env-asymmetric: dev gets normal SSE-KMS (cleanable for test churn); prod gets Object Lock compliance mode 6-year (irreversible, deny-delete bucket policy) per Phase 1.5 CloudTrail precedent
+- Powertools-based audit helper — extended the existing `_shared/observability.py:emit_audit` (already in production from 1B-rev) with `schema_version: 1` field and `request_id` parameter, and fixed an L4 bug where `ScrubbingFormatter` was scrubbing audit events too. Did NOT create a parallel `_shared/audit.py` — single emission path keeps callers simple
+- Audit event catalog — 28 named events spanning device.* (§4), patient.*/alert.* (1B-rev, already flowing), auth.*/role.* (Phase 2A reserved). Constants live in `_shared/audit_catalog.py`
+- 3 alarms: forwarder errors, Firehose data-freshness >10min, Firehose delivery failures
+- Compliance reader IAM role `gosteady-{env}-audit-reader` — empty trust policy stub; runbook step attaches a real principal when compliance reader is named
+
+**Existing 1B-rev audit-shape log entries routed via subscription filter — zero handler code changes in this phase.** A3 pre-deploy gate verified at code-read time (`_shared/observability.py:122` emits `"audit": true` top-level key); the live filter-pattern check is the first acceptance step at deploy time.
+
+**Latency posture:** fire-and-forget. The `emit_audit()` call adds ~1ms (JSON serialization only) to a handler's response time; total end-to-end (handler → S3 object visible) is p50 ~30s / p99 ~3-4 min, dominated by the Firehose 60s buffer interval. Phase 2A's API response budget is unaffected.
+
+**Cost:** ~$0.50/mo at MVP scale (10k audit events/day); ~$2.50/mo at busy Phase 2A scale; ~$23/mo at 10× busy 2A. Audit pipeline is a rounding error in the AWS bill at any realistic scale.
+
+**Deferred to follow-ups:**
+- Phase 2A read-event emission (helper exists; 2A wires it into its own handlers per spec Q4)
+- Real compliance-reader trust policy attach (runbook)
+- Athena workgroup + Glue table for SQL queries against S3 (Phase 1.7.1 or first-need)
+- `docs/playbooks/audit-reader-onboarding.md` runbook (slot into the 1.7 deploy commit)
 
 ---
 
@@ -1328,9 +1356,9 @@ The following phases are **removed from the active plan** and reclassified as co
 
 ```
 Phase 0A (Auth) ──┐
-                  ├──→ Phase 1.7 (Audit) ──→ Phase 2A (API)
-Phase 0B (Data) ──┤                              │
-                  │                              ▼
+                  ├──→ Phase 2A (API)
+Phase 0B (Data) ──┤        │
+                  │        ▼
                   ├──→ Phase 1A (Ingestion) ──→ Phase 1B (Processing) ──→ Phase 1C (Jobs)
                   │                                                          │
                   │                                                          ▼
@@ -1341,6 +1369,8 @@ Phase 0B (Data) ──┤                              │
                   │
 Phase 1.5 (Security) ─→ wrapped around all stacks (KMS keys referenced)
 Phase 1.6 (Observability) ─→ wrapped around all stacks
+Phase 1.7 (Audit) ─→ deployable in parallel with 2A; must be in place before first prod customer
+                     (discipline gate, not a technical dep — see phase-1.7-audit.md D12)
 Phase 2C (Notifications) ─→ depends on Phase 1B (alerts to route)
 Phase 3A (Hosting)  ←── Flutter app
 Phase 3B (CI/CD)    ←── any time
@@ -1355,12 +1385,14 @@ Firmware M12.1e.2 unblocked:     cloud-side Shadow consumer (Threshold Detector)
                                  reported.activated_at consumer is dormant (handler-shape ready,
                                  device-side write path lands with M12.1e.2 firmware itself).
 
-New phases needed:               1.6 ✅ (2026-04-30)   1.7 🔲   2A 🔲   2B 🔲
+New phases needed:               1.6 ✅ (2026-04-30)   1.7 🔲 (spec + impl drafted 2026-05-17, deploy pending)   2A 🔲   2B 🔲
 
 Path to portal-renders-real-data:
-  1.6 ✅ → 1.7 → 2A → 2B
+  1.6 ✅ → 2A → 2B   (with 1.7 deployable in parallel)
   (1.6 deployed 2026-04-30 — dashboards + alarms + Powertools layer + X-Ray;
-   1.7 spec not yet written; gates 2A together with the unwritten 1.7)
+   1.7 spec drafted 2026-05-17 with implementation synth-clean; deploy is
+   a discipline gate for first prod customer, not a technical blocker for
+   2A's first dev iteration. See phase-1.7-audit.md D12.)
 ```
 
 ---
@@ -1502,7 +1534,7 @@ Path to portal-renders-real-data:
 | `gosteady-{env}-device-api` | Api | 2A | 🔲 New | API Gateway (`/devices/*`) | ARM64 |
 | `gosteady-{env}-discharge-cascade` | Api | 2A | 🔲 New | DDB Stream on Patients | ARM64 |
 | `gosteady-{env}-device-shadow-handler` | Api | 2A | 🔲 New | IoT Shadow Δ (reset_complete + reported.activated_at) | ARM64 |
-| `gosteady-{env}-audit-writer` | Audit | 1.7 | 🔲 New | Invoked from handlers via Powertools | ARM64 |
+| `gosteady-{env}-audit-forwarder` | Audit | 1.7 | 🔲 Spec + impl drafted 2026-05-17, synth-clean | CW Logs subscription filter on each handler log group (`{ $.audit IS TRUE }`) | ARM64 |
 | `gosteady-{env}-jwt-authorizer` | Api | 2A | 🔲 New | API Gateway | ARM64 |
 | `gosteady-{env}-api-handler` | Api | 2A | 🔲 Stub | API Gateway | ARM64 |
 | `gosteady-{env}-scheduled-jobs` | Processing | 1C | 🔲 Stub | EventBridge cron | ARM64 |
@@ -1517,7 +1549,7 @@ Path to portal-renders-real-data:
 - [ ] **Alert suppression:** Should a repeated `battery_critical` shadow delta create a new alert each hour, or suppress while prior alert is unacknowledged? (lean: suppress with daily reminder cadence)
 - [ ] **Timezone backfill:** When Phase 2A links a device to a patient, should we backfill `patientId` and recompute `date` on historical activity rows? (lean: yes, one-time migration job)
 - [ ] **Daily rollup scope:** Steps/distance/active-min by day? By hour? Both?
-- [ ] **Audit hot-path latency:** Acceptable to add ~10ms per mutation for synchronous audit write? Or fire-and-forget via SQS?
+- [x] **Audit hot-path latency.** ~~Acceptable to add ~10ms per mutation for synchronous audit write? Or fire-and-forget via SQS?~~ **Resolved 2026-05-17 by Phase 1.7 spec Q2.** Fire-and-forget chosen — the `emit_audit()` call adds ~1ms (JSON serialization only) to handler response time. End-to-end audit visibility in S3 is p50 ~30s / p99 ~3-4 min (Firehose 60s buffer dominates), which is fine for compliance forensics and unnecessary for real-time alerting. No SQS hop — CW Logs subscription filter delivery is durable async. See [`phase-1.7-audit.md`](phase-1.7-audit.md) §Decisions Log D2 and §Open Questions Q1 for the backpressure trigger to revisit.
 - [ ] **Multi-facility caregiver UX:** Single facility selector, or unified inbox across all assigned facilities?
 - [x] **Phase 1.6 alarm catalog must include log-pattern alarms, not just DLQ-depth.** ~~Discovered 2026-04-27...~~ **Resolved 2026-04-30 by Phase 1.6 deploy.** Per-handler ERROR-pattern log alarms now ship for all 6 Lambdas (Powertools `"level":"ERROR"` for the 4 handlers; `[ERROR]` substring for stdlib-only `cognito-pre-token` + `snippet-parser`), plus handler-specific filters (`unmapped_serial` on activity-processor; `SnippetValidationError` on snippet-parser). DLQ depth alarm still ships separately to catch IoT-side failures.
 - [x] **IoT Rule Lambda actions are async — Lambda-raised exceptions don't trip the IoT-side error action.** ~~Discovered 2026-04-27...~~ **Resolved 2026-04-30 by Phase 1.6 deploy.** Per-handler Lambda Errors alarm (`AWS/Lambda > Errors > 0 in 5 min`) now catches uncaught exceptions for all 6 Lambdas. Log-pattern alarms catch logged-and-swallowed errors. The IoT DLQ depth alarm continues to catch IoT-side failures. All three signal paths now have explicit alarms; no more silent-failure modes.
@@ -1565,7 +1597,7 @@ Path to portal-renders-real-data:
 | 1C | Scheduled Jobs | — | 🔲 Planned |
 | 1.5 | Security Foundation | [`phase-1.5-security.md`](phase-1.5-security.md) | 🟡 Partially deployed — Security stack live; IdentityKey CMK consumed by 0A-rev + 0B-rev; FirmwareKey CMK consumption scoped into 1A-rev; Org bootstrap + IAM audits still pending |
 | 1.6 | Observability | [`phase-1.6-observability.md`](phase-1.6-observability.md) | ✅ Deployed (2026-04-30; +1 alarm follow-up deployed 2026-05-17) — 2 dashboards + 30 alarms + log-retention aspect; cost anomaly gated pending Cost Explorer console opt-in |
-| 1.7 | Audit Logging | — | 🔲 Planned (new) |
+| 1.7 | Audit Logging | [`phase-1.7-audit.md`](phase-1.7-audit.md) | 🔲 Spec + implementation drafted 2026-05-17; synth-clean; deploy pending |
 | 2A | Portal API | — | 🔲 Planned |
 | 2A-dl | Device Lifecycle (subset of 2A) | [`phase-2a-device-lifecycle.md`](phase-2a-device-lifecycle.md) | 🔲 Planned |
 | 2B | Portal Integration | — | 🔲 Planned |
