@@ -5394,3 +5394,274 @@ The next entry (§C17) will follow the 2A-DL deploy and include the physical-dev
 §12/§15/§17 + spec changelog Q7 + this §C16. WAF deferral to Phase 3A
 is the only architectural deviation from the original 2A-0 plan;
 documented inline.*
+
+
+---
+---
+
+# Joint cloud + firmware update — 2026-05-17 (Phase 2A-DL deployed; first cloud-side change requiring a real firmware contract since §C12)
+
+> **From:** GoSteady cloud team — **physical-device end-to-end test
+> invitation in §C17.6.**
+>
+> **TL;DR:** Phase 2A-DL device-lifecycle deployed to dev (commit
+> `1edcac5`). All 10 endpoints + 3 Lambdas + IoT shadow rule + L16
+> stuck-in-provisioned alarm. Synthetic smoke validates 6 paths
+> end-to-end with full audit trail. **This is the first cloud-side
+> change since §C12's AT-timeout patch that requires firmware
+> participation** — provisioning the bench unit via the new API will
+> close firmware's `reported.activated_at` Shadow ack loop for the
+> first time in production code (previously dormant cloud-side per
+> §C6.3).
+>
+> Recommended physical-device test sequence in §C17.6 below. ~15 min
+> on the bench. No firmware code change required.
+
+---
+
+## C17.1 What 2A-DL ships (cloud-side)
+
+10 HTTP API endpoints on the existing `gosteady-dev-api` HTTP API:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/devices/{serial}` | View device |
+| GET | `/api/v1/patients/{patientId}/devices` | List devices ever assigned to a patient |
+| POST | `/api/v1/devices/{serial}/provision` | Provision (claims owner first-time + publishes activate cmd) |
+| POST | `/api/v1/devices/{serial}/end-assignment` | End current assignment → discontinued |
+| POST | `/api/v1/devices/{serial}/decommission` | Terminal w/ reason (lost / broken / retired / end_of_life) |
+| POST | `/api/v1/devices/{serial}/recover` | Recover from decommissioned-lost → ready_to_provision (admin) |
+| POST | `/api/v1/devices/{serial}/force-reset` | Admin override for stuck devices (audited heavily) |
+| POST | `/api/v1/devices/{serial}/move-facility` | Cross-facility move (client_admin; rejects `active_monitoring`) |
+| POST | `/api/v1/devices/{serial}/move-client` | Cross-client move (internal_admin only) |
+| POST | `/api/v1/admin/devices` | Manufacturer-side bulk record creation (internal_admin) |
+
+3 new Lambdas:
+- `gosteady-dev-device-api` — single Lambda dispatching all 10 routes
+- `gosteady-dev-discharge-cascade` — DDB Stream on Patients table with `status=discharged` filter; ends all active DeviceAssignments
+- `gosteady-dev-device-shadow-handler` — IoT Topic Rule on `$aws/things/+/shadow/update/documents` parallel to threshold-detector; filters for `reported.reset_complete`
+
+L14 atomic provision: 3-step write (ensure-map / conditional-status / IoT publish + Shadow update) with REMOVE-based rollback on step 3 failure. L15 cross-facility-move reject on `active_monitoring` devices (caller must end-assignment first). L16 CloudWatch metric-math alarm on `device.activation_sent` count > `device.activated` count over 24h — catches firmware-ack failures.
+
+---
+
+## C17.2 Deploy chronology (3 attempts to working state)
+
+| Attempt | What failed | Fix |
+|---|---|---|
+| 1 | `cdk deploy GoSteady-Dev-Api --exclusively` — missing cross-stack export from Data | Drop `--exclusively` so CDK pulls Data + Security as dependencies |
+| 2 | UPDATE_COMPLETE in 78 s, then synthetic smoke surfaced 3 bugs simultaneously: (a) Powertools Logger KeyError on `extra={"message":...}` (reserved key); (b) DDB `Invalid UpdateExpression: paths overlap` on `outstandingActivationCmds`; (c) `boto3.client("iot").update_thing_shadow` doesn't exist — wrong client (control plane vs data plane) | Renamed `message` → `error_message`; split provision step 1 into two UpdateItem calls; switched all 3 Lambdas to `boto3.client("iot-data")` |
+| 3 | After fixes — smoke all green | — |
+
+`cdk deploy GoSteady-Dev-Audit` separately to attach subscription
+filters for the 3 new log groups.
+
+---
+
+## C17.3 Synthetic smoke — what passed
+
+Using the existing `2a-smoke@test.local` user (caregiver / dtc_smoke_test / fac_smoke_001 / cen_smoke_001) + a fresh synthetic device `GS0000000099` + synthetic patient `pt_smoke_2adl`:
+
+| Test | Result |
+|---|---|
+| T2 provision unknown serial | 404 `DEVICE_NOT_FOUND` with proper error envelope |
+| T1 provision happy path | 200 with `{device, assignment, activation: {cmdId, ackWindowHours: 24}}` |
+| T27 concurrent provision race (re-provision same serial) | 409 `DEVICE_UNAVAILABLE` with details.currentStatus + clear "refresh and try again" message |
+| T6 end-assignment | 200 status=discontinued, lastTransitionAt updated |
+| T9 caregiver decommission (reason=lost) | 200 with full response (status, reason, decommissionedAt, decommissionedBy) |
+| T22-ish caregiver-attempts-recover (admin only) | 403 `INSUFFICIENT_PERMISSIONS` with details.requiredAnyOf array |
+
+**Full audit trail validated** — all 5 device.* events for the smoke serial landed in `gosteady-dev-audit` log group:
+- `device.claimed` (provision step 1)
+- `device.assigned` (provision step 2)
+- `device.activation_sent` (provision step 3, with cmd_id + topic)
+- `device.assignment_ended` (T6)
+- `device.decommissioned` (T9)
+
+All carry `schema_version: 1`, auto-stamped `internal_access: false`, `severity: info`, and the 3 provision events share a single `xray_trace_id` (one HTTP request = one trace).
+
+DL14 invariant maintained: shadow `desired.activated_at` correctly cleared by end-assignment + decommission.
+
+---
+
+## C17.4 What's NOT yet validated (deferred to physical-device test)
+
+| Test | What it checks | Needs |
+|---|---|---|
+| T1b | Activation-ack via heartbeat `last_cmd_id` echo | Real device receiving the activate cmd, persisting `activated_at` to flash, echoing in next heartbeat |
+| T5 | First heartbeat → `active_monitoring` auto-transition | Real heartbeat (heartbeat-processor sets status on first non-pre-activation heartbeat) |
+| T15 | Firmware reset_complete on charger → `discontinued → ready_to_provision` | Real device cycling through end-assignment → charger plug-in → reset |
+| T26 | Provision rollback on IoT publish failure | Synthetic; would need to deliberately fail `iot:Publish` (IAM revoke test) |
+| T14 | Patient discharge cascade | Update a Patients row's `status` to `discharged` and watch the cascade Lambda fire on the DDB Stream |
+
+The first three are firmware-participation tests. T26 + T14 are pure cloud-side.
+
+---
+
+## C17.5 Cloud-side ARCHITECTURE state after 2A-DL
+
+| Phase | Status |
+|---|---|
+| 0A-rev | ✅ Deployed (2026-04-26) |
+| 0B-rev | ✅ Deployed (2026-04-27) |
+| 1A-rev | ✅ Deployed (2026-04-27) |
+| 1B-rev | ✅ Deployed (2026-04-27) |
+| 1.5 | 🟡 Partially deployed |
+| 1.6 | ✅ Deployed (2026-04-30, +1 alarm follow-up 2026-05-17) |
+| 1.7 | ✅ Deployed (dev) 2026-05-17 |
+| **2A-0** | **✅ Deployed (dev) 2026-05-17** |
+| **2A-DL** | **✅ Deployed (dev) 2026-05-17 — this entry** |
+| 2A-RD | 🔲 Planned (no spec) |
+| 2A-AA | 🔲 Planned (no spec) |
+| 2A-UM | 🔲 Planned (no spec) |
+| 2A-INT | 🔲 Planned (no spec) |
+| 2B | 🔲 Planned |
+
+After this entry, the next cloud-side increments are either 2A-RD (patient reads → unblocks Flutter dashboard) or 1C-slim (offline detector → closes the §C11.7 "cap went dark 3 days no alarm" gap). Neither requires firmware coordination.
+
+---
+
+## C17.6 ⚠️ Physical-device end-to-end test — recommended sequence (for firmware team)
+
+This closes the firmware-side `reported.activated_at` Shadow ack loop for the first time in production code. Pre-requisites: bench unit (`GS9999999998` recommended — has 0.10.0-at-timeout) currently in `ready_to_provision` state (or able to be put there via the API).
+
+**Cloud-side prep** (one-time, before the firmware test starts):
+
+```bash
+# 1. Insert a real bench patient (associated with smoke-test user's client)
+aws dynamodb put-item --table-name gosteady-dev-patients --region us-east-1 \
+  --item '{
+    "patientId": {"S": "pt_bench_98"},
+    "clientId": {"S": "dtc_smoke_test"},
+    "facilityId": {"S": "fac_smoke_001"},
+    "censusId": {"S": "cen_smoke_001"},
+    "displayName": {"S": "Bench Patient"},
+    "status": {"S": "active"},
+    "createdAt": {"S": "2026-05-17T00:00:00Z"}
+  }'
+
+# 2. Insert the bench unit into Device Registry (if not already)
+aws dynamodb put-item --table-name gosteady-dev-devices --region us-east-1 \
+  --item '{
+    "serialNumber": {"S": "GS9999999998"},
+    "status": {"S": "ready_to_provision"},
+    "createdAt": {"S": "2026-05-17T00:00:00Z"},
+    "outstandingActivationCmds": {"M": {}}
+  }'
+# If already exists in some other state, force it to ready_to_provision:
+# aws dynamodb update-item --table-name gosteady-dev-devices --region us-east-1 \
+#   --key '{"serialNumber":{"S":"GS9999999998"}}' \
+#   --update-expression "SET #s = :r REMOVE owningClientId, owningFacilityId, currentAssignmentSk, outstandingActivationCmds" \
+#   --expression-attribute-names '{"#s":"status"}' \
+#   --expression-attribute-values '{":r":{"S":"ready_to_provision"}}'
+
+# 3. Get a fresh Cognito token for 2a-smoke@test.local
+ID_TOKEN=$(aws cognito-idp initiate-auth --client-id 1q9l9ujtsomf3ugq2tnqvdg6d7 \
+  --region us-east-1 --auth-flow USER_PASSWORD_AUTH \
+  --auth-parameters USERNAME=2a-smoke@test.local,PASSWORD='SmokeTest2A0!2026-XYZ' \
+  --query 'AuthenticationResult.IdToken' --output text)
+```
+
+**The provision call** (the moment firmware should be watching for the cmd on `gs/GS9999999998/cmd`):
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $ID_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"patientId": "pt_bench_98"}' \
+  https://eg06m6p2k5.execute-api.us-east-1.amazonaws.com/api/v1/devices/GS9999999998/provision | jq .
+```
+
+Expected response:
+```json
+{
+  "device": {"serialNumber": "GS9999999998", "status": "provisioned", "owningClientId": "dtc_smoke_test", "owningFacilityId": "fac_smoke_001"},
+  "assignment": {"patientId": "pt_bench_98", "censusId": "cen_smoke_001", "validFrom": "..."},
+  "activation": {"cmdId": "act_<UUID>", "ackWindowHours": 24}
+}
+```
+
+**What firmware should see** (capture and report):
+1. MQTT message arrives on `gs/GS9999999998/cmd` with `{"cmd": "activate", "cmd_id": "act_...", "ts": "...", "session_id": null}` (note: spec mentioned `session_id` from provision audit log ID, but we didn't wire that — leaving it absent. Firmware should tolerate the absence per the accept-extra-fields contract D16).
+2. Firmware persists `activated_at` to flash, exits pre-activation sleep, extinguishes blue LED, begins session capture.
+3. Shadow `desired.activated_at` is now non-null in AWS IoT (verifiable cloud-side via `aws iot-data get-thing-shadow --thing-name GS9999999998`).
+4. Next heartbeat (within firmware's normal cadence — 1 hour, or sooner if motion-triggered): firmware echoes `last_cmd_id: act_...` in the heartbeat payload.
+5. Heartbeat-processor (Phase 1B-rev) matches `last_cmd_id` against the recent `outstandingActivationCmds` map; sets `Device Registry.activated_at`; emits `device.activated` audit event.
+6. Device transitions to `active_monitoring` in DDB.
+
+**Cloud-side verification at each step:**
+
+```bash
+# After step 1 (activate cmd published — should be immediate)
+aws logs filter-log-events --region us-east-1 \
+  --log-group-name gosteady-dev-audit \
+  --filter-pattern '{ $.event = "device.activation_sent" && $.subject.serialNumber = "GS9999999998" }' \
+  --start-time $(($(date +%s) - 300))000 --max-items 3 | jq -r '.events[].message'
+
+# After step 3 (shadow desired)
+aws iot-data get-thing-shadow --thing-name GS9999999998 --region us-east-1 /tmp/shadow.json
+cat /tmp/shadow.json | jq '.state.desired.activated_at'
+
+# After step 4-6 (heartbeat ack received + device.activated emitted)
+aws logs filter-log-events --region us-east-1 \
+  --log-group-name gosteady-dev-audit \
+  --filter-pattern '{ $.event = "device.activated" && $.subject.serialNumber = "GS9999999998" }' \
+  --start-time $(($(date +%s) - 7200))000 --max-items 3 | jq -r '.events[].message'
+
+# Device status should be active_monitoring now:
+aws dynamodb get-item --table-name gosteady-dev-devices --region us-east-1 \
+  --key '{"serialNumber":{"S":"GS9999999998"}}' | jq '.Item | {status: .status.S, activated_at: .activated_at.S}'
+```
+
+**Optional follow-up (full lifecycle loop):**
+
+```bash
+# 7. End the assignment (cloud-side)
+curl -s -X POST -H "Authorization: Bearer $ID_TOKEN" -H "Content-Type: application/json" \
+  -d '{"reason":"bench_test_complete"}' \
+  https://eg06m6p2k5.execute-api.us-east-1.amazonaws.com/api/v1/devices/GS9999999998/end-assignment | jq .
+# Expected: 200, status=discontinued, Shadow desired.activated_at cleared.
+
+# 8. Plug the device into its charger; firmware should report reset_complete in shadow.
+# device-shadow-handler picks up the shadow delta and transitions discontinued → ready_to_provision.
+# Cloud verification:
+aws dynamodb get-item --table-name gosteady-dev-devices --region us-east-1 \
+  --key '{"serialNumber":{"S":"GS9999999998"}}' | jq '.Item.status.S'  # expect "ready_to_provision"
+aws logs filter-log-events --region us-east-1 \
+  --log-group-name gosteady-dev-audit \
+  --filter-pattern '{ $.event = "device.reset_complete" && $.subject.serialNumber = "GS9999999998" }' \
+  --start-time $(($(date +%s) - 7200))000 --max-items 3 | jq -r '.events[].message'
+```
+
+**If anything looks off**, capture the audit-log query output (especially the `device.activation_sent` and `device.activated` events for the bench serial) and ping back. Most likely failure modes:
+
+- Activate cmd never reaches device → IoT Core delivery issue or firmware not subscribed (check IoT policy + thing name match)
+- Firmware persists but heartbeat doesn't echo `last_cmd_id` → firmware bug (echo logic in heartbeat builder)
+- Heartbeat-processor doesn't see the echo → cmd_id mismatch (matching window per DL14a is 24 hr; should be plenty)
+- Device transitions to `active_monitoring` but `device.activated` audit event missing → 1B-rev heartbeat-processor's emit_audit path broken
+
+---
+
+## C17.7 Cloud-side OPEN items (post-2A-DL, unchanged by this entry)
+
+| Item | Status |
+|---|---|
+| Phase 1C-slim Offline Detector (§C11.7) | Pending |
+| Phase 1.7.1 Athena unwrap of S3 audit objects (Q7) | Pending — first-Athena-need trigger |
+| 1B-rev redeploy to populate schema_version (Q8) | Pending — wait for natural processing-stack touch |
+| 2A-RD Patient Reads (unblocks Flutter dashboard) | Planned (no spec) |
+| 2A-AA Alert Actions | Planned (no spec) |
+| 2A-UM User Management + household onboarding | Planned (no spec) |
+| 2A-INT Internal Tools | Planned (no spec) |
+| Multi-account separation (G9) | Pre-first-prod-customer |
+| Phase 1.7 prod cutover (Object Lock + compliance reader trust) | Pre-first-prod-customer |
+| Phase 2B Flutter portal integration | After 2A-RD lands |
+| Phase 3A CloudFront + WAF (deferred from 2A-0 Q7) | Pre-portal-prod |
+
+---
+
+*Entry owner: Jace + Claude (cloud session, 2026-05-17).*
+*Closes §C13.4 option 3 (full — both 2A-0 foundation + 2A-DL device-
+lifecycle deployed dev). First cloud-side change since §C12 requiring
+real firmware contract; physical-device test in §C17.6. After this:
+cloud queue is 2A-RD, 1C-slim, or 2A-UM (any order).*
