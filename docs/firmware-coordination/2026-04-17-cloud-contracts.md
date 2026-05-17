@@ -5125,3 +5125,137 @@ Firmware backlog items (§C11.5 Option B cached-UTC,
 *Closes §C13.4 option 2 partially — spec ✅ + impl ✅, deploy pending.
 No firmware action items. Two architectural divergences from the
 initial spec sketch documented inline so the spec stays accurate.*
+
+
+---
+---
+
+# Cloud team update — 2026-05-17 (Phase 1.7 Audit DEPLOYED to dev + smoke validated; §C13.4 option 2 fully closed)
+
+> **From:** GoSteady cloud team.
+>
+> **TL;DR:** Same day as §C14, picked up the deploy + acceptance steps.
+> `GoSteady-Dev-Audit` is live in dev. Four issues only surfaced at live
+> deploy (none in `tsc` or `cdk synth`); all fixed and root-causes
+> documented. Smoke T2/T3/T4 pass end-to-end. **§C13.4 option 2 now
+> fully closed for dev.** Prod cutover deferred until first-prod-customer
+> threshold (Object Lock + compliance-reader trust policy attach), same
+> threshold as G9 multi-account separation and Phase 1.5 prod hardening.
+> No firmware action items from this entry either; cloud-only.
+
+---
+
+## C15.1 Deploy attempts — 4 tries to reach CREATE_COMPLETE
+
+| Attempt | Outcome | Root cause | Fix |
+|---|---|---|---|
+| 1 | Synth-stage validation rejection | Phantom `CfnResource('ForwarderConcurrency')` block left in by accident — synthesized as an empty `AWS::Lambda::Function` with no `Role` or `Code`. `tsc` happy, `cdk synth` happy, CFN early-validation rejected with "Required property [Role] not found" | Removed the bogus 4-line block; kept the `addPropertyOverride('ReservedConcurrentExecutions', 5)` call on the real forwarder Lambda |
+| 2 | Two CREATE_FAILED resources, rollback | (a) `AuditReaderRole`: `Principal: '*'` in raw trust-policy JSON serialized as `{"STAR":"*"}` which IAM rejects; (b) `AuditLogGroup`: `addToResourcePolicy` on imported `kms.Key.fromKeyArn` is a no-op — the key is owned by Security stack, the call from Audit stack doesn't actually mutate it. So the CW Logs service principal had no `kms:GenerateDataKey*` grant on AuditKey for the audit log group ARN | (a) tried `ArnPrincipal` of a non-existent placeholder role (Bug 3 below); (b) added `AllowCWLogsForAuditLogGroup` statement in security-stack.ts alongside the existing CloudTrail statement, scoped via `kms:EncryptionContext:aws:logs:arn` condition |
+| 3 | Same CREATE_FAILED on AuditReaderRole | IAM validates that a principal-by-ARN exists at trust-policy creation time. `arn:aws:iam::460223323193:role/...-placeholder-replace-me` doesn't exist, so rejected with "Invalid principal in policy" | Settled on `AccountRootPrincipal` placeholder. Caveat documented inline: any IAM identity in the account with broad `sts:AssumeRole` permissions could in principle assume this role. Acceptable for the placeholder window (no audit data yet); runbook step replaces with real principal before any compliance reader is named |
+| 4 | CREATE_FAILED on AuditForwarder Lambda | `ReservedConcurrentExecutions=5` rejected with "decreases account's UnreservedConcurrentExecution below its minimum value of [10]". This dev account is on the new-account 10-concurrency floor (`aws lambda get-account-settings` → `ConcurrentExecutions: 10`), not the 1000 default. With 6 existing Lambdas competing for that 10, any reservation pushes below the unreserved minimum | Dropped `ReservedConcurrentExecutions` override entirely. Forwarder shares the unreserved pool — fine at MVP volume (~1-2 invocations/min). Revisit when an account-level concurrency-quota increase happens (prod-hardening territory) |
+| 5 (success) | CREATE_COMPLETE 141.27 s | — | — |
+
+All four fixes consolidated in commit `54e0ddc`. Stack outputs:
+- `gosteady-dev-audit` log group (CMK-encrypted, 90d retention)
+- `gosteady-dev-audit-forwarder` Lambda
+- `gosteady-dev-audit-logs` S3 bucket
+- `arn:aws:iam::460223323193:role/gosteady-dev-audit-reader` (placeholder trust policy)
+
+---
+
+## C15.2 Smoke results — T2/T3/T4 pass end-to-end
+
+Triggered a synthetic activity publish to `GS9999999999` post-deploy:
+
+```
+aws iot-data publish --topic gs/GS9999999999/activity \
+  --payload '{"serial":"GS9999999999","session_start":"...","session_end":"...","steps":142,"distance_ft":340.5,"active_min":2,"firmware_version":"1.7-smoke-test"}'
+```
+
+| Check | Result |
+|---|---|
+| **T2** Forwarder receives + processes | ✅ `audit_forwarded` log line at 17:55:04 — `forwarded_count: 1`, `destination_streams: ["audit-2026-05-17"]` (date-partitioning D11.5 working as designed), `source_log_group: /aws/lambda/gosteady-dev-activity-processor`, X-Ray trace ID present |
+| **T3** Audit log group populated | ✅ Event landed in `gosteady-dev-audit` log group with auto-stamped fields: `"internal_access": false`, `"severity": "info"` (correct defaults for non-internal actor); all original fields preserved (`event`, `actor`, `subject`, `action`, `after`, `xray_trace_id`) |
+| **T4** S3 object lands | ✅ Two `.gz` objects in `audit/year=2026/month=05/day=17/` prefix within ~70 s of publish (first at 17:55:05 from Firehose's "first record opens batch" behavior, second at 17:56:08 from the 60s batch close) |
+
+End-to-end latency from publish to S3 visibility: ~70 s — consistent with the spec's p99 ~3-4 min estimate (dominated by Firehose 60s buffer interval).
+
+---
+
+## C15.3 Issues surfaced at acceptance — two non-blocking follow-ups
+
+**(a) S3 objects are double-gzipped + CW Logs envelope-wrapped.**
+
+Downloaded one to inspect. The byte stream is GZIP-compressed (our Firehose config). Inside that: another GZIP layer (CloudWatch Logs always pre-compresses subscription-filter delivery to Firehose). Inside that: a CW Logs envelope JSON:
+
+```json
+{
+  "messageType": "DATA_MESSAGE",
+  "owner": "460223323193",
+  "logGroup": "gosteady-dev-audit",
+  "logStream": "audit-2026-05-17",
+  "subscriptionFilters": ["gosteady-dev-audit-to-firehose"],
+  "logEvents": [
+    { "id": "39673928...", "timestamp": 1779040501036,
+      "message": "{\"level\": \"INFO\", \"audit\": true, ...}" }
+  ]
+}
+```
+
+The actual audit JSON is a string inside `logEvents[].message`. Data IS recoverable (`gunzip → gunzip → JSON parse envelope → JSON parse each .message`), but future Athena queries against the bucket will need a custom SerDe or a Firehose Lambda transformer to unwrap to clean NDJSON.
+
+**Decision:** defer to Phase 1.7.1 (filed as ARCH §16 Open Questions item + spec Q7). Today's hot path (CW Logs Insights against `gosteady-dev-audit`) handles all practical queries within the 90d hot window. Athena becomes worth wiring up when a real query past 90d appears or a customer-facing audit report is requested. Fix is ~half-day work — add a Firehose Lambda transformer or the built-in `cloudwatch-log-processor`.
+
+**(b) `schema_version` missing from emissions by existing 1B-rev Lambdas.**
+
+The `schema_version: 1` field was added to `_shared/observability.py:emit_audit` in commit `da92c37`, but the 4 existing 1B-rev Lambdas haven't been redeployed since. Their audit emissions still produce the pre-1.7 shape.
+
+**Per spec L9** ("absence in v1 events is unambiguous — defaults to 1"), this is correct-by-design. Readers know what to do with missing field. No urgency for a forced redeploy; the field will populate naturally on the next routine Phase 1B touch. Filed as ARCH §16 Open Questions item + spec Q8.
+
+---
+
+## C15.4 §C13.4 sequencing — closed
+
+| Option | Status |
+|---|---|
+| 1. Phase 1C-slim (Offline Detector) | Pending — still the natural next cloud-side increment |
+| **2. Phase 1.7 Audit Logging spec + deploy** | **✅ FULLY CLOSED for dev — spec, impl, deploy, smoke. Prod cutover gated on first-prod-customer threshold per D12** |
+| 3. Phase 2A device-lifecycle subset | Pending — unblocks firmware's `reported.activated_at` Shadow-side ack |
+
+After today: cloud-side queue is **1C-slim** or **2A device-lifecycle subset**, with 1.7's prod-cutover work and the two known follow-ups (Athena + 1B-rev redeploy for schema_version) all deferred until they have a real trigger.
+
+---
+
+## C15.5 What's still NOT validated (deferred test scenarios)
+
+The acceptance suite has T1–T18 (spec). T1, T2, T3, T4 done today. The rest are useful but not blocking:
+
+- T5 (S3 SSE-KMS verification): can confirm via `aws s3api head-object`; quick check
+- T6 (internal-role auto-stamping): synthetic emission with `actor.role = "internal_admin"` — would prove the elevated-severity path; useful as Phase 2A integrates internal-user paths
+- T7 (PII scrubber bypass): emit with `subject.patientId = "pat_PII_TEST"` and confirm not redacted — relevant when 2A starts emitting events with email-bearing actors
+- T8 (audit-reader IAM permissions): would need temporary trust-policy attach to test; deferred until real compliance reader is named
+- T9 (forwarder backpressure under burst): publish 100 events in 1s — would validate Q1's deferred decision; useful before Phase 2A goes live
+- T10 (forwarder Errors alarm fires): temporarily revoke an IAM grant; restore — chaos-engineering style, can be combined with Q9
+- T11 (Firehose delivery failure alarm fires): same pattern with KMS grant
+- T12 (dev bucket allows DeleteObject; prod denies): dev path tested implicitly during deploy iterations (rolled back successfully); prod path deferred until prod stack exists
+- T13 (subscription filter coverage): can verify via CLI now; one-liner
+- T14 (helper round-trip from a 2A-stub Lambda): waits for Phase 2A to start
+- T15 (event-name typo handling): one-line synthetic call to `emit_audit(event="typo")` — useful but low priority
+- T16 (NDJSON shape in S3): superseded — Q7 documented the actual format
+- T17 (end-to-end latency p99 < 5 min): T4 measured ~70s for a single event; sustained measurement would need a stream of events
+- T18 (compliance reader runbook): pre-emptive validation; left as a deploy-day step for the real reader
+
+**Bottom line:** end-to-end pipeline confirmed working. The remaining tests are individually useful but together would only meaningfully change our confidence if a specific failure mode was suspected. None gate next-phase work.
+
+---
+
+## C15.6 No firmware action required
+
+Same as §C14 — 1.7 is pure cloud-side. The audit pipeline runs entirely downstream of the handler log groups; no MQTT topics, device shadows, or handler IO are touched. Firmware backlog items (§C11.5 Option B cached-UTC, `client_id`-from-cert-CN at runtime) unchanged.
+
+---
+
+*Entry owner: Jace + Claude (cloud session, 2026-05-17).*
+*Closes §C13.4 option 2 fully for dev. Deploy chronology + smoke results
+captured for any future Phase 1.7.1 work (Athena + 1B-rev redeploy)
+and for prod cutover whenever first-prod-customer threshold appears.*

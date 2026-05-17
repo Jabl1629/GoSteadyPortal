@@ -2,10 +2,10 @@
 
 ## Overview
 - **Phase**: 1.7
-- **Status**: Planned
+- **Status**: ✅ Deployed (dev) 2026-05-17
 - **Branch**: feature/infra-scaffold (matched existing project pattern; spec field aspirational)
 - **Date Started**: 2026-05-17
-- **Date Completed**: —
+- **Date Completed**: 2026-05-17 (dev deploy; prod cutover deferred until first-prod-customer threshold per D12)
 
 Deploys the application-level audit log destination: a dedicated `gosteady-{env}-audit` CloudWatch Log Group (CMK-encrypted with the existing AuditKey from Phase 1.5), plus a Kinesis Firehose → S3 path that lands every audit event in a partition-keyed bucket with Object Lock compliance retention (prod) or normal SSE-KMS (dev). Ships a Powertools-based audit emission helper (`_shared/audit.py`) for Phase 2A handlers to call, and a consolidated event catalog spanning the device-lifecycle events from [`ARCHITECTURE.md` §4](ARCHITECTURE.md) and the Phase 1B-rev audit-shape log entries already flowing from the four processing handlers. Routes those existing 1B-rev entries via subscription filter — zero handler code changes in this phase.
 
@@ -537,6 +537,28 @@ If prod bucket has Object Lock enabled and you need to remove the stack:
 
 ---
 
+---
+
+### Q7. S3 object format — double-gzip + CW Logs envelope wrapping (surfaced at deploy)
+
+**What's actually being asked:** During T4 acceptance at deploy time, we discovered the audit S3 objects aren't clean NDJSON of audit events. They're double-GZIP-compressed (CW Logs subscription filter pre-compresses delivery to Firehose; our Firehose config adds another GZIP for storage), and the inner content is a CW Logs envelope: `{messageType:"DATA_MESSAGE", owner, logGroup, logStream, subscriptionFilters, logEvents:[{id, timestamp, message:"<audit JSON as string>"}]}`. To extract a single audit event from S3 today, you have to: `gunzip → gunzip → JSON parse envelope → for each logEvents item, JSON parse the .message string`. That's ugly but recoverable.
+
+**What's at stake:** Future Athena queries against the audit bucket. The expected query shape is something like `SELECT actor.userId FROM audit WHERE event = 'patient.activity.read' AND ts > ...`. With the current format that requires either a custom Hive/JSON SerDe that knows the envelope shape, or a Firehose Lambda transformer that unwraps to clean NDJSON before write.
+
+**Decision:** ⏳ **Defer fix to Phase 1.7.1.** Today's hot path (CW Logs Insights against `gosteady-{env}-audit`) handles all practical queries within the 90-day hot window without touching S3. Athena becomes worth wiring up when querying past 90 days or producing customer-facing audit reports. The fix is a small Firehose change — add a `LambdaFunctionProcessor` or a `cloudwatch-log-processor` (built into aws-cdk-lib firehose) that unwraps the envelope. ~half-day work. **Trigger to advance:** first real Athena query need. Doesn't block 2A.
+
+---
+
+### Q8. `schema_version` field absent from emissions by existing 1B-rev Lambdas (surfaced at deploy)
+
+**What's actually being asked:** The `schema_version: 1` field was added to `_shared/observability.py:emit_audit` in commit `da92c37`, but the four existing 1B-rev Lambdas (activity-processor / heartbeat-processor / threshold-detector / alert-handler) haven't been redeployed since. So any audit event they emit lacks the field. Spec L9 promises "schema versioning via `schema_version` field on every event"; the actual state is "schema_version on every event from Lambdas redeployed after 2026-05-17."
+
+**What's at stake:** Six-year retention means a compliance reader in 2032 might pull audit events from 2026 that have no `schema_version`. Per L9 spec text, readers default to v1 when absent — so it's still parseable, just less explicit.
+
+**Decision:** ✅ **Accept; the design already handles it.** L9 explicitly says "absence in v1 events is unambiguous (defaults to 1)." Readers know what to do. **No urgency to redeploy 1B Lambdas just for this** — the next routine Phase 1B touch (whenever, for any other reason) will pick up the new helper. **Trigger to revisit:** if any other field is added to the audit schema before then, bundle the L9 backfill into the same redeploy.
+
+---
+
 ### Decision summary
 
 | # | Question | Resolution |
@@ -547,8 +569,10 @@ If prod bucket has Object Lock enabled and you need to remove the stack:
 | Q4 | Forwarder code shape | ✅ Dedicated function, inline code |
 | Q5 | Deploy-window audit gap | ✅ Accept; document as seconds-long |
 | Q6 | Auth event source | ⏳ Defer to Phase 2A |
+| Q7 | S3 double-gzip + envelope format | ⏳ Defer fix to Phase 1.7.1 (Athena trigger) |
+| Q8 | schema_version backfill on existing 1B Lambdas | ✅ Accept (L9 default-to-v1 handles it) |
 
-Three of six decided now. Q1 + Q3 + Q6 require observation or downstream phase to resolve.
+Five of eight decided now. Q1 + Q3 + Q6 + Q7 require observation or downstream phase to resolve.
 
 ## Changelog
 
@@ -556,3 +580,4 @@ Three of six decided now. Q1 + Q3 + Q6 require observation or downstream phase t
 |------|--------|--------|
 | 2026-05-17 | Jace + Claude (cloud session) | Initial spec drafted. User confirmed leans on 5 key decisions in chat (audit emission path, latency posture, Object Lock dev/prod parity, Phase 2A read-event scope, compliance reader IAM role). Spec consolidates AU1–AU4 requirements, the device.* catalog from §4, and the 1B-rev audit-shape log entries into a single audit destination + retrieval surface, while also softening ARCHITECTURE.md §13/§17 framing of "1.7 gates 2A" to reflect that the gate is discipline (no patient data through UI without proper audit), not a hard technical dep |
 | 2026-05-17 | Jace + Claude (cloud session, same day) | **Implementation drafted.** Added D11.5 (date-partitioned destination streams) after a cost-and-performance discussion surfaced the 5 MB/s PutLogEvents per-stream cap as the only realistic backpressure concern at Phase 2A volume. Two intentional divergences from the spec's initial "Files Changed" plan: (a) extended existing `_shared/observability.py:emit_audit` instead of creating a parallel `_shared/audit.py`; (b) inlined the subscription-filter loop in `audit-stack.ts` instead of creating a reusable `audit-subscription-filter.ts` construct. Both folded into the spec under "Architectural divergence" — see Files Changed table above. Implementation passes `tsc` clean and `cdk synth GoSteady-Dev-Audit` clean (~38 synthesized resources including 3 alarms, 7 subscription filters, 1 Firehose, 1 S3 bucket, 4 Lambdas incl. CDK helpers, 6 IAM roles + 5 policies). T1 pre-deploy gate (`{ $.audit IS TRUE }` filter pattern matches 1B-rev's `"audit": true` emissions) verified at source-code read; live `aws logs filter-log-events` check is the first acceptance step at deploy time. ARCHITECTURE.md + firmware-coordination doc updated in parallel spec-sync sweep |
+| 2026-05-17 | Jace + Claude (cloud session, same day) | **Deployed to dev** in 4 attempts. First 3 attempts hit issues only visible at live deploy (not in `cdk synth`): (1) phantom `CfnResource('ForwarderConcurrency')` block I left in by accident — removed; (2) `addToResourcePolicy` on imported `kms.Key.fromKeyArn` is a no-op (key is owned in another stack) — added CW Logs grant on AuditKey in `security-stack.ts` instead, scoped via encryption-context condition to the specific audit log group ARN; (3) IAM trust-policy stub validation — both `Principal: '*'` literal (serializes as `{"STAR":"*"}`) and `ArnPrincipal` of a non-existent role (IAM validates principal existence) failed. Settled on `AccountRootPrincipal` placeholder with documented caveat about admin-policy holders; runbook step still replaces this before any real audit data exists; (4) `ReservedConcurrentExecutions=5` rejected — dev account is on the new-account 10-concurrency floor, not the 1000 default, so any reservation leaves <10 unreserved which Lambda forbids. Override dropped entirely; forwarder shares the unreserved pool (fine at MVP volume). 4th attempt: CREATE_COMPLETE in 141 s. Smoke T2/T3/T4 pass end-to-end — synthetic activity publish → activity-processor audit-shape log → subscription filter → audit-forwarder → date-partitioned `audit-2026-05-17` stream in `gosteady-dev-audit` log group → Firehose → S3 at `audit/year=2026/month=05/day=17/` within ~70 s. **Two non-blocking issues surfaced** (added to ARCH §16 Open Questions and Q7+Q8 below): (a) S3 objects are double-gzipped + wrapped in a CW Logs envelope (`{messageType, logGroup, logEvents[]}` with the audit JSON as a string inside `logEvents[].message`); data IS recoverable but Athena will need a custom SerDe or Firehose Lambda transformer — Phase 1.7.1 candidate; (b) `schema_version` field is missing from emissions by the 4 existing 1B-rev Lambdas (they predate today's `observability.py` modification) — correct-by-design per L9 readers default to v1, will populate naturally on next processing-stack redeploy. Deploy-fix commit `54e0ddc` on `feature/infra-scaffold`; doc-sync follow-up in same session |
