@@ -1,9 +1,9 @@
-# Phase 2A — Device Lifecycle (operational subset)
+# Phase 2A-DL — Device Lifecycle (operational subset)
 
 ## Overview
-- **Phase**: 2A (Device Lifecycle subset of Portal API)
-- **Status**: Planned
-- **Branch**: feature/phase-2a-device-lifecycle (TBD)
+- **Phase**: 2A-DL (Device Lifecycle subset of Phase 2A)
+- **Status**: Planned (spec revised 2026-05-17)
+- **Branch**: feature/infra-scaffold (matched existing project pattern)
 - **Date Started**: TBD
 - **Date Completed**: TBD
 
@@ -17,8 +17,15 @@ state machine + invariants defined in [`ARCHITECTURE.md`](ARCHITECTURE.md) §4
 (Device Lifecycle subsection) and the locked-in requirements DL1–DL11.
 
 This is the first **operational** subset of Phase 2A. Other 2A subsets (patient
-roster, alert acknowledgement, profile/notification preferences) land in
-companion specs and share the same API Gateway and authorizer infrastructure.
+reads `2A-RD`, alert actions `2A-AA`, user management + household onboarding
+`2A-UM`, internal tools `2A-INT`) land in companion specs and share the same
+API Gateway, JWT authorizer, audit middleware, and tenant-enforcement helpers
+that come from [`phase-2a-foundation.md`](phase-2a-foundation.md) (`2A-0`).
+
+**Dependency on 2A-0 (foundation):** 2A-DL assumes the API Gateway HTTP API,
+WAF, JWT authorizer with both Portal-Customer and Portal-Internal audiences,
+error envelope, audit middleware, and tenant-enforcement helper are already
+deployed. `2A-0` must ship before this spec's implementation starts.
 
 ## Locked-In Requirements
 > Decisions finalized in this or prior phases that CANNOT change without
@@ -37,8 +44,11 @@ companion specs and share the same API Gateway and authorizer infrastructure.
 | L9 | Cross-facility = client_admin; cross-client = internal_admin | Architecture DL9 | Inventory/financial action; tighter authz than daily ops |
 | L10 | Only `decommissioned (lost)` is recoverable | Architecture DL10 | All other terminal states are intentional retirements |
 | L11 | Caregivers handle `lost`/`broken`; admins handle `retired`/`end_of_life` | Architecture DL11 | Operational vs asset-management split |
-| L12 | Customer tenancy boundary enforced by JWT `clientId` claim at API Gateway authorizer | Architecture T2 | Already established in 0A revision |
-| L13 | Every transition emits an audit event (10 event types) | Architecture §4, §10 | Compliance + forensics |
+| L12 | Customer tenancy boundary enforced via 2A-0's `enforce_tenancy(claims, target_client_id)` helper called inside every handler. Internal roles (`internal_*`) bypass | Architecture T2 + Phase 2A-0 L5 | The hard security boundary; centralized helper prevents per-handler drift |
+| L13 | Every transition emits an audit event via the 2A-0 `audit_middleware` decorator + `_shared/audit_catalog.py` constants | Architecture §4, §10 + Phase 1.7 (deployed 2026-05-17) | Decorator enforces consistency at infrastructure level; catalog constants catch typos at handler-write time |
+| L14 | Activation cmd publish is atomic with provision: if `iot:Publish` fails, the DDB writes (Device Registry status + DeviceAssignments row) are rolled back. API returns 500. Provision is idempotent so retry is safe | This spec — Open Question Q4 decision 2026-05-17 | Avoids "device shows provisioned in DB but never gets activated" zombie state. Retry-safe per the same `cmd_id` window (DL14a / 24h) |
+| L15 | Cross-facility / cross-client move is rejected (409) on devices in `active_monitoring` state. Caller must `end-assignment` first, then move | This spec — Open Question Q5 decision 2026-05-17 | Forces a deliberate two-step instead of hiding side effects (cascading end-assignment + ownership change) inside a single move operation |
+| L16 | "Stuck in `provisioned` >24 h post-activation-send" ops alarm ships as part of 2A-DL via a CloudWatch Logs metric filter on `device.activation_sent` events vs. `device.activated` events | This spec — Open Question Q6 decision 2026-05-17 | The firmware-ack codepath is the most fragile new surface in 2A-DL (multi-hop: API → IoT publish → device receive → device persist → device echo → cloud heartbeat handler). Shipping the alarm with the feature avoids running it blind |
 
 ## Assumptions
 > Beliefs that drive this design but haven't been fully validated.
@@ -72,14 +82,23 @@ companion specs and share the same API Gateway and authorizer infrastructure.
 | `POST` | `/devices/{serial}/move-client` | Transfer `owningClientId` (rare) | internal_admin only; elevated audit |
 | `POST` | `/admin/devices` (internal) | Manufacturer-side bulk creation of new Device Registry records (no owner) | internal_admin only |
 
-#### Activation message publish
+#### Activation message publish (atomic with provision per L14)
 
-After a successful provision, the handler synchronously publishes the `activate` command to `gs/{serial}/cmd` (per ARCHITECTURE.md §7 Downlink Command schema). Firmware echoes the `cmd_id` in its next heartbeat as `last_cmd_id`; cloud's heartbeat handler then sets `Device Registry.activated_at` and emits `device.activated` audit event.
+After a successful provision, the handler performs **three writes in order, with rollback on the publish failure**:
+
+1. Conditional `PutItem` on Device Registry: `status = provisioned`, set `owningClientId`/`owningFacilityId` if first-provision. Conditional check guards against the concurrent-provision race (two caregivers typing the same serial within milliseconds — the second loses the race and gets a 409 with a clear "device just provisioned by another user — refresh" message).
+2. `PutItem` on DeviceAssignments: new assignment row with `validFrom = now`, `validUntil = null`, hierarchy snapshot at write time.
+3. `iot:Publish` to `gs/{serial}/cmd` with `{cmd: "activate", cmd_id: <fresh UUID>, ts: <now>}`. Also writes the `cmd_id` to Device Registry's `outstandingActivationCmds` map for the 24h ack-matching window (per DL14a).
+
+If step 3 fails (IoT throttling, transient network error to AWS IoT):
+- **Reverse steps 1 and 2** — delete the DeviceAssignments row, revert Device Registry status to `ready_to_provision` and clear `owningClientId`/`owningFacilityId` if first-provision.
+- Return 500 to the caller with `code: "PROVISION_FAILED"` and a retry-safe response.
+- Emit `device.provision_rollback` audit event with the failure reason.
 
 Failure modes:
-- IoT publish fails → `provision` endpoint returns 500; caller can retry. Provision is idempotent so duplicate activation commands are safe (same `cmd_id` semantics).
-- Activation command lost in flight (cellular outage) → device stays in pre-activation sleep until next provision retry, which republishes a fresh `cmd_id`.
-- Firmware never echoes `last_cmd_id` (firmware bug) → cloud's `Device Registry.activated_at` stays NULL; Threshold Detector continues to suppress synthetic alerts (correct behavior — the device hasn't actually started monitoring). Operations alert on devices stuck in `provisioned` state >24 hr post-activation-send.
+- IoT publish fails → rollback (per L14); API returns 500; caller retries; idempotent because the rolled-back state is back to `ready_to_provision`.
+- Activation command lost in flight (cellular outage post-publish) → device stays in pre-activation sleep until next provision retry, which republishes a fresh `cmd_id`. The original `cmd_id` remains in `outstandingActivationCmds` for 24h so a late ack (cellular returns within window) still resolves correctly (DL14a).
+- Firmware never echoes `last_cmd_id` (firmware bug, or device permanently offline) → cloud's `Device Registry.activated_at` stays NULL; Threshold Detector continues to suppress synthetic alerts (correct behavior — the device hasn't actually started monitoring). **L16 ops alarm fires** at +24h post-`device.activation_sent`: CloudWatch Logs metric filter counts `device.activation_sent` events without a matching `device.activated` event in 24h.
 
 #### Discharge cascade hook
 - Listener on Patients table updates (DDB Streams or direct invocation from API handler that flips patient status)
@@ -91,8 +110,19 @@ Failure modes:
 - Validates: device is in `discontinued` state (or `provisioned` for unactivated devices being reset)
 - Transitions Device Registry status → `ready_to_provision`
 - Clears the active DeviceAssignment row's `validUntil` if not already set
+- Clears `Shadow.desired.activated_at` per DL14 invariant (Shadow `desired.activated_at` is non-null iff status ∈ {provisioned, active_monitoring})
 - Emits `device.reset_complete` audit event
-- Does NOT clear `owningClientId` / `owningFacilityId`
+- Does NOT clear `owningClientId` / `owningFacilityId` (ownership persists through reset — DL4)
+- Does NOT publish anything to the device (firmware initiated; no command needed)
+
+#### Force-reset side effects
+
+Force-reset (`POST /devices/{serial}/force-reset`, facility_admin+) is for stuck devices that fail to report `reset_complete` on the charger. Behavior:
+- Transitions Device Registry status `discontinued → ready_to_provision` regardless of any `reset_complete` ack from the device
+- Closes any open DeviceAssignment row's `validUntil` (defensive — usually already closed)
+- Clears `Shadow.desired.activated_at` per DL14 invariant
+- **Does NOT publish anything to the device.** If the device were responsive, a normal reset on charger would have worked. Publishing a "force-yourself-reset" command is a Phase 5A firmware capability that doesn't exist yet
+- Emits `device.force_reset` audit event with `reason: <free-text from caller>` (required) and `internal_access: true` if invoked by `internal_admin`
 
 #### Portal UI
 
@@ -113,8 +143,21 @@ Failure modes:
 - Search any device across all clients
 
 #### Audit hooks
-- All endpoints emit one `device.*` audit event per state-changing call (per the §10 audit log infra from Phase 1.7)
-- Internal-tier role calls additionally tagged `internal_access: true` at elevated severity
+- All endpoints automatically emit via the 2A-0 `audit_middleware` decorator wrapping each handler
+- Event names from `_shared/audit_catalog.py` constants (e.g., `AUDIT_DEVICE_CLAIMED`, `AUDIT_DEVICE_ASSIGNED`) — typos caught at handler-write time
+- `actor` derived from JWT claims (Pre-Token Lambda injects `userId`, `role`, `clientId`)
+- `subject` includes `{serialNumber, patientId, clientId, facilityId, censusId}` for state-changing events
+- `internal_access: true` + `severity: elevated` auto-stamped by audit-forwarder Lambda (Phase 1.7 D8) when `actor.role` starts with `internal_`
+- `schema_version: 1` field on every event (Phase 1.7 L9)
+- New events added to `_shared/audit_catalog.py` for 2A-DL: `device.provision_rollback` (L14 rollback path), `device.stuck_in_provisioned` (L16 alarm-emitted, not handler-emitted)
+
+#### Tenancy + scope enforcement (per L12 + 2A-0 helpers)
+
+Every handler calls `enforce_tenancy(claims, target_client_id)` from `_shared/api_authz.py` before any data-changing operation. For paths that don't carry `clientId` directly (e.g., `POST /devices/{serial}/provision`), the handler first does a Device Registry GetItem to discover `owningClientId`, then enforces.
+
+Scope enforcement for caregiver/facility_admin (facility/census claims) uses the helper `enforce_scope(claims, target_facility_id, target_census_id)` — also from 2A-0. Returns 403 `OUT_OF_SCOPE` if claims don't cover the target.
+
+Internal-tier roles (`internal_support` read-only, `internal_admin` read+write) bypass `enforce_tenancy` but every action still emits an audit event tagged at elevated severity (L8 of 1.7 spec).
 
 ### Out of Scope (Deferred)
 
@@ -122,10 +165,12 @@ Failure modes:
 - **Refurbishment workflow** for `decommissioned (broken)` devices — Phase 2B+ if/when broken volume justifies a repair pipeline
 - **Bulk device move UI** — admins move one at a time in MVP
 - **Device "swap" UX** (one click to swap dead device with new one) — derived from existing primitives in Phase 2B
-- **Patient management UI** (admit, discharge, transfer between censuses) — companion 2A spec
-- **Alert acknowledgement UI** — companion 2A spec
-- **Profile / notification preferences UI** — companion 2A spec
-- **Real-time device status push** to portal (live signal/battery view) — Phase 2B (Phase 2A polls)
+- **Patient management UI** (admit, discharge, transfer between censuses) — Phase 2A-UM (user management subset)
+- **Household onboarding flows** — Phase 2A-UM; the 3 patterns from ARCHITECTURE.md §4 (co-located / caregiver-initiated / walker-initiated) are UM concerns, not device-management concerns
+- **Patient read endpoints** (GET /patients/{id}, /activity, /alerts) — Phase 2A-RD
+- **Alert acknowledgement** (`PATCH /alerts/{patientId}/{timestamp}`) and **threshold overrides** — Phase 2A-AA
+- **Profile / notification preferences UI** — Phase 2A-UM
+- **Real-time device status push** to portal (live signal/battery view) — Phase 2B (2A polls)
 - **Cert-bound ownership** (firmware enforces "device cert must match claimed client") — Phase 5A firmware
 - **Device-level inventory cost tracking / depreciation** — out of product scope
 - **Force-wipe IoT command** (cloud → device "wipe yourself even if not on charger") — Phase 5A firmware
@@ -335,6 +380,13 @@ Response 200:
 | T23 | household_owner provisions device for their patient | API call | 200; same flow as caregiver but in dtc_* client | Pending |
 | T24 | internal_support attempts to provision (write action) | API call | 403 `INSUFFICIENT_PERMISSIONS` (read-only role) | Pending |
 | T25 | internal_admin reads any device across clients | API call | 200; cross-tenant read elevated audit | Pending |
+| T26 | Provision rollback on IoT publish failure (L14) | Temporarily revoke `iot:Publish` IAM grant; provision via API | 500 `PROVISION_FAILED`; Device Registry status reverted to `ready_to_provision`; no DeviceAssignments row left behind; `device.provision_rollback` audit event emitted | Pending |
+| T27 | Concurrent provision race (Open Q "Concurrent provision race") | Two API calls in <100ms with same serial | First: 200 success. Second: 409 with clear "device just provisioned by another user — refresh" message via the conditional PutItem rejection. | Pending |
+| T28 | Cross-facility move on `active_monitoring` device is rejected (L15) | API call by client_admin against an active-monitoring device | 409 `INVALID_TRANSITION` with details indicating end-assignment required first | Pending |
+| T29 | Cross-facility move on `discontinued` device succeeds (L15 inverse) | After T28 + end-assignment, re-attempt move | 200; `owningFacilityId` updated; state stays `discontinued`; `device.ownership_moved` audit | Pending |
+| T30 | "Stuck in provisioned >24h" ops alarm fires (L16) | Synthetic: provision a device, simulate no heartbeat for 24h+ (or shorten the alarm window in dev for testing) | Alarm transitions to ALARM; SNS message lands at ops topic | Pending — synthetic; full validation in M14.5 / M15 |
+| T31 | DL14 invariant maintained on force-reset | Run T12 (force-reset); inspect Shadow `desired.activated_at` | Field is null after force-reset (cleared per the L14 invariant) | Pending |
+| T32 | DL14 invariant maintained on patient discharge cascade | Trigger T14; inspect Shadow `desired.activated_at` for each device the cascade touches | Field is null after each cascade-driven end-assignment | Pending |
 
 ### Verification Commands
 
@@ -410,18 +462,27 @@ npx cdk deploy GoSteady-Dev-Api --context env=dev --require-approval never
 | D9 | API rate-limited at gateway level (not per-handler) | Per-handler rate limits | Simpler; tunable via CDK config. Re-evaluate if specific handlers get hammered. |
 | D10 | All write actions return the full updated device object | Return only what changed; return 204 No Content | Saves a follow-up GET round-trip from the portal, important for the assign-device flow's UX feedback. |
 | D11 | Custom error codes (`DEVICE_NOT_FOUND` etc.) in addition to HTTP status | HTTP status only | Lets the Flutter UI render specific user-facing messages without parsing free-text error.message. Codes also surface in audit logs. |
+| D12 | Provision is atomic with activation cmd publish — rollback on IoT failure (L14) | Best-effort (return 200 even if publish failed; eventual consistency); SQS-buffered publish (durable but adds 1-2s latency) | Rollback keeps the data model honest: if status is `provisioned`, the device WAS told to activate. Idempotent retry makes the failure mode recoverable. SQS-buffered would mean the data model can show "provisioned" while the cmd is still queued — confusing for ops. |
+| D13 | Cross-facility / cross-client move rejects `active_monitoring` devices (L15) | Auto-cascade end-assignment as side effect of move; allow move and let downstream handlers cope | Cascading inside a single move operation is surprising — caregivers in the destination facility would suddenly see a new device assigned to a patient they don't recognize. Explicit two-step makes the destination facility see the device as `discontinued + new owner`, which they then provision normally. Matches the discharge-cascade pattern (D3) of preferring explicit transitions |
+| D14 | "Stuck in provisioned >24h" alarm via CloudWatch Logs metric filter (L16) | EventBridge scheduled scan; per-device CloudWatch metric | Logs metric filter is dead-simple: count `device.activation_sent` events without a matching `device.activated` within 24h. No new Lambda, no DDB scan. Filter alarms via existing 1.6 alarm catalog pattern. EventBridge-based scan would be more flexible but adds a Lambda for a one-purpose job |
+| D15 | Reuse 2A-0's `audit_middleware` decorator rather than per-handler `emit_audit()` calls | Per-handler explicit calls with `emit_audit(event=AUDIT_DEVICE_CLAIMED, ...)` | Middleware enforces consistency (every handler audited, no drift). Per-handler is more flexible (different events per code path) but easier to forget. For 2A-DL where every endpoint corresponds 1:1 with a single event type, middleware is the right level. Per-handler `emit_audit()` is still available for non-standard cases (e.g., the rollback event in L14 needs explicit emission from inside the rollback branch) |
 
 ## Open Questions
 
-- [ ] **Concurrent provision race**: two caregivers type the same serial within milliseconds. The conditional PutItem on Device Registry status will reject the second; what's the user experience? Lean: clear error "device just provisioned by another user — refresh."
-- [ ] **Device assigned to discharged patient hangs around as `active_monitoring`** if discharge-cascade Lambda fails: do we need a periodic reconciliation job? Lean: yes, daily sweep in Phase 1C.
-- [ ] **Audit retention for high-frequency events** like `device.first_heartbeat`: 6 years feels excessive for non-PHI device events. Per-event-type retention policy? Defer to Phase 1.7.
-- [ ] **D2C household_owner trying to provision a device that's already owned by a facility client** (e.g., they bought it on eBay): clear error message? Refer to support? Lean: error explaining device is enterprise-owned; support can transfer if legitimate.
-- [ ] **Force-reset for devices that have NEVER successfully transitioned to active_monitoring** (provisioned but never heard from): should this be a different transition or the same `force_reset`? Lean: same — it's still admin-overriding a stuck state.
-- [ ] **Patient transferred between censuses while device is assigned**: device assignment carries forward (caregiver in new census now sees it). Audit event for the patient transfer covers it; no separate device event. Confirm in Phase 0B revision schema.
-- [ ] **What's the UX for "found a lost device that was already replaced"?** Now there are 2 active devices in the system for the same patient. Probably: discontinue the old recovered one, keep the new one. Confirm in pilot.
+- [x] **Concurrent provision race**: ~~two caregivers type the same serial within milliseconds. The conditional PutItem on Device Registry status will reject the second; what's the user experience?~~ **Resolved 2026-05-17: T27 covers it.** Conditional PutItem on `status = ready_to_provision` rejects the second caller; handler catches `ConditionalCheckFailedException` and returns 409 with error code `DEVICE_UNAVAILABLE` and message "device just provisioned by another user — refresh." UI surfaces the message verbatim.
+- [x] **Provision-time IoT publish failure handling**: ~~no spec~~ **Resolved 2026-05-17 in L14 + D12.** Atomic rollback — undo DDB writes if publish fails, return 500 `PROVISION_FAILED`. Retry is idempotent because the rolled-back state is back to `ready_to_provision`. T26 covers it.
+- [x] **Cross-facility / cross-client move on `active_monitoring` device**: ~~spec was silent~~ **Resolved 2026-05-17 in L15 + D13.** Reject with 409 + clear "end assignment first" message. T28/T29 cover both branches.
+- [x] **"Stuck in provisioned >24h" ops alarm**: ~~mentioned but not specced~~ **Resolved 2026-05-17 in L16 + D14.** Ships as CloudWatch Logs metric filter in 2A-DL, not deferred. T30 covers it (synthetic; full validation in M14.5 / M15).
+- [x] **Force-reset for devices that have NEVER successfully transitioned to active_monitoring**: ~~should this be a different transition?~~ **Resolved 2026-05-17.** Same `force_reset` — it's still admin-overriding a stuck state. Force-reset spec covers both `discontinued → ready_to_provision` and `provisioned → ready_to_provision` (the latter when a device was provisioned but never heard from).
+- [ ] **Device assigned to discharged patient hangs around as `active_monitoring`** if discharge-cascade Lambda fails: do we need a periodic reconciliation job? Lean: yes, daily sweep in Phase 1C. Defer.
+- [ ] **Audit retention for high-frequency events** like `device.first_heartbeat`: 6 years feels excessive for non-PHI device events. Per-event-type retention policy? Defer to Phase 1.7.1.
+- [ ] **D2C household_owner trying to provision a device that's already owned by a facility client** (e.g., they bought it on eBay): clear error message? Refer to support? Lean: error explaining device is enterprise-owned; support can transfer if legitimate. Defer to 2A-UM (where household onboarding lives).
+- [ ] **Patient transferred between censuses while device is assigned**: device assignment carries forward (caregiver in new census now sees it). Audit event for the patient transfer covers it; no separate device event. Confirm in 2A-UM when patient management ships.
+- [ ] **What's the UX for "found a lost device that was already replaced"?** Now there are 2 active devices in the system for the same patient. Probably: discontinue the old recovered one, keep the new one. Confirm in pilot — not a code question until then.
+- [ ] **Subscription-filter list maintenance** (per 2A-0 Q5): an aspect-based approach (any Lambda tagged `audit:capture=true` automatically gets a filter) would prevent future "forgot to add the log group" gaps. Worth specing as part of 2A-DL or splitting into a small follow-up. Lean: defer the aspect to 2A-RD when we add the 4th set of Lambdas — until then, the explicit list is manageable.
 
 ## Changelog
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-04-17 | Jace + Claude | Initial spec |
+| 2026-05-17 | Jace + Claude (cloud session) | **Spec revision** to close 10 gaps identified during the 2A subset planning review (post-1.7-deploy). Added L14 (atomic provision-rollback on IoT publish failure), L15 (cross-facility-move reject on `active_monitoring`), L16 (stuck-in-provisioned alarm ships with 2A-DL). Updated activation-message-publish section to describe the 3-step write + rollback path. Updated firmware-driven reset handler + new force-reset side-effects section to maintain the DL14 Shadow `desired.activated_at` invariant on every state-changing transition. Replaced loose "per §10 audit log infra" reference with explicit ties to the deployed Phase 1.7 helpers (`_shared/observability.py:emit_audit`, `_shared/audit_catalog.py` constants, `audit_middleware` decorator from 2A-0). Added tenancy + scope enforcement subsection naming the 2A-0 helpers explicitly. Added explicit 2A-0 dependency at the top. Split deferred items into the right 2A subsets (2A-RD/AA/UM/INT). Added D12–D15 to the Decisions Log capturing the new locked-ins. Added T26–T32 covering rollback / concurrent-race / move-rejection / alarm / Shadow invariant. Resolved 5 of the original 7 Open Questions with cross-references to where they're now answered |

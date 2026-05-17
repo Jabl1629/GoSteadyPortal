@@ -1252,22 +1252,25 @@ handler log group  ──(subscription filter `{ $.audit IS TRUE }`)──►
 
 ### Phase 2: Data Out (cloud → portal)
 
-#### Phase 2A — Portal API 🔲
+#### Phase 2A — Portal API 🟡 (split into subsets)
 
-- API Gateway HTTP API with WAF (rate limit, geo, SQLi/XSS rules)
-- Cognito JWT authorizer extracting `clientId`, `role`, `facilities`, `censuses` claims
-- **Tenant enforcement:** every handler validates path/body `clientId` matches token `clientId`; reject with 403 otherwise
-- Request validation at gateway (JSON Schema)
-- Lambda handlers for `/api/v1/*`:
-  - `GET /api/v1/patients/{patientId}` — patient detail
-  - `GET /api/v1/patients/{patientId}/activity?range=24h|7d|30d|6m`
-  - `GET /api/v1/patients/{patientId}/alerts`
-  - `GET /api/v1/me/patients` — patients in caller's scope
-  - `POST /api/v1/devices/{serial}/assignments` — assign device to patient
-  - `PATCH /api/v1/alerts/{patientId}/{timestamp}` — acknowledge alert
-  - `GET /api/v1/facilities/{facilityId}/censuses/{censusId}/patients` — census roster
-- All mutations emit audit events
-- Per-walker threshold overrides (hooks into Threshold Detector)
+Phase 2A is the broad Portal API surface. Split 2026-05-17 into six subsets that ship independently on a shared foundation:
+
+| Subset | Status | What it ships |
+|---|---|---|
+| **2A-0** Foundation | 🔲 Spec drafted ([`phase-2a-foundation.md`](phase-2a-foundation.md)) | API Gateway HTTP API + WAF + Cognito JWT authorizer + Lambda authorizer for custom-claim extraction + shared error envelope + `audit_middleware` wrapping Phase 1.7's `emit_audit()` + tenant-enforcement helper + request validation + CORS + access logs + alarms. Plus one stub endpoint `GET /api/v1/me` for end-to-end pipeline smoke. Pure plumbing — no business endpoints |
+| **2A-DL** Device Lifecycle | 🔲 Spec drafted ([`phase-2a-device-lifecycle.md`](phase-2a-device-lifecycle.md), revised 2026-05-17) | 10 endpoints driving the device state machine: provision / end-assignment / decommission / recover / force-reset / move-facility / move-client / GET device / GET patient devices / admin bulk-create. `device-api` + `discharge-cascade` + `device-shadow-handler` Lambdas. Closes firmware's `reported.activated_at` Shadow-ack loop |
+| **2A-RD** Patient Reads | 🔲 Planned (no spec) | `GET /patients/{id}`, `GET /patients/{id}/activity?range=`, `GET /patients/{id}/alerts`, `GET /me/patients`, `GET /facilities/{f}/censuses/{c}/patients` (census roster). What makes the Flutter dashboard render real data instead of mocks |
+| **2A-AA** Alert Actions | 🔲 Planned (no spec) | `PATCH /alerts/{patientId}/{timestamp}` (acknowledge), per-patient threshold overrides (Threshold Detector picks them up via GetItem) |
+| **2A-UM** User Management | 🔲 Planned (no spec) | User creation, role assignment, facility/census scope management, family_viewer invitations, household onboarding (3 patterns from §4). Biggest UX surface and biggest unknown |
+| **2A-INT** Internal Tools | 🔲 Planned (no spec) | Separate Flutter build flag + cross-tenant read endpoints internal roles use; audit-reader integration |
+
+**Ship order:** 2A-0 first (everything depends on it). 2A-DL second (closes the firmware ack loop). 2A-RD, 2A-AA, 2A-UM, 2A-INT then parallelizable.
+
+**Cross-cutting (from Phase 2A umbrella):**
+- All mutations emit audit events via the 2A-0 `audit_middleware` decorator
+- Tenant enforcement: every handler validates path/body `clientId` matches token's `custom:clientId` via 2A-0's `enforce_tenancy()` helper; internal roles bypass
+- Per-walker threshold overrides hook into Threshold Detector (Phase 2A-AA)
 
 #### Phase 2B — Portal Integration 🔲
 
@@ -1604,8 +1607,13 @@ Path to portal-renders-real-data:
 | 1.5 | Security Foundation | [`phase-1.5-security.md`](phase-1.5-security.md) | 🟡 Partially deployed — Security stack live; IdentityKey CMK consumed by 0A-rev + 0B-rev; FirmwareKey CMK consumption scoped into 1A-rev; Org bootstrap + IAM audits still pending |
 | 1.6 | Observability | [`phase-1.6-observability.md`](phase-1.6-observability.md) | ✅ Deployed (2026-04-30; +1 alarm follow-up deployed 2026-05-17) — 2 dashboards + 30 alarms + log-retention aspect; cost anomaly gated pending Cost Explorer console opt-in |
 | 1.7 | Audit Logging | [`phase-1.7-audit.md`](phase-1.7-audit.md) | ✅ Deployed (dev) 2026-05-17 — 4 deploy-time fixes (commit `54e0ddc`), smoke T2/T3/T4 pass; two known follow-ups (S3 double-gzip+envelope, schema_version backfill) deferred |
-| 2A | Portal API | — | 🔲 Planned |
-| 2A-dl | Device Lifecycle (subset of 2A) | [`phase-2a-device-lifecycle.md`](phase-2a-device-lifecycle.md) | 🔲 Planned |
+| 2A | Portal API (umbrella) | — | 🟡 In progress — split into subsets 2A-0/DL/RD/AA/UM/INT |
+| 2A-0 | Portal API Foundation (API GW + WAF + JWT authorizer + audit middleware + error envelope + tenant enforcement) | [`phase-2a-foundation.md`](phase-2a-foundation.md) | 🔲 Spec drafted 2026-05-17; ships first |
+| 2A-DL | Device Lifecycle (subset of 2A) | [`phase-2a-device-lifecycle.md`](phase-2a-device-lifecycle.md) | 🔲 Spec drafted 2026-04-17; revised 2026-05-17 — closes 10 gaps + locks L14/L15/L16; depends on 2A-0 |
+| 2A-RD | Patient Read Endpoints (planned) | — | 🔲 Planned — depends on 2A-0 |
+| 2A-AA | Alert Actions + Threshold Overrides (planned) | — | 🔲 Planned — depends on 2A-0 + 2A-RD for UX |
+| 2A-UM | User Management + Household Onboarding (planned) | — | 🔲 Planned — depends on 2A-0; biggest UX surface |
+| 2A-INT | Internal Tools (planned) | — | 🔲 Planned — depends on 2A-0; lowest priority |
 | 2B | Portal Integration | — | 🔲 Planned |
 | 2C | Notifications | — | 🔲 Planned |
 | 3A | Portal Hosting | — | 🔲 Planned |
