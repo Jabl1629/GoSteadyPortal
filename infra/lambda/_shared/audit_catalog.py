@@ -30,6 +30,9 @@ AUDIT_DEVICE_DECOMMISSIONED = "device.decommissioned"
 AUDIT_DEVICE_RECOVERED = "device.recovered"
 AUDIT_DEVICE_OWNERSHIP_MOVED = "device.ownership_moved"
 AUDIT_DEVICE_SNIPPET_UPLOADED = "device.snippet_uploaded"
+# Phase 2A-DL additions (2026-05-17):
+AUDIT_DEVICE_PROVISION_ROLLBACK = "device.provision_rollback"  # L14 — provision rolled back on IoT publish failure
+AUDIT_DEVICE_STUCK_IN_PROVISIONED = "device.stuck_in_provisioned"  # L16 — alarm-emitted, not handler-emitted
 
 # ── Patient / activity / alert (Phase 1B-rev + Phase 2A) ──────────────
 AUDIT_PATIENT_ACTIVITY_CREATE = "patient.activity.create"
@@ -75,6 +78,8 @@ KNOWN_AUDIT_EVENTS = frozenset(
         AUDIT_DEVICE_RECOVERED,
         AUDIT_DEVICE_OWNERSHIP_MOVED,
         AUDIT_DEVICE_SNIPPET_UPLOADED,
+        AUDIT_DEVICE_PROVISION_ROLLBACK,
+        AUDIT_DEVICE_STUCK_IN_PROVISIONED,
         AUDIT_PATIENT_ACTIVITY_CREATE,
         AUDIT_PATIENT_ACTIVITY_READ,
         AUDIT_PATIENT_DETAIL_READ,

@@ -110,10 +110,12 @@ const api = new ApiStack(app, `${prefix}-Api`, {
   config,
   authStack: auth,
   dataStack: data,
+  securityStack: security,
   description: `GoSteady API — ${config.envName}`,
 });
 api.addDependency(auth);
 api.addDependency(data);
+api.addDependency(security); // Phase 2A-DL: device-api + discharge-cascade need IdentityKey + AuditKey CMK grants
 
 const hosting = new HostingStack(app, `${prefix}-Hosting`, {
   env,

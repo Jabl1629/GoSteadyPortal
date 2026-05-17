@@ -4,7 +4,11 @@ import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as iot from 'aws-cdk-lib/aws-iot';
+import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import { DynamoEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as path from 'path';
@@ -12,12 +16,14 @@ import { Construct } from 'constructs';
 import { GoSteadyEnvConfig } from '../config.js';
 import { AuthStack } from './auth-stack.js';
 import { DataStack } from './data-stack.js';
+import { SecurityStack } from './security-stack.js';
 import { ProcessingLambda } from '../constructs/processing-lambda.js';
 
 export interface ApiStackProps extends cdk.StackProps {
   readonly config: GoSteadyEnvConfig;
   readonly authStack: AuthStack;
   readonly dataStack: DataStack;
+  readonly securityStack: SecurityStack;
 }
 
 /**
@@ -55,7 +61,7 @@ export class ApiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
 
-    const { config, authStack } = props;
+    const { config, authStack, dataStack, securityStack } = props;
     const env = config.prefix;
 
     // ── Cross-stack imports ────────────────────────────────────────
@@ -254,7 +260,262 @@ export class ApiStack extends cdk.Stack {
     });
     stubErrorsAlarm.addAlarmAction(snsAction);
 
-    // ── Outputs ────────────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════════
+    // Phase 2A-DL — Device Lifecycle
+    // ════════════════════════════════════════════════════════════════
+    //
+    // Three Lambdas + 10 API routes + DDB Stream + IoT Topic Rule +
+    // L16 stuck-in-provisioned alarm. See phase-2a-device-lifecycle.md
+    // §Architecture for the full picture.
+    //
+    // Lambda placement: all 3 in api-stack for 2A-DL coherence
+    // (device-api is the HTTP-API consumer, discharge-cascade reads
+    // the Patients DDB Stream, device-shadow-handler is IoT-Rule-
+    // triggered). The Patients table stream is owned by data-stack
+    // and exposed as a public property; the IoT shadow topic is
+    // public (firmware writes to it), so this api-stack can attach a
+    // new IoT Topic Rule directly.
+    //
+    // The existing threshold-detector rule (1B-rev) subscribes to the
+    // same `$aws/things/+/shadow/update/documents` topic — both rules
+    // fire on every shadow update and each Lambda filters for its own
+    // concern (threshold-detector → threshold breaches;
+    // device-shadow-handler → reset_complete transitions).
+
+    // Cross-stack imports (security-stack public properties)
+    const identityKey = securityStack.identityKey;
+    const auditKey = securityStack.auditKey;
+
+    // ── device-api Lambda (10 routes) ──────────────────────────────
+    const deviceApi = new ProcessingLambda(this, 'DeviceApi', {
+      config,
+      functionName: `gosteady-${env}-device-api`,
+      handlerDir: path.join(__dirname, '..', '..', 'lambda', 'device-api'),
+      description: 'Phase 2A-DL device-lifecycle handler (10 routes; state machine + audit)',
+      memoryMb: 256,
+      timeoutSeconds: 15,
+      powertoolsLayer,
+      tracingActive: true,
+      environment: {
+        ENVIRONMENT: env,
+        DEVICES_TABLE: dataStack.deviceTable.tableName,
+        ASSIGNMENTS_TABLE: dataStack.deviceAssignmentsTable.tableName,
+        PATIENTS_TABLE: dataStack.patientsTable.tableName,
+        ACTIVATION_ACK_WINDOW_HOURS: String(config.activationAckWindowHours),
+      },
+    });
+    dataStack.deviceTable.grantReadWriteData(deviceApi.function);
+    dataStack.deviceAssignmentsTable.grantReadWriteData(deviceApi.function);
+    dataStack.patientsTable.grantReadData(deviceApi.function);
+    identityKey.grantEncryptDecrypt(deviceApi.function);
+    auditKey.grantEncryptDecrypt(deviceApi.function);
+    // IoT publish for activate cmd + Shadow update for desired.activated_at
+    deviceApi.function.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:Publish'],
+      resources: [
+        `arn:aws:iot:${this.region}:${this.account}:topic/gs/*/cmd`,
+      ],
+    }));
+    deviceApi.function.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:UpdateThingShadow', 'iot:GetThingShadow'],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
+    }));
+
+    // 10 routes on the existing HTTP API
+    const deviceApiIntegration = new HttpLambdaIntegration('DeviceApiIntegration', deviceApi.function);
+    const deviceRoutes: Array<[apigwv2.HttpMethod, string]> = [
+      [apigwv2.HttpMethod.GET, '/api/v1/devices/{serial}'],
+      [apigwv2.HttpMethod.GET, '/api/v1/patients/{patientId}/devices'],
+      [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/provision'],
+      [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/end-assignment'],
+      [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/decommission'],
+      [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/recover'],
+      [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/force-reset'],
+      [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/move-facility'],
+      [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/move-client'],
+      [apigwv2.HttpMethod.POST, '/api/v1/admin/devices'],
+    ];
+    for (const [method, p] of deviceRoutes) {
+      this.httpApi.addRoutes({
+        path: p,
+        methods: [method],
+        integration: deviceApiIntegration,
+        authorizer: userPoolAuthorizer,
+      });
+    }
+
+    // ── discharge-cascade Lambda (DDB Stream on Patients) ──────────
+    const dischargeCascade = new ProcessingLambda(this, 'DischargeCascade', {
+      config,
+      functionName: `gosteady-${env}-discharge-cascade`,
+      handlerDir: path.join(__dirname, '..', '..', 'lambda', 'discharge-cascade'),
+      description: 'Phase 2A-DL — Patients.status=discharged → end all active DeviceAssignments',
+      memoryMb: 256,
+      timeoutSeconds: 30,
+      powertoolsLayer,
+      tracingActive: true,
+      environment: {
+        ENVIRONMENT: env,
+        DEVICES_TABLE: dataStack.deviceTable.tableName,
+        ASSIGNMENTS_TABLE: dataStack.deviceAssignmentsTable.tableName,
+      },
+    });
+    dataStack.deviceTable.grantReadWriteData(dischargeCascade.function);
+    dataStack.deviceAssignmentsTable.grantReadWriteData(dischargeCascade.function);
+    identityKey.grantEncryptDecrypt(dischargeCascade.function);
+    auditKey.grantEncryptDecrypt(dischargeCascade.function);
+    dischargeCascade.function.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:UpdateThingShadow'],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
+    }));
+
+    // Attach DDB Stream event source (NEW_AND_OLD_IMAGES from 0B-rev)
+    dischargeCascade.function.addEventSource(new DynamoEventSource(dataStack.patientsTable, {
+      startingPosition: lambda.StartingPosition.LATEST,
+      batchSize: 10,
+      retryAttempts: 3,
+      // Filter: only process MODIFY/INSERT where new status=discharged.
+      // DDB Streams filter syntax (AWS doc'd JSON-pattern):
+      filters: [
+        lambda.FilterCriteria.filter({
+          eventName: lambda.FilterRule.isEqual('MODIFY'),
+          dynamodb: { NewImage: { status: { S: ['discharged'] } } },
+        }),
+        lambda.FilterCriteria.filter({
+          eventName: lambda.FilterRule.isEqual('INSERT'),
+          dynamodb: { NewImage: { status: { S: ['discharged'] } } },
+        }),
+      ],
+    }));
+
+    // ── device-shadow-handler Lambda (IoT Topic Rule) ──────────────
+    const shadowHandler = new ProcessingLambda(this, 'DeviceShadowHandler', {
+      config,
+      functionName: `gosteady-${env}-device-shadow-handler`,
+      handlerDir: path.join(__dirname, '..', '..', 'lambda', 'device-shadow-handler'),
+      description: 'Phase 2A-DL — handles reported.reset_complete shadow updates → ready_to_provision',
+      memoryMb: 256,
+      timeoutSeconds: 15,
+      powertoolsLayer,
+      tracingActive: true,
+      environment: {
+        ENVIRONMENT: env,
+        DEVICES_TABLE: dataStack.deviceTable.tableName,
+        ASSIGNMENTS_TABLE: dataStack.deviceAssignmentsTable.tableName,
+      },
+    });
+    dataStack.deviceTable.grantReadWriteData(shadowHandler.function);
+    dataStack.deviceAssignmentsTable.grantReadWriteData(shadowHandler.function);
+    auditKey.grantEncryptDecrypt(shadowHandler.function);
+    shadowHandler.function.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:UpdateThingShadow'],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
+    }));
+
+    // New IoT Topic Rule for reset_complete. Same source topic as the
+    // existing threshold-detector rule (1B-rev); both fire on every
+    // shadow update. Each Lambda filters for its concern.
+    const shadowRule = new iot.CfnTopicRule(this, 'ShadowResetCompleteRule', {
+      ruleName: `gosteady_${env}_shadow_reset_complete`,
+      topicRulePayload: {
+        description: 'Routes shadow update/documents → device-shadow-handler (resets discontinued → ready)',
+        sql:
+          'SELECT current.state.reported AS reported, ' +
+          'previous.state.reported AS previous_reported, ' +
+          'topic(3) AS thingName, ' +
+          'timestamp() AS rule_ts_ms ' +
+          "FROM '$aws/things/+/shadow/update/documents'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        actions: [{ lambda: { functionArn: shadowHandler.function.functionArn } }],
+      },
+    });
+    shadowHandler.function.addPermission('AllowIotInvoke', {
+      principal: new iam.ServicePrincipal('iot.amazonaws.com'),
+      action: 'lambda:InvokeFunction',
+      sourceArn: shadowRule.attrArn,
+    });
+
+    // ── L16 alarm: stuck in provisioned >24h ───────────────────────
+    // CloudWatch Logs metric filter on the device-api log group counts
+    // `device.activation_sent` events. A separate filter counts
+    // `device.activated` events. Math alarm: filter1 - filter2 > 0 for
+    // >24h would indicate an activation that never got acked. For MVP
+    // simplicity we just alarm on `device.activation_sent` count > 0
+    // with `device.activated` count = 0 in the same 24h window via
+    // metric-math, and trust the operational follow-up to investigate.
+    // (Per-device tracking with metric dimensioning is overkill at MVP
+    // volume — at first-prod-customer scale, we'll move to a real
+    // per-device metric.)
+    const activationSentMetric = deviceApi.function.logGroup.addMetricFilter('ActivationSentFilter', {
+      filterPattern: logs.FilterPattern.literal('{ $.event = "device.activation_sent" }'),
+      metricNamespace: `GoSteady/Audit/${env}`,
+      metricName: 'DeviceActivationSent',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    // device.activated is emitted by the heartbeat-processor (1B-rev), not
+    // device-api. Read it from that log group via a parallel filter.
+    const heartbeatLogGroup = logs.LogGroup.fromLogGroupName(
+      this, 'HeartbeatProcessorLogRef',
+      `/aws/lambda/gosteady-${env}-heartbeat-processor`,
+    );
+    const activationAckMetric = heartbeatLogGroup.addMetricFilter('ActivationAckFilter', {
+      filterPattern: logs.FilterPattern.literal('{ $.event = "device.activated" }'),
+      metricNamespace: `GoSteady/Audit/${env}`,
+      metricName: 'DeviceActivated',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    const sentMetric = activationSentMetric.metric({
+      period: cdk.Duration.hours(24),
+      statistic: 'Sum',
+    });
+    const ackedMetric = activationAckMetric.metric({
+      period: cdk.Duration.hours(24),
+      statistic: 'Sum',
+    });
+    const stuckExpression = new cloudwatch.MathExpression({
+      expression: 'sent - acked',
+      usingMetrics: { sent: sentMetric, acked: ackedMetric },
+      period: cdk.Duration.hours(24),
+      label: 'unacked_activations_24h',
+    });
+
+    const stuckAlarm = new cloudwatch.Alarm(this, 'DeviceStuckInProvisioned', {
+      alarmName: `gosteady-${env}-device-stuck-in-provisioned`,
+      alarmDescription:
+        'L16: device.activation_sent count exceeds device.activated count over 24h — at least ' +
+        'one provisioned device has not echoed last_cmd_id in its heartbeat. Investigate via ' +
+        'Device Registry rows in `provisioned` state with old outstandingActivationCmds entries.',
+      metric: stuckExpression,
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    stuckAlarm.addAlarmAction(snsAction);
+
+    // ── 2A-DL outputs ──────────────────────────────────────────────
+    new cdk.CfnOutput(this, 'DeviceApiName', {
+      value: deviceApi.function.functionName,
+      exportName: `${env}-DeviceApiName`,
+    });
+    new cdk.CfnOutput(this, 'DischargeCascadeName', {
+      value: dischargeCascade.function.functionName,
+      exportName: `${env}-DischargeCascadeName`,
+    });
+    new cdk.CfnOutput(this, 'DeviceShadowHandlerName', {
+      value: shadowHandler.function.functionName,
+      exportName: `${env}-DeviceShadowHandlerName`,
+    });
+
+    // ── Outputs (existing 2A-0) ───────────────────────────────────
     new cdk.CfnOutput(this, 'HttpApiUrl', {
       value: this.httpApi.apiEndpoint,
       exportName: `${env}-PortalApiUrl`,

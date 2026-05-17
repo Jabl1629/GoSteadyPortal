@@ -156,6 +156,13 @@ export class AuditStack extends cdk.Stack {
       // audit events. Bundled into this list per spec D9 to avoid a
       // between-revisions silent-swallow gap (Migration Pattern 18.8).
       `gosteady-${env}-api-stub`,
+      // Phase 2A-DL (2026-05-17): three new Lambdas emit device.* audit
+      // events (provision/end-assignment/decommission/recover/force-
+      // reset/move + discharge cascade + reset_complete). Same gap-
+      // avoidance discipline — bundled with the 2A-DL deploy.
+      `gosteady-${env}-device-api`,
+      `gosteady-${env}-discharge-cascade`,
+      `gosteady-${env}-device-shadow-handler`,
     ];
 
     const forwarderDestination = new logsDestinations.LambdaDestination(forwarder.function);
