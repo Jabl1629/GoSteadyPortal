@@ -5665,3 +5665,251 @@ aws logs filter-log-events --region us-east-1 \
 lifecycle deployed dev). First cloud-side change since §C12 requiring
 real firmware contract; physical-device test in §C17.6. After this:
 cloud queue is 2A-RD, 1C-slim, or 2A-UM (any order).*
+
+
+---
+---
+
+# Joint cloud + firmware update — 2026-05-17 (Phase 2A-DL physical-device bench test on GS9999999998; first-roundtrip firmware-truncation bug found + fixed + validated end-to-end; two 1B-rev cloud-side gaps surfaced)
+
+> **From:** GoSteady cloud + firmware teams (single Claude session, with
+> Jace at the bench).
+>
+> **TL;DR:** Executed the §C17.6 physical-device bench-test runbook on
+> `GS9999999998`. Provision API → activate cmd publish → device receive
+> all worked. **Found a fixed-size-buffer truncation bug in firmware
+> `gs_cloud.c`** (specifically, both `s_last_cmd_id[40]` and
+> `gosteady_activity.firmware_version[16]`) that silently dropped
+> trailing chars in the heartbeat `last_cmd_id` echo and activity
+> `firmware_version` field — surfaced at the first real cloud→device→
+> cloud roundtrip via the new 2A-DL API. Firmware fix committed +
+> reflashed + bench-validated end-to-end (gosteady-firmware commit
+> [`4bcc6d3`](https://github.com/Jabl1629/gosteady-firmware/commit/4bcc6d3)).
+> Activity uplinks now map cleanly to the bench patient (no more
+> `unmapped_serial` drops). **Two cloud-side gaps in Phase 1B-rev
+> heartbeat-processor surfaced** but are separate from 2A-DL —
+> documented in §C18.6 as follow-up.
+
+---
+
+## C18.1 Bench-test sequence — what happened
+
+Following §C17.6's runbook, on the bench unit `GS9999999998` (charging
+via JLink-attached USB on the laptop):
+
+| Time (UTC) | Event |
+|---|---|
+| 21:26:29 | Cloud-side: `POST /api/v1/devices/GS9999999998/provision` → 200 with cmd_id `act_f60782db-9a38-43f1-b657-d502be65c432` |
+| 21:26:30 | Firmware-side: `gs_cloud: activate cmd received: cmd_id=act_f60782db-...432` (FULL 40 chars in this log line) |
+| 21:26:31 | Firmware-side: `gs_activation: activation applied: ... cmd_id=act_f60782db-...432 (persisted to /lfs/activation.bin)` (FULL) |
+| 21:26:31 | Firmware-side: `gs_cloud: last_cmd_id updated to 'act_f60782db-...43'` ← **TRUNCATED — trailing 2 lost** |
+| 21:26:31 | Firmware-side: `wrote reported.activated_at=2026-05-17T21:26:29Z to Shadow` |
+| 21:34:42 → 21:35:58 | User shook the device → motion-wake → session captured (16 steps, 18.9 ft) |
+| 21:36:06 | Cloud activity-processor: post-provision activity uplink **landed cleanly** with full patient mapping (no more `unmapped_serial` — pre-provision uplinks had been dropped since manual bringup left no DeviceAssignments row) |
+| 21:36:06 | Activity row in DDB had `firmwareVersion: "0.10.0-at-timeo"` ← **TRUNCATED — trailing "ut" lost** |
+| 21:57:34 | Firmware natural heartbeat: `"last_cmd_id":"act_f60782db-...43"` (truncated) |
+| 21:57:41 | Cloud heartbeat-processor: `WARNING activation_ack_no_match` — exact-match against outstandingActivationCmds (keyed by full `act_f60782db-...432`) failed because firmware echoed the truncated value (`act_f60782db-...43`). `device.activated` NOT emitted, status stayed `provisioned` |
+
+Two distinct truncation bugs revealed simultaneously — same class (fixed-
+size string buffer too small for the actual payload format), different
+buffers in firmware `gs_cloud.c`.
+
+---
+
+## C18.2 Truncation root causes (firmware-side)
+
+| # | File:Line | Buffer | Was | Needed | Impact |
+|---|---|---|---|---|---|
+| 1 | `src/cloud.c:149` | `static char s_last_cmd_id[40]` | 40 bytes | 41 bytes (`act_<uuid>` = 40 chars + null) | **Correctness** — heartbeat ack matcher fails because echoed value missing the final char |
+| 2 | `src/cloud.h:60` | `char firmware_version[16]` (in `gosteady_activity`) | 16 bytes | 18 bytes (`0.10.0-at-timeout` = 17 chars + null) | **Cosmetic** — activity-row `firmwareVersion` field truncated in DDB; no behavioral impact |
+
+Both buffers were sized exactly to the previous format and silently
+truncated when the format grew. The comment at `cloud.c:149` even said
+`/* "act_<uuid>" plausibly fits in 40 */` — wrong; sizeof()-1 in the
+strncpy at line 1018 leaves only 39 char slots.
+
+**Why this surfaced now and not earlier:** Previous bench testing did
+manual cloud-side `Device Registry.activated_at` writes (no actual cmd_id
+roundtrip through the API). This was the FIRST real end-to-end roundtrip
+through the new 2A-DL provision API.
+
+**Note on `src/session.h:130`** — also has `char firmware_version[16]`
+for the session file `.dat` header. **Not fixed** in this round because
+it's a wire-format change (would shift subsequent struct field offsets
+and break existing `.dat` parsers in algo/tools). Filed as separate
+follow-up.
+
+---
+
+## C18.3 Firmware fix + validation
+
+Firmware commit
+[`4bcc6d3`](https://github.com/Jabl1629/gosteady-firmware/commit/4bcc6d3)
+on `gosteady-firmware/main`:
+
+- `src/cloud.c:149` — `s_last_cmd_id[40]` → `[48]` (7-byte headroom)
+- `src/cloud.h:60` — `firmware_version[16]` → `[32]` (14-byte headroom)
+- `src/cloud.c:81` — stale comment `last_cmd_id (≤32)` → `(≤47)`
+- Inline comments at both sites reference this incident
+
+Build: `west build -d build_cloud_gs98 -- -DCONFIG_AWS_IOT_CLIENT_ID_STATIC=\"GS9999999998\"` clean (FLASH 27/32 KB, 84%); flashed via `nrfjprog -f NRF91 --recover` in 6.6 s (verified SW2 in nRF91 position first per the playbook gotcha at GOSTEADY_CONTEXT.md:36). Chip-erase preserved external flash including `/lfs/activation.bin`.
+
+**End-to-end validation (post-flash):**
+
+Because the old activation.bin had the truncated cmd_id baked in, the device on first boot re-loaded the truncated value into the new larger buffer (firmware fix is correct but the persisted state was already corrupt). To validate the fix, the test cycled the device through end-assignment + manual `ready_to_provision` reset + fresh provision (Smoke user is `caregiver` role, can end-assignment but not force-reset which requires `facility_admin+` — so reset was via direct DDB write).
+
+Fresh cmd_id `act_16f028cf-4eb3-4799-a5ca-ade4366b5abb` (40 chars) was published. User shook the device again to trigger motion-wake → MQTT reconnect → persistent-session delivery of queued cmd:
+
+| Log line | Result |
+|---|---|
+| `gs_cloud: activate cmd received: cmd_id=act_16f028cf-...-ade4366b5abb` | **FULL 40 chars** ✓ |
+| `gs_activation: activation applied: ... cmd_id=act_16f028cf-...-ade4366b5abb (persisted to /lfs/activation.bin)` | **FULL** ✓ |
+| `gs_cloud: last_cmd_id updated to 'act_16f028cf-...-ade4366b5abb'` | **FULL** ✓ |
+| `publish gs/GS9999999998/activity -> {..., "firmware_version":"0.10.0-at-timeout"}` | **FULL 17 chars** ✓ |
+| Natural hourly heartbeat at 22:57:34 with `"last_cmd_id":"act_16f028cf-...-ade4366b5abb"` | **FULL** ✓ |
+| Cloud heartbeat-processor at 22:57:51: `_try_activation_ack: ... last_cmd_id: "act_16f028cf-...-ade4366b5abb"` | **Cloud matcher succeeded** ✓ |
+
+Firmware fix correct end-to-end. Both bugs closed at the firmware
+layer.
+
+---
+
+## C18.4 Other 2A-DL paths exercised at bench (working)
+
+| Path | Result |
+|---|---|
+| `POST /devices/{serial}/provision` (caregiver scope, household_owner role bypass not needed) | 200 with activate cmd published; rollback path correct (verified at synthetic smoke earlier) |
+| `POST /devices/{serial}/end-assignment` (caregiver) | 200; status `provisioned → discontinued`; Shadow `desired.activated_at` cleared |
+| `POST /devices/{serial}/force-reset` (caregiver attempted) | 403 `INSUFFICIENT_PERMISSIONS` with `requiredAnyOf: [facility_admin, client_admin, household_owner, internal_admin]` ✓ |
+| Activity uplink mapped to bench patient | First activity row in DDB for `pt_bench_98` post-provision; `patient.activity.create` audit event emitted with full subject + hierarchy snapshot |
+| DL14 invariant on Shadow | `desired.activated_at` flipped on each transition correctly (set on provision, cleared on end-assignment) |
+
+---
+
+## C18.5 Two cloud-side gaps surfaced — Phase 1B-rev heartbeat-processor (NOT in 2A-DL scope)
+
+Heartbeat-processor (deployed in `processing-stack`, Phase 1B-rev) is
+responsible for the activation-ack ceremony when a heartbeat carries a
+matching `last_cmd_id`. At bench it correctly received the post-fix
+heartbeat AND correctly matched the full cmd_id. But it emitted
+`activation_ack_already_set` and skipped the closure ceremony:
+
+```json
+{
+  "level": "INFO",
+  "location": "_try_activation_ack:238",
+  "message": "activation_ack_already_set",
+  "last_cmd_id": "act_16f028cf-4eb3-4799-a5ca-ade4366b5abb"
+}
+```
+
+The skip happened because `Device Registry.activated_at` was already
+set (from the pre-2A-DL manual cloud-side bringup on 2026-05-16 — a
+stale value not produced by any real ack ceremony). Two distinct gaps
+in 1B-rev's handler logic:
+
+### Gap 1: `_try_activation_ack` should override stale `activated_at` on fresh matching cmd_id
+
+The current logic treats `activated_at != null` as "device already
+activated, skip." But a heartbeat ack with a cmd_id that's IN
+`outstandingActivationCmds` is a NEW activation cycle (the cmd was
+issued post the stale activated_at). The handler should overwrite
+`activated_at` with the cmd's issuance timestamp AND emit
+`device.activated`.
+
+Repro at bench:
+- Device Registry pre-test: `activated_at: 2026-05-16T20:07:25Z`
+  (manual bringup write)
+- Fresh provision at 22:01:56 with cmd_id `act_16f028cf-...`
+- Firmware echoes that cmd_id correctly
+- Cloud matcher succeeds → log message `activation_ack_already_set`
+- Device Registry post-test: still
+  `activated_at: 2026-05-16T20:07:25Z` (unchanged), status still
+  `provisioned`, NO `device.activated` audit event
+
+Fix scope: ~5-line change in
+`infra/lambda/heartbeat-processor/handler.py:_try_activation_ack`.
+Conditional overwrite instead of skip.
+
+### Gap 2: heartbeat-processor doesn't transition `provisioned → active_monitoring` on first heartbeat
+
+Per ARCHITECTURE.md §4 state diagram, "first heartbeat received
+(automatic, no API call; heartbeat-processor sets `activated_at` on
+ack)" should transition `provisioned → active_monitoring`. Current
+heartbeat-processor doesn't perform this transition — Device Registry
+stays in `provisioned` indefinitely.
+
+This conflates with Gap 1 because the activation-ack path is where
+that transition is most natural to perform. Fix scope: when
+`_try_activation_ack` fires the `device.activated` event, also flip
+status to `active_monitoring`.
+
+### Manual closure for today's test
+
+Both Device Registry fields were manually written cloud-side to close
+the bench test:
+- `status = active_monitoring`
+- `activated_at = 2026-05-17T22:01:56Z` (the fresh provision timestamp)
+- `firstHeartbeatAt = 2026-05-17T22:01:56Z`
+- `lastHeartbeatAt = 2026-05-17T22:57:44Z`
+
+---
+
+## C18.6 Follow-ups
+
+| Item | Where | Priority |
+|---|---|---|
+| 1B-rev heartbeat-processor Gap 1 + 2 fix (~5-line change in `_try_activation_ack` + status transition) | `processing-stack` / `infra/lambda/heartbeat-processor/handler.py` | High — blocks proper activation closure for any future device with stale `activated_at` and for any first-time provisioned device's status transition |
+| `src/session.h:130 firmware_version[16]` wire-format fix | gosteady-firmware (wire-format change → care needed for parsers) | Low — cosmetic only |
+| Eventual: device-shadow-handler should also recognize `reported.activated_at == desired.activated_at` as an alternative ack signal per ARCHITECTURE DL14 | `infra/lambda/device-shadow-handler/handler.py` | Low — only matters if `last_cmd_id`-based ack path breaks again |
+
+After 1B-rev gaps are fixed, the next provision-then-heartbeat cycle
+will close cleanly without manual cloud-side intervention.
+
+---
+
+## C18.7 What this validates
+
+Despite the truncation bug + the 1B-rev gaps, this test successfully
+validates:
+
+- ✅ 2A-DL provision API end-to-end (cloud handler + DDB writes + IoT publish + Shadow update — all working)
+- ✅ Activate cmd MQTT delivery via persistent session (firmware reconnect post-disconnect, queued cmd delivered)
+- ✅ Firmware activate cmd handler (parse, persist, Shadow ack)
+- ✅ Activity uplink path with patient assignment (no more `unmapped_serial` drops)
+- ✅ Audit pipeline for device.* events (5 events landed in `gosteady-dev-audit` log group + S3 audit bucket)
+- ✅ Firmware buffer fix end-to-end (commit `4bcc6d3`)
+
+The 1B-rev gaps are real but isolated — they block automatic closure
+of the activation cycle on cloud side but don't affect any other 2A-DL
+operation.
+
+---
+
+## C18.8 Observations worth noting
+
+- **Activity-vs-snippet inversion was a red herring.** User initial
+  observation: "snippets are uploading but activity segments aren't —
+  opposite of what we wanted." Actual cause: firmware WAS publishing
+  activity, but cloud was silently dropping with `unmapped_serial`
+  warning (because no patient assignment existed pre-2A-DL). Snippets
+  were stored to S3 keyed by serial regardless of patient mapping, so
+  they remained visible. Post-provision, activity started landing in
+  DDB normally. No firmware-config issue.
+- **Per the §C17.6 runbook, the bench test exposed two real bugs in
+  ~30 min** — exactly the kind of value the in-person firmware-team
+  loop produces vs synthetic-only smoke testing.
+- **iCloud Drive sync overhead during the session was painful** —
+  multiple 4+ min waits for `tsc` + `cdk synth` because the cloud
+  repo is in iCloud. Discussed off-band: post-session move the repo
+  out of iCloud (see chat history for full breakdown).
+
+---
+
+*Entry owner: Jace + Claude (single merged firmware+cloud session,
+2026-05-17, with Jace at the bench).*
+*Closes the §C17.6 physical-device test invitation; opens 2 cloud-side
+1B-rev heartbeat-processor follow-ups (§C18.5). Firmware commit
+[4bcc6d3](https://github.com/Jabl1629/gosteady-firmware/commit/4bcc6d3)
+shipped + bench-validated. After this, cloud queue (any order):
+1B-rev heartbeat-processor fixes, 2A-RD, 1C-slim, 2A-UM.*
