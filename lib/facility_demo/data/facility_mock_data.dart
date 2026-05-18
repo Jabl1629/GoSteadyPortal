@@ -136,7 +136,9 @@ class FacilityMockData {
     }
 
     final activeMin7d = meanActiveMin(last7);
+    final activeMinPrior7d = meanActiveMin(prior7);
     final activeMin30d = meanActiveMin(last30);
+    final activeMinTrend = Trend.compute(activeMin7d, activeMinPrior7d);
     final stepsRecent = meanSteps(last7);
     final stepsPrior = meanSteps(prior7);
     final stepsTrend = Trend.compute(stepsRecent, stepsPrior);
@@ -150,6 +152,8 @@ class FacilityMockData {
       alertsThisWeek: _activitySpecs[patientId]?.alertsThisWeek ?? 0,
       activeMinutesToday: gen.today.totalTimeInMotionMinutes,
       activeMinutes7dAvg: activeMin7d,
+      activeMinutesPrior7dAvg: activeMinPrior7d,
+      activeMinutesTrend7d: activeMinTrend,
       activeMinutes30dAvg: activeMin30d,
       stepsToday: gen.today.totalSteps,
       stepsTrend7d: stepsTrend,
@@ -709,13 +713,15 @@ enum Trend {
 class PatientRowStats {
   final int alertsThisWeek;
   final int activeMinutesToday;
-  final double activeMinutes7dAvg;
-  final double activeMinutes30dAvg;
+  final double activeMinutes7dAvg;          // mean of last 7 days
+  final double activeMinutesPrior7dAvg;     // mean of days 8-14
+  final Trend activeMinutesTrend7d;         // 7d vs prior 7d, ±5% threshold
+  final double activeMinutes30dAvg;         // still computed; not surfaced
   final int stepsToday;
   final Trend stepsTrend7d;
-  final double stepsRecentAvg; // mean of last 7 days
-  final double stepsPriorAvg; // mean of days 8-14
-  final double gaitSpeed3dAvg; // m/s, last 3 days
+  final double stepsRecentAvg;              // mean of last 7 days
+  final double stepsPriorAvg;               // mean of days 8-14
+  final double gaitSpeed3dAvg;              // m/s, last 3 days
   final Trend gaitSpeedTrend;
   final double gaitSpeedPriorAvg;
 
@@ -723,6 +729,8 @@ class PatientRowStats {
     required this.alertsThisWeek,
     required this.activeMinutesToday,
     required this.activeMinutes7dAvg,
+    required this.activeMinutesPrior7dAvg,
+    required this.activeMinutesTrend7d,
     required this.activeMinutes30dAvg,
     required this.stepsToday,
     required this.stepsTrend7d,

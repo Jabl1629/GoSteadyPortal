@@ -94,10 +94,12 @@ class PatientListView extends StatelessWidget {
       tooltip: 'Mean daily active minutes over the last 7 days.',
     ),
     _ColumnSpec(
-      'Active minutes 30d avg',
-      125,
-      _CellAlign.end,
-      tooltip: 'Mean daily active minutes over the last 30 days.',
+      'Active minutes trend',
+      90,
+      _CellAlign.center,
+      tooltip:
+          'Last 7 days vs the prior 7 days. Arrow appears when the change '
+          'exceeds ±5%.',
     ),
     _ColumnSpec(
       'Steps today',
@@ -293,7 +295,6 @@ class _DataRowState extends State<_DataRow> {
     final unitOnly = r.unitDisplay.replaceAll('Assisted Living — ', 'AL ');
 
     final activeMin7d = stats.activeMinutes7dAvg.round();
-    final activeMin30d = stats.activeMinutes30dAvg.round();
     final gaitFps = stats.gaitSpeed3dAvg * PatientListView.mpsToFps;
 
     Color rowBg;
@@ -367,9 +368,10 @@ class _DataRowState extends State<_DataRow> {
               ),
               _cell(
                 index: 5,
-                child: _MetricText(
-                  value: activeMin30d.toString(),
-                  color: _activeMinColor(activeMin30d),
+                child: _TrendCell(
+                  trend: stats.activeMinutesTrend7d,
+                  recent: stats.activeMinutes7dAvg,
+                  prior: stats.activeMinutesPrior7dAvg,
                 ),
               ),
               _cell(
