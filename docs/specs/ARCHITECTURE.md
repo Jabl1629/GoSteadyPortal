@@ -1,6 +1,6 @@
 # GoSteady Portal — Master Architecture & Phase Plan
 
-> **Last updated:** 2026-05-17 | **Branch:** `feature/infra-scaffold`
+> **Last updated:** 2026-05-18 | **Branch:** `feature/infra-scaffold`
 > **Repository:** [GoSteadyPortal](https://github.com/Jabl1629/GoSteadyPortal)
 
 ---
@@ -1595,6 +1595,7 @@ Path to portal-renders-real-data:
 | `gosteady-{env}-discharge-cascade` | Api | 2A-DL | ✅ Deployed (dev) 2026-05-17 | DDB Stream on Patients table with filter for `status=discharged` | ARM64 |
 | `gosteady-{env}-device-shadow-handler` | Api | 2A-DL | ✅ Deployed (dev) 2026-05-17. 🔲 **Pending:** filter migrates from `reported.reset_complete` → `reported.wipe_complete` per [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md); handles auto-recycle transition on wipe ack | IoT Topic Rule on `$aws/things/+/shadow/update/documents` (parallel to threshold-detector) | ARM64 |
 | `gosteady-{env}-audit-forwarder` | Audit | 1.7 | ✅ Deployed (dev) 2026-05-17 | CW Logs subscription filter on each handler log group (`{ $.audit IS TRUE }`) | ARM64 |
+| `gosteady-{env}-connection-coordinator` | Processing | Coord §C23 | ✅ Deployed (dev) 2026-05-18; bench-validated live (coord §C24). Closes §C22 Finding 2 (AWS IoT 1h persistent_session timer). Two minor follow-ups: state-aware predicate tightening (§C24 Finding 4) + explicit LogGroup CDK resource (§C24 Finding 6) | IoT Topic Rule on `$aws/events/presence/connected/+` | ARM64 |
 | `gosteady-{env}-jwt-authorizer` | Api | 2A | 🔲 New | API Gateway | ARM64 |
 | `gosteady-{env}-api-stub` | Api | 2A-0 | ✅ Deployed (dev) 2026-05-17 | API Gateway HTTP API `GET /api/v1/me` | ARM64 |
 | `gosteady-{env}-api-handler` | Api | 2A-* | 🔲 Stub — replaced per subset by `device-api` (2A-DL), `patient-api` (2A-RD), etc. | API Gateway | ARM64 |
