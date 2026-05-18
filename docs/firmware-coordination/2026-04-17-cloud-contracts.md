@@ -6907,3 +6907,318 @@ coordinator Lambda direction. Three architectural findings (Finding
 work, Finding 4 is a small firmware tweak.*
 
 
+---
+---
+
+# Cloud team update — 2026-05-18 (§C23 design memo: connection-coordinator Lambda — addresses §C22 Finding 2; pre-first-prod-customer must-fix)
+
+> **From:** Claude (cloud-side direction memo).
+>
+> **TL;DR:** §C22 Finding 2 surfaced a structural reliability gap:
+> AWS IoT MQTT 3.1.1 persistent_session expires after 1 hour offline;
+> firmware's hourly heartbeat sits at that edge → broker drops queued
+> cmds every cycle. Downlink cmds (activate, wipe, future) are
+> operationally unreliable without intervention. This memo specs a
+> cloud-side **connection-coordinator Lambda** that subscribes to AWS
+> IoT lifecycle events and re-publishes pending cmds the instant a
+> firmware reconnects, landing them in the active subscription
+> window. Stateless, idempotent, ~1-2 days work. Also folds in
+> §C22 Finding 7 cleanup (stale outstandingActivationCmds /
+> outstandingWipeCmds entries).
+>
+> **Status:** Design only in this entry. Implementation pending.
+
+---
+
+## C23.1 Problem statement
+
+When the cloud publishes a cmd to `gs/{serial}/cmd`:
+
+```
+Cloud (device-api Lambda)
+  │ iot:Publish to gs/GS9999999998/cmd (QoS 1)
+  ▼
+AWS IoT broker
+  │
+  ▼
+Has firmware subscribed + connected RIGHT NOW?
+  ├── Yes → deliver immediately ✅
+  └── No → queue for next connect (persistent session, CleanSession=0)
+           │
+           ▼
+           Is the queue still alive when firmware reconnects?
+             ├── Yes (firmware reconnects within ≤1h) → deliver ✅
+             └── No (broker dropped session after 1h) → **CMD LOST** 🔴
+```
+
+Firmware's heartbeat cadence is hourly. Its actual offline windows are
+~58 min between connects. AWS IoT's persistent_session TTL is 1 hour.
+This puts every firmware reconnect right at the session-expiry edge.
+Empirically (§C22), **every overnight reconnect reported
+`persistent_session=0`** — broker dropped the prior session and any
+queued cmds before firmware reconnected.
+
+Result: cloud can `iot:Publish` successfully and the cmd never reaches
+the device.
+
+The race-publish workaround (publish from cloud at the exact moment
+firmware reconnects) IS the fix — but requires the cloud to *know*
+when firmware connects. AWS IoT provides this via lifecycle events.
+
+---
+
+## C23.2 Solution overview
+
+```
+                                              ┌──────────────────────────────────┐
+                                              │  $aws/events/presence/connected/ │
+                                              │  +clientId                       │
+                                              └─────────────────┬────────────────┘
+                                                                │ IoT Rule
+                                                                ▼
+                                        ┌────────────────────────────────────────────┐
+                                        │  gosteady-{env}-connection-coordinator     │
+                                        │                                            │
+                                        │  1. Parse clientId from event              │
+                                        │  2. Validate: looks like GS + 10 digits    │
+                                        │  3. GetItem Device Registry                │
+                                        │  4. For each cmd_id in:                    │
+                                        │     - outstandingActivationCmds            │
+                                        │     - outstandingWipeCmds                  │
+                                        │     within 24h window:                     │
+                                        │     → iot-data:Publish to gs/{serial}/cmd  │
+                                        │  5. Sweep stale entries (>24h old)         │
+                                        │  6. Emit audit + metric                    │
+                                        └────────────────────────────────────────────┘
+                                                                │
+                                                                │ Publishes cmd into
+                                                                │ active subscription
+                                                                ▼
+                                                        Firmware MQTT session
+                                                        (connected for ~4 s window)
+```
+
+Stateless. Idempotent. Each cmd has a UUID cmd_id; firmware's existing
+handlers dedupe via the cmd_id (per §C19 + §C22). Multiple Lambda
+invocations re-publishing the same cmd are harmless — first one to
+arrive in firmware's window wins; subsequent ones are no-ops in
+firmware-side `handle_activate_cmd` / `handle_wipe_cmd`.
+
+---
+
+## C23.3 AWS IoT lifecycle events — the trigger
+
+Per AWS IoT Core docs, the broker publishes lifecycle events to reserved topics:
+
+| Event | Topic | Payload (relevant keys) |
+|---|---|---|
+| Connected | `$aws/events/presence/connected/{clientId}` | `{clientId, timestamp, eventType:"connected", sessionIdentifier, principalIdentifier, ...}` |
+| Disconnected | `$aws/events/presence/disconnected/{clientId}` | `{clientId, timestamp, eventType:"disconnected", disconnectReason, ...}` |
+
+We only care about `connected`. The Lambda subscribes to that pattern via an IoT Topic Rule:
+
+```sql
+SELECT clientId, timestamp, eventType, sessionIdentifier
+FROM '$aws/events/presence/connected/+'
+WHERE eventType = 'connected'
+```
+
+The IoT Rule invokes the Lambda. Lambda receives a small JSON with
+the clientId — which is the device serial (per the firmware's
+`CONFIG_AWS_IOT_CLIENT_ID_STATIC=GS9999999998` pattern).
+
+**Note:** `$aws/events/*` lifecycle events must be enabled at the
+account level via `aws iot update-event-configurations`. One-time
+console-equivalent setup; verify enabled in the deploy.
+
+---
+
+## C23.4 Lambda logic (pseudocode)
+
+```python
+# infra/lambda/connection-coordinator/handler.py
+
+import os, json, boto3, time
+from datetime import datetime, timedelta, timezone
+
+_devices = boto3.resource("dynamodb").Table(os.environ["DEVICES_TABLE"])
+_iot = boto3.client("iot-data")
+ACK_WINDOW_HOURS = int(os.environ.get("ACK_WINDOW_HOURS", "24"))
+
+def handler(event, _ctx):
+    serial = event.get("clientId")
+    if not serial or not _validate_serial(serial):
+        # ignore non-device-shaped clientIds (internal tooling, etc.)
+        return {"skipped": "not_device_serial", "clientId": serial}
+
+    item = _devices.get_item(Key={"serialNumber": serial}).get("Item") or {}
+    if not item:
+        # device not in registry; nothing to do
+        return {"skipped": "no_registry_entry"}
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=ACK_WINDOW_HOURS)
+
+    republished = []
+    swept = []
+
+    for map_attr, cmd_kind in (
+        ("outstandingActivationCmds", "activate"),
+        ("outstandingWipeCmds", "wipe"),
+    ):
+        cmd_map = item.get(map_attr) or {}
+        for cmd_id, issued_iso in cmd_map.items():
+            try:
+                issued_at = datetime.fromisoformat(
+                    str(issued_iso).replace("Z","+00:00"))
+            except Exception:
+                swept.append({"cmd_id": cmd_id, "reason": "unparseable_ts"})
+                _purge_entry(serial, map_attr, cmd_id)
+                continue
+
+            if issued_at < cutoff:
+                swept.append({"cmd_id": cmd_id, "issued_at": issued_iso})
+                _purge_entry(serial, map_attr, cmd_id)
+                continue
+
+            # Within window — republish
+            _iot.publish(
+                topic=f"gs/{serial}/cmd",
+                qos=1,
+                payload=json.dumps({
+                    "cmd": cmd_kind,
+                    "cmd_id": cmd_id,
+                    "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }),
+            )
+            republished.append({"cmd_id": cmd_id, "cmd": cmd_kind})
+
+    _emit_audit_and_metrics(serial, republished, swept)
+    return {"republished": republished, "swept": swept}
+
+
+def _purge_entry(serial, map_attr, cmd_id):
+    _devices.update_item(
+        Key={"serialNumber": serial},
+        UpdateExpression=f"REMOVE {map_attr}.#cid",
+        ExpressionAttributeNames={"#cid": cmd_id},
+    )
+```
+
+Key properties:
+- **Single GetItem + at-most-N UpdateItems per connect event.** Cheap.
+- **Re-publish uses the cmd_id from the map**, so firmware-side idempotency holds — same cmd_id → no-op if already applied.
+- **Sweep stale entries opportunistically.** Folds in §C22 Finding 7. No separate sweeper Lambda needed.
+- **Stateless.** No persistent state in the Lambda. All authority comes from Device Registry.
+
+---
+
+## C23.5 Audit + metrics
+
+| Event | Trigger | Severity | Subject keys |
+|---|---|---|---|
+| `device.cmd_republished` | Lambda re-published a queued cmd on connect | info | serialNumber, cmd_id, cmd_kind, cmd_age_seconds |
+| `device.cmd_swept_stale` | Lambda removed a stale outstandingXxxCmds entry (>24h old) | info | serialNumber, cmd_id, cmd_kind, cmd_age_seconds |
+
+Metrics (CloudWatch EMF, namespace `GoSteady/Coordinator/{env}`):
+- `device_cmd_republished_count`
+- `device_cmd_swept_stale_count`
+- `device_connect_event_count` (raw count of lifecycle events seen)
+
+Alarm candidates:
+- `device_cmd_republished_count` >0 sustained for >24h → either a chronic delivery issue OR (good signal) lots of devices coming online with pending cmds. Monitor without alarm initially.
+- `device_cmd_swept_stale_count` >0 with high rate → cmds aging out without firmware ack → real reliability problem. Alarm at >5/hour.
+
+---
+
+## C23.6 Decisions log
+
+| # | Decision | Alternatives | Why |
+|---|----------|--------------|-----|
+| **D1** | Trigger: AWS IoT lifecycle event `$aws/events/presence/connected/+` via IoT Topic Rule | (a) DDB Streams on Device Registry (no, doesn't fire on firmware connect); (b) polling every N seconds (no, expensive and lagging); (c) MQTT-level subscription from a separate IoT client (no, redundant) | Lifecycle events are the authoritative signal. Managed, free, sub-second latency. |
+| **D2** | Lambda re-publishes ALL pending cmds for the connecting serial | Re-publish only the most recent / only one cmd_kind | If there are multiple pending cmds (e.g. activate left over from a botched prior cycle + fresh wipe from latest end-assignment), firmware should see them all and process per its own state. Cheap to publish, safe via idempotency. |
+| **D3** | Stale-entry sweep folded in here | Separate sweeper Lambda OR cron job | Same DDB GetItem; marginal cost. Folds §C22 Finding 7. |
+| **D4** | Stateless — no Lambda-side cache or queue | Cache device state for X seconds to avoid hot DDB reads on rapid reconnects | Devices reconnect ~1 per hour; no hot-read path. Stateless is simpler. |
+| **D5** | Single-shot re-publish per connect event | Burst (mimic the bench race-publish 5-shot at 300ms) | Single-shot should suffice for an active subscription. The 5-shot burst was a bench-time defensive measure when we didn't trust the timing. Once we know the firmware subscription is active during the window, single-shot is sufficient. **Open question:** measure single-shot reliability in the first prod deployment; revisit if misses are observed. |
+| **D6** | Lambda emits `device.cmd_republished` audit per re-publish | Metrics-only, no audit | Audit is cheap and the trail is useful for forensics ("why did this device get a duplicate cmd"). Schema_version: 1. |
+| **D7** | Subscribe to `connected` only, not `disconnected` | Both | We only care about the moment a subscription comes online. `disconnected` doesn't trigger any cloud-side action in this design. |
+| **D8** | Filter on `clientId` validation (`GS` + 10 digits) | Process all `connected` events | Internal tooling clients (`2a-smoke-test-...`, ops connections, etc.) generate spurious lifecycle events. Filter saves a no-op GetItem. |
+
+---
+
+## C23.7 Lambda inventory addition
+
+| Lambda | Stack | Phase | Status | Trigger | Architecture |
+|---|---|---|---|---|---|
+| `gosteady-{env}-connection-coordinator` | Processing OR new ConnectionCoordinator stack | Coord §C23 | 🔲 New | IoT Topic Rule on `$aws/events/presence/connected/+` | ARM64 |
+
+**Stack placement decision:** lean toward extending the existing
+**Processing** stack (where heartbeat-processor + threshold-detector
+already live). The connection-coordinator is conceptually a
+processing concern (event-driven, stateless, DDB-touching). Keeps
+the stack inventory tight.
+
+---
+
+## C23.8 Implementation punch-list
+
+| # | Task | Effort |
+|---|---|---|
+| 1 | `aws iot update-event-configurations` — enable presence events at account level | 1 cli call; one-time deploy step |
+| 2 | New Lambda dir: `infra/lambda/connection-coordinator/handler.py` | ~120 lines (logic + imports + validation) |
+| 3 | New audit catalog entries: `AUDIT_DEVICE_CMD_REPUBLISHED`, `AUDIT_DEVICE_CMD_SWEPT_STALE` | 2 lines + KNOWN_AUDIT_EVENTS set |
+| 4 | Processing stack: new Lambda + IoT Topic Rule + IAM (dynamodb:Query/UpdateItem on Devices, iot-data:Publish on `gs/*/cmd`) | ~50 lines TS |
+| 5 | Observability: 3 new EMF metrics + 1 alarm for sustained-sweep-rate | ~20 lines TS |
+| 6 | Synthetic test: publish a synthetic `$aws/events/presence/connected/...` event via `aws lambda invoke`, assert republish happens (mock Device Registry with outstanding cmds first) | ~30 min |
+| 7 | Live test: end-assignment via API → don't race-publish → observe whether next firmware reconnect (within ≤24h cmd window) gets the cmd via the coordinator | Up to 1 firmware-cycle wait (≤1 hr) |
+| 8 | Docs: ARCH §15 inventory; coord §C24 closure; GOSTEADY_CONTEXT update | ~30 min |
+
+Total: ~1-2 days dev. Most time is in the synthesis/deploy/test cycle, not the Lambda code itself.
+
+---
+
+## C23.9 Open questions
+
+1. **Single-shot vs burst on republish (D5).** Bench test in §C22 used 5-shot burst at 300ms. The Lambda design specs single-shot. Lean is single-shot is enough once we know the firmware subscription is active during connect — but worth measuring in early prod deployments. If misses are observed, easy to bump to a small burst (~3 shots @ 200ms). Not a blocker for shipping.
+2. **Re-publish ts: now vs original issuance time.** Pseudocode uses `now`. Firmware's `handle_activate_cmd`/`handle_wipe_cmd` doesn't validate `ts` — it just persists it. Cleaner to use `now` (truthful: "this is when the cloud re-issued"); allows ops to differentiate first-publish from re-publish by inspecting cmd_id vs ts. Decision: `now`.
+3. **Audit on every republish or sample?** Lean: every republish (low volume, high forensic value). Revisit if audit volume becomes a cost concern.
+4. **Stale-sweep audit rate.** A device that's been offline for a week might have multiple stale cmds. Per-cmd audit could spam if multiple devices come online after a long-tail outage. Lean: emit one summary audit per Lambda invocation with `swept_count: N` and a list of cmd_ids in `extra`, rather than one audit per swept cmd.
+
+---
+
+## C23.10 No firmware action required
+
+The connection-coordinator is pure cloud-side infra. Firmware contract
+unchanged — same `gs/{serial}/cmd` topic, same cmd payloads, same
+firmware-side idempotency. Firmware doesn't even know the Lambda
+exists; from its perspective, "cmd shows up when device is online,
+sometimes after a longer-than-expected gap." That's actually a
+better user-experience than the prior behavior of cmds silently
+disappearing.
+
+If we want to also address §C22 Finding 4 (wipe routine timing
+relative to MQTT window) and Finding 6 (Shadow.reported.activated_at
+stale post-wipe), those are firmware-side and orthogonal. Could land
+in a future `0.12.x` firmware revision; not blocked on §C23.
+
+---
+
+## C23.11 Sequencing
+
+| Step | Owner | Trigger |
+|---|---|---|
+| §C23 design memo (this entry) | cloud | done |
+| Implementation (punch-list §C23.8) | cloud | scheduled work, ~1-2 days |
+| Deploy + synthetic test | cloud | after implementation |
+| Live validation (end-assignment without race-publish) | cloud + firmware | after deploy; observed on next firmware connect |
+| Coord §C24 closure | cloud | after live validation |
+| Firmware 0.12.x with §C22 Finding 4 + Finding 6 fixes | firmware | independent track |
+
+---
+
+*Entry owner: Claude (cloud design memo, 2026-05-18).*
+*Closes the §C22.3 Finding 2 "what's the production fix" question.
+Opens §C24 (implementation + live validation) as the next coord-doc
+entry. No firmware action items in this batch.*
+
+
