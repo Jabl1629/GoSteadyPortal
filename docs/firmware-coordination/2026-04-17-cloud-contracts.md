@@ -5913,3 +5913,275 @@ operation.
 [4bcc6d3](https://github.com/Jabl1629/gosteady-firmware/commit/4bcc6d3)
 shipped + bench-validated. After this, cloud queue (any order):
 1B-rev heartbeat-processor fixes, 2A-RD, 1C-slim, 2A-UM.*
+
+
+---
+---
+
+# Cloud team update — 2026-05-17 (1B-rev heartbeat-processor activation-ack rewrite shipped + bench-validated; §C18.5 Gap 1 + Gap 2 closed)
+
+> **From:** GoSteady cloud team.
+>
+> **TL;DR:** Same physical bench sitting as §C18 — Jace kept `GS9999999998`
+> plugged in. Picked up the two heartbeat-processor gaps §C18.5 flagged:
+> Gap 1 (`_try_activation_ack` skipping on stale `activated_at`) and Gap 2
+> (no `provisioned → active_monitoring` transition on first heartbeat).
+> Rewrote `_try_activation_ack`, deployed to dev (single Lambda
+> code-asset swap, 30.55 s, no other resource churn), and ran the
+> §C19.4 three-stage Option-A synthetic validation on the bench unit.
+> All three stages pass; both gaps closed cloud-side. **No firmware
+> action required** — the cloud-side fix is invisible to the device.
+
+---
+
+## C19.1 What shipped
+
+Cloud-portal commit (this batch — see §C19.7) to
+`infra/lambda/heartbeat-processor/handler.py:173-`. The rewrite of
+`_try_activation_ack` is the only handler change in this batch.
+
+| Aspect | Before (1B-rev original) | After (this rewrite) |
+|---|---|---|
+| Idempotency precondition | `attribute_not_exists(activated_at)` | `attribute_exists(outstandingActivationCmds.#cid)` |
+| `activated_at` source | `heartbeat_ts` | matched cmd's issuance timestamp (from map value) |
+| Status transition on ack | None | Folded `provisioned → active_monitoring` into same UpdateItem when read shows `status="provisioned"`, gated by `status = :prov` condition |
+| `firstHeartbeatAt` | Never written | `if_not_exists(firstHeartbeatAt, heartbeat_ts)` — never overwrites |
+| Audits emitted | `device.activated` | `device.activated` + `device.first_heartbeat` (latter only on actual transition) |
+| `device.activated.after` shape | `{activated_at, matched_cmd_id}` | adds `status` when transition fires; omits otherwise |
+
+The shape change makes the idempotency invariant a property of the
+`outstandingActivationCmds` map (intuitive: cmd_id in map = not yet
+acked) rather than of `activated_at` (which the prior cycle's manual
+bench-close was caching incorrectly).
+
+Cmd-issuance-time-vs-heartbeat-time for `activated_at`: §C18.5's
+explicit guidance was "overwrite `activated_at` with the cmd's issuance
+timestamp." That choice means `activated_at` is bounded by `provisioned
+→ active_monitoring` start, not by when the first heartbeat happened to
+arrive. `firstHeartbeatAt` (new field stamped at transition) carries
+the heartbeat moment for diagnostic queries.
+
+---
+
+## C19.2 Deploy chronology
+
+Single-pass deploy, no surprises:
+
+| Step | Result |
+|---|---|
+| `npm run build` | clean (silent tsc exit) |
+| `cdk diff GoSteady-Dev-Processing` | only `HeartbeatProcessor/Function.Code.S3Key` changed (asset hash swap); no IAM, no env-var, no Topic Rule churn |
+| `cdk deploy GoSteady-Dev-Processing --exclusively` | UPDATE_COMPLETE in 30.55 s |
+
+Lambda config (env vars, runtime, layer attachments, IAM grants, IoT
+Rule wiring) unchanged. Only the bundled `_shared/` + handler.py
+contents changed under the hood.
+
+---
+
+## C19.3 Bench pre-state
+
+`GS9999999998` was in a stale closure state from §C18 manual cleanup:
+
+```
+status=active_monitoring
+activated_at=2026-05-17T22:01:56Z  (provisioning timestamp from §C18)
+firstHeartbeatAt=2026-05-17T22:01:56Z  (manually written)
+outstandingActivationCmds={act_16f028cf-...: 2026-05-17T22:01:56Z}  (never cleaned up — the cmd that triggered the §C18.5 discovery)
+Shadow.desired.activated_at=2026-05-17T22:01:56Z
+DeviceAssignment validUntil=null  (still active)
+```
+
+Reset to `ready_to_provision` via three parallel DDB+Shadow writes
+(direct DDB; smoke user is `caregiver` role so doesn't have
+`force-reset` API permission, and writing-by-API would have polluted
+the audit trail of the test itself):
+
+1. `gosteady-dev-devices` UpdateItem: SET `status=ready_to_provision`,
+   `lastTransitionAt=now`; REMOVE `activated_at`, `firstHeartbeatAt`,
+   `lastHeartbeatAt`, `currentAssignmentSk`, `outstandingActivationCmds`.
+   `owningClientId` / `owningFacilityId` preserved per DL4 (ownership
+   persists through reset).
+2. `gosteady-dev-device-assignments` UpdateItem on the active row:
+   SET `validUntil=now`, `endedReason=option_a_synthetic_test_reset`.
+3. `aws iot-data update-thing-shadow` with `desired.activated_at=null`
+   (closes DL14 invariant — desired non-null iff status ∈
+   {provisioned, active_monitoring}).
+
+Verified pre-test state matched expected `ready_to_provision` shape.
+
+---
+
+## C19.4 Three-stage Option-A synthetic validation
+
+Used `2a-smoke@test.local` Cognito creds to drive the 2A-DL provision
+API; synthetic heartbeat publishes via `aws iot-data publish`.
+Firmware not in the loop for this test — the cloud-side gap is what
+got fixed, and §C18 already validated the firmware-side roundtrip
+end-to-end.
+
+### Stage 1 — Clean provision → ack (validates Gap 2 + happy path)
+
+```
+POST /api/v1/devices/GS9999999998/provision {"patientId":"pt_bench_98"}
+→ 200 with activation.cmdId = act_dff022de-94b8-4775-9328-b98810d6c495,
+  issued 2026-05-18T00:25:43Z
+```
+
+Post-provision DDB confirmed: `status=provisioned`, no `activated_at`,
+`outstandingActivationCmds={act_dff022de-...: 2026-05-18T00:25:43Z}`,
+Shadow `desired.activated_at=2026-05-18T00:25:43Z`. Clean.
+
+Published synthetic heartbeat to `gs/GS9999999998/heartbeat`:
+```json
+{"serial":"GS9999999998","ts":"2026-05-18T00:26:14Z",
+ "battery_pct":0.88,"battery_mv":4012,"rsrp_dbm":-89,"snr_db":11.2,
+ "firmware":"0.10.0-at-timeout","uptime_s":12345,
+ "last_cmd_id":"act_dff022de-94b8-4775-9328-b98810d6c495"}
+```
+
+**Post-heartbeat state (~4 s later, all asserts pass):**
+- `status=active_monitoring` ✓ (Gap 2 transition fired)
+- `activated_at=2026-05-18T00:25:43Z` (= cmd issuance, not heartbeat_ts) ✓
+- `firstHeartbeatAt=2026-05-18T00:26:14Z` (= heartbeat_ts) ✓
+- `outstandingActivationCmds=<empty>` ✓
+- Audit `device.activated` at `00:26:17.242Z` with `after.status=active_monitoring`, `extra.cmd_issued_at=2026-05-18T00:25:43Z`, `schema_version=1` ✓
+- Audit `device.first_heartbeat` at `00:26:17.242Z` (same ms — atomic with the above) with `before.status=provisioned`, `after={status:active_monitoring, firstHeartbeatAt:2026-05-18T00:26:14Z}` ✓
+
+### Stage 2 — Gap-1-isolation: stale `activated_at` + injected fresh cmd
+
+Goal: prove that a fresh cmd_id ack against a pre-existing `activated_at`
+no longer skips. Pre-state after Stage 1: status=active_monitoring,
+`activated_at=2026-05-18T00:25:43Z` (set by Stage 1). Injected a
+synthetic cmd into the map (direct DDB write, bypassing API):
+```
+outstandingActivationCmds = {
+  act_GAP1ISOLATION-91a69534-f037-4ba0-9969-22eb73fef0fc: 2026-05-18T00:27:52Z
+}
+```
+
+Published synthetic heartbeat with that cmd_id as `last_cmd_id`.
+
+**Post-heartbeat state:**
+- `status=active_monitoring` (unchanged — no transition fires when already active_monitoring) ✓
+- `activated_at=2026-05-18T00:27:52Z` (overwrote prior stale value with new cmd issuance time) ✓ ← **The Gap 1 proof**
+- `firstHeartbeatAt=2026-05-18T00:26:14Z` (unchanged — `if_not_exists` preserved Stage 1 value) ✓
+- `outstandingActivationCmds=<empty>` (cmd removed) ✓
+- Single `device.activated` audit at `00:27:55Z` with `after={activated_at, matched_cmd_id}` (no `status` key — no transition) ✓
+- **No** `device.first_heartbeat` audit ✓ (correct — no transition)
+
+Old code on this exact input would have failed at
+`attribute_not_exists(activated_at)`, logged `activation_ack_already_set`,
+returned False — i.e. the exact §C18.5 failure mode.
+
+### Stage 3 — Replay idempotency
+
+Re-published the same heartbeat payload from Stage 2 (same `last_cmd_id`,
+fresh `ts`). Expected: no-op, because cmd was already removed from
+`outstandingActivationCmds` in Stage 2.
+
+**Post-replay state:**
+- All fields unchanged from end of Stage 2 ✓
+- No new audit events ✓
+
+Code path: scan finds no match in (now-empty) map → returns False early
+before the UpdateItem call. Idempotency proven.
+
+---
+
+## C19.5 Coincidental firmware heartbeat caught in flight
+
+A `device.preactivation_heartbeat` audit at `2026-05-18T00:25:25Z`
+landed during the brief window between my DDB reset (00:25:02) and the
+provision call (00:25:43) — i.e. firmware on `GS9999999998` published
+a real heartbeat that hit the threshold-detector when the device was
+already in `ready_to_provision` cloud-side. Pre-activation suppression
+fired correctly (no synthetic alert generated; sampled audit only).
+
+Useful as a side-effect proof that the firmware (running
+`0.10.0-at-timeout` with the §C18 buffer fix) is publishing healthy
+heartbeats and that the pre-activation gate works exactly as designed
+when cloud-side state transitions through `ready_to_provision`.
+
+---
+
+## C19.6 Final bench state
+
+```
+status=active_monitoring
+activated_at=2026-05-18T00:27:52Z
+firstHeartbeatAt=2026-05-18T00:26:14Z
+outstandingActivationCmds=<empty>
+owningClientId=dtc_smoke_test
+owningFacilityId=fac_smoke_001
+currentAssignmentSk=2026-05-18T00:25:43Z
+```
+
+DeviceAssignment from this test is active (validUntil=null). Patient
+assignment intact for `pt_bench_98`. Ready for natural firmware
+heartbeat traffic to land cleanly going forward.
+
+---
+
+## C19.7 §C18.5 follow-up table — status
+
+| Item | Status |
+|---|---|
+| **1B-rev heartbeat-processor Gap 1 + 2 fix** | **✅ DONE 2026-05-17** — deployed + bench-validated on `GS9999999998` |
+| `src/session.h:130 firmware_version[16]` wire-format fix | Pending — firmware-side, low priority (cosmetic) |
+| Eventual: device-shadow-handler recognizing `reported.activated_at == desired.activated_at` as alt ack | Pending — low priority, only matters if `last_cmd_id` ack path breaks |
+
+Side benefit: this redeploy also bundles the latest `_shared/observability.py`
+into heartbeat-processor, so its audit emissions now carry
+`schema_version: 1` — partial closure of ARCH §16 / Phase 1.7 Q8
+schema_version backfill (3 of 4 1B-rev handlers still pending;
+activity-processor / threshold-detector / alert-handler will pick it up
+on their next routine touch).
+
+---
+
+## C19.8 No firmware action required
+
+This is a pure cloud-side fix. Firmware's contract is unchanged:
+- Echo `last_cmd_id` in next heartbeat after receiving `activate` cmd (✓ already does, post §C18 buffer fix)
+- Persist `activated_at` to flash + ack via Shadow `reported.activated_at` (✓ already does)
+- Hourly heartbeat cadence (✓)
+
+The fix swapped the cloud-side idempotency invariant and added a state
+transition that ARCHITECTURE §4 had always called for but the handler
+wasn't actually performing. Firmware doesn't see any difference.
+
+---
+
+## C19.9 Cloud-side queue after this entry
+
+| Item | Status |
+|---|---|
+| Phase 1C-slim Offline Detector (coord §C11.7) | Pending — natural next solo cloud-side increment |
+| Phase 2A-RD Patient Reads (unblocks Flutter dashboard) | Pending |
+| Phase 2A-AA Alert Actions + threshold overrides | Pending |
+| Phase 2A-UM User Management + household onboarding | Pending |
+| Phase 2A-INT Internal Tools | Pending |
+| Phase 1.7.1 Athena unwrap (Q7) | Pending — first-Athena-need trigger |
+| 1B-rev redeploy of remaining 3 handlers (schema_version Q8 full closure) | Pending — natural touch trigger |
+| Multi-account separation (G9) | Pre-first-prod-customer gate |
+| Phase 1.7 prod cutover (Object Lock + compliance reader trust) | Pre-first-prod-customer gate |
+| Phase 3A CloudFront + WAF (deferred from 2A-0) | Pre-portal-prod |
+
+Real firmware-side heartbeat round-trip on `GS9999999998` would also
+re-validate the path on the natural hourly cadence — Jace explicitly
+chose to skip that for this session (final state is already correct;
+nothing left to prove that synthetic Option-A didn't cover). It will
+happen organically as a no-op the next time firmware echoes any cmd
+that's no longer in the outstanding map — confirming the
+`heartbeat_with_unknown_cmd_id` info-log path stays quiet.
+
+---
+
+*Entry owner: Jace + Claude (single cloud session, 2026-05-17, with
+`GS9999999998` plugged in live at the bench for state observation but
+firmware not in the test loop).*
+*Closes §C18.5 Gap 1 + Gap 2 + the §C18.6 follow-up table's first row
+(highest-priority cloud-side item). No firmware action items. After
+this, cloud-side queue is 1C-slim or 2A-RD (any order).*
+
