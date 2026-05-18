@@ -39,6 +39,7 @@ device health, and time-critical events through a Flutter web dashboard.
 | Signal Metrics | RSRP (dBm) + SNR (dB), Nordic-specific |
 | Distance | Computed on-device via IMU + step-length calibration |
 | Serial Format | `GS` + 10 digits (e.g., `GS0000001234`) — printed on device |
+| Battery | Replaceable disposable AAs (count + chemistry TBD per firmware bench characterization). No charger circuit. 6–12 month expected life per battery set. Patient deployments (typically 1–2 weeks) are far shorter than battery life, so a single AA set serves many patient cycles. |
 | Firmware OTA | AWS IoT Jobs + S3 bucket + signed images (MCUboot) |
 | Secure Element | Nordic CryptoCell-312 (TF-M) for cert/key storage |
 
@@ -322,16 +323,16 @@ Devices follow a 5-state lifecycle from manufacturer to end-of-life. The state m
        [external: device manufactured, GoSteady ops registers in DDB]
                               ↓
                   ┌──────────────────────┐
-                  │  ready_to_provision  │ ◄──── reset (firmware-driven on
-                  └──────────┬───────────┘        charger when discontinued)
-                             │ assign(patient)              ▲
-                             ▼                              │
-                     ┌──────────────┐                       │
-                     │ provisioned  │                       │
-                     └──────┬───────┘                       │
-                            │ first heartbeat               │
-                            ▼                               │
-                  ┌─────────────────────┐                   │
+                  │  ready_to_provision  │ ◄──── auto on firmware wipe-ack
+                  └──────────┬───────────┘        (cloud → wipe cmd post-end-
+                             │ assign(patient)    assignment; firmware wipes
+                             ▼                    local data; ack via Shadow
+                     ┌──────────────┐             reported.wipe_complete +
+                     │ provisioned  │             heartbeat last_cmd_id;
+                     └──────┬───────┘             cloud auto-transitions
+                            │ first heartbeat     once battery_pct ≥ 0.10
+                            ▼                     in acking heartbeat)
+                  ┌─────────────────────┐                   ▲
                   │ active_monitoring   │                   │
                   └──────────┬──────────┘                   │
                              │ end_assignment()             │
@@ -375,16 +376,22 @@ Devices follow a 5-state lifecycle from manufacturer to end-of-life. The state m
 - **Physical possession is the security boundary for first-provision.** A caregiver must hold the physical device to type its printed serial. Phase 5 firmware will harden this via cert-bound ownership.
 - **No facility inventory pool / no pre-allocation.** Devices are not pre-assigned to facilities or censuses; ownership is established at first-provision. There is no portal UI for "devices in my facility's inventory."
 
-#### Reset is firmware-driven, not a UI action
+#### Wipe-ack-driven recycle (replaces charger-gated reset)
 
-A device transitions `discontinued` → `ready_to_provision` only when:
+A device transitions `discontinued` → `ready_to_provision` automatically when:
 
 1. Device is in `discontinued` state, AND
-2. Device is connected to its charger, AND
-3. Device successfully wipes local data (patient cache, calibration drift, accumulated session buffer — keeping firmware + device cert), AND
-4. Device reports completion to cloud
+2. Cloud has issued a `wipe` downlink cmd on `gs/{serial}/cmd` (fired immediately on `end-assignment`), AND
+3. Firmware has acked the wipe via Shadow `reported.wipe_complete = <wipe_id>` AND echoed `last_cmd_id = <wipe_id>` in a heartbeat, AND
+4. The acking heartbeat reports `battery_pct ≥ 0.10` (sanity floor — confirms the wipe completed on a healthy power state, not mid-brownout).
 
-The "on the charger" moment is the natural sanitization checkpoint. There is **no caregiver-clickable reset button** in the portal — the closest is a `force_reset` admin override (facility_admin+) for stuck devices that fail to report reset completion. Force-reset is heavily audited.
+Cloud-side ack idempotency uses `attribute_exists(outstandingWipeCmds.#cid)` as the conditional — mirrors the activation-ack pattern (see firmware coord §C19). Successful ack REMOVEs the entry from the map and clears Shadow `desired.wipe_requested`. Duplicate ack is a no-op.
+
+This design is hardware-event-free: it does not depend on charger-attachment, battery-swap, motion-quiescence, or any other physical signal. The transition is **software-orchestrated**: cloud commands, firmware acks, cloud transitions. This is required because with 6–12 month AA battery life, there is no naturally-occurring physical event tied to between-patient handoff.
+
+There is **no caregiver-clickable reset button** in the portal. There is also no separate "prepare for next patient" affordance — end-assignment fires the wipe cmd immediately. The closest manual lever is a `force_reset` admin override (facility_admin+) for stuck devices that never ack (firmware bug, device permanently offline, etc.). Force-reset bypasses the wipe predicate, is heavily audited, and remains the only path to `ready_to_provision` without a clean wipe-ack.
+
+Full design rationale + decisions log: [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md).
 
 #### Provision-by-serial flow
 
@@ -445,8 +452,10 @@ If the activation message is lost in transit (cellular outage), the device stays
 When a patient is marked `discharged`:
 
 - All `provisioned` and `active_monitoring` devices currently assigned → automatic `end_assignment` → `discontinued`
-- Device does **not** auto-reset — staff must physically retrieve and plug into charger
-- Audit: `device.assignment_ended` with `reason: patient_discharged`
+- Each end-assignment **fires a `wipe` cmd** on `gs/{serial}/cmd` as part of the normal end-assignment flow (see "Wipe-ack-driven recycle" above)
+- Firmware acks the wipe whenever next online (immediately if in cellular range, queued otherwise); cloud auto-transitions each device to `ready_to_provision` on ack
+- Staff are not required to physically intervene — wipe-ack is software-orchestrated
+- Audit chain per device: `device.assignment_ended` (reason: `patient_discharged`) → `device.wipe_requested` → eventual `device.wipe_complete` + `device.recycled` on ack
 
 #### Authorization matrix
 
@@ -481,8 +490,13 @@ Every transition emits one audit log entry:
 | `device.preactivation_heartbeat` | Heartbeat received before activation (sampled to 1/hour/serial) |
 | `device.first_heartbeat` | Auto on `provisioned → active_monitoring` |
 | `device.assignment_ended` | `end_assignment` action; includes `reason` |
-| `device.reset_complete` | Firmware confirms reset on charger |
-| `device.force_reset` | Admin override |
+| `device.wipe_requested` | Cloud published `wipe` cmd to `gs/{serial}/cmd` (fires on every `end_assignment`) |
+| `device.wipe_complete` | Firmware acked wipe via Shadow `reported.wipe_complete` or heartbeat `last_cmd_id` echo |
+| `device.recycled` | Cloud auto-transitioned `discontinued → ready_to_provision` on wipe-ack + battery floor |
+| `device.wipe_failed` | Firmware reported wipe failure (e.g., flash error during wipe) — warning severity |
+| `device.battery_swapped` | Mid-deployment cold boot detected (boot_count increment + `reset_reason=POWER_ON` while state ∈ {provisioned, active_monitoring}); no state change — low-severity forensics |
+| `device.reset_complete` | **Deprecated 2026-05-17** (charger-gated reset removed). Replaced by `device.wipe_complete` + `device.recycled`. Constant retained in catalog for backwards compat; remove on next cleanup. |
+| `device.force_reset` | Admin override; bypasses wipe predicate |
 | `device.decommissioned` | Includes `decommissionReason` |
 | `device.recovered` | Reactivation from `decommissioned (lost)` |
 | `device.ownership_moved` | Cross-facility or cross-client transfer |
@@ -825,8 +839,8 @@ Payload: JSON
 
 | Field | Required | Validation |
 |-------|----------|-----------|
-| `cmd` | Yes | Enum: `activate` (only command in v1) |
-| `cmd_id` | Yes | UUID — firmware echoes in next heartbeat as `last_cmd_id` for ack |
+| `cmd` | Yes | Enum: `activate` \| `wipe` |
+| `cmd_id` | Yes | UUID — firmware echoes in next heartbeat as `last_cmd_id` for ack. Convention: prefix `act_` for activate, `wipe_` for wipe, for visual distinction in logs/audits |
 | `ts` | Yes | ISO 8601 cloud-side wall-clock at publish time |
 
 #### `activate` command
@@ -852,6 +866,35 @@ Firmware behavior on receipt:
 Cloud sees a heartbeat with `last_cmd_id` matching the issued activation command → marks `Device Registry.activated_at` and emits `device.activated` audit event. The state machine has already transitioned to `provisioned` at provision time; this is the firmware-side acknowledgement.
 
 Per-thing IoT policy authorizes the device to subscribe to `gs/{iot:Connection.Thing.ThingName}/cmd` only — devices cannot read other devices' command topics.
+
+#### `wipe` command
+
+Sent by the `device-api` Lambda immediately after a successful `end-assignment` (transition `provisioned`/`active_monitoring` → `discontinued`). Replaces the deprecated charger-gated reset path — see [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md) for rationale.
+
+```json
+{
+  "cmd": "wipe",
+  "cmd_id": "wipe_4f8e21b3-...",
+  "ts": "2026-05-17T18:30:00Z"
+}
+```
+
+Firmware behavior on receipt:
+1. If `battery_pct < 0.10` → defer wipe to next wake; do not ack. (Sanity floor — wipe is multi-second flash I/O; refuse on low battery to avoid partial wipes.)
+2. Wipe scope:
+   - **Wipe:** `/lfs/activation.bin`, in-progress session `.dat` writer buffer, calibration drift state (in-memory + persisted), opportunistic snippet buffer (`/snippets/*` contents)
+   - **Keep:** firmware image, device cert (sec_tag 201), modem cert, `boot_count`, `fault_counters`, `crash_forensics` partition (cross-deployment forensic continuity)
+3. Write Shadow `reported.wipe_complete = <cmd_id>` and `reported.wipe_completed_at = <ISO ts>` after successful wipe.
+4. Echo `cmd_id` via `last_cmd_id` field in next heartbeat.
+5. Stay in pre-activation behavior (blue LED, no session capture) until next provision/activate cycle.
+
+Cloud's heartbeat handler matches `last_cmd_id` against any `cmd_id` in `Device Registry.outstandingWipeCmds` issued within the last 24h (same ack-matching window as activation per DL14a). On match AND `battery_pct ≥ 0.10` in the acking heartbeat AND status = `discontinued`:
+- Transition status `discontinued → ready_to_provision`
+- REMOVE the entry from `outstandingWipeCmds`
+- Clear Shadow `desired.wipe_requested`
+- Emit `device.wipe_complete` + `device.recycled` audits
+
+The `device-shadow-handler` Lambda watches Shadow delta for `reported.wipe_complete` as a redundant ack path — either heartbeat or Shadow ack is sufficient; both firing is idempotent (CCFE on the second).
 
 ---
 
@@ -1456,7 +1499,7 @@ Path to portal-renders-real-data:
 | DL3 | Device ownership (`owningClientId`, `owningFacilityId`) is claimed at first provisioning, not at manufacture or shipping | Architecture §4 |
 | DL4 | Ownership persists through reset; only explicit cross-facility or cross-client moves change it | Architecture §4 |
 | DL5 | No facility inventory pool / no pre-allocation — provisioning is by typing the device serial | Architecture §4 |
-| DL6 | Reset (`discontinued` → `ready_to_provision`) is firmware-driven on charger; no portal "reset" button | Architecture §4 |
+| DL6 | Recycle (`discontinued` → `ready_to_provision`) is software-orchestrated: cloud issues `wipe` cmd on end-assignment; firmware wipes local data; cloud auto-transitions on ack with `battery_pct ≥ 0.10`. No charger dependency (devices use replaceable AAs with 6–12 month life — no naturally-occurring physical event for between-patient handoff). Force-reset admin override remains for stuck firmware. | Architecture §4 + [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md) (supersedes original DL6 charger-gated semantics) |
 | DL7 | `force_reset` admin override exists for stuck firmware; facility_admin+ only; audited | Architecture §4 |
 | DL8 | Patient discharge auto-ends device assignments → `discontinued`; staff must physically retrieve and reset | Architecture §4 |
 | DL9 | Cross-facility moves: client_admin only. Cross-client moves: internal_admin only. | Architecture §4 |
@@ -1466,6 +1509,8 @@ Path to portal-renders-real-data:
 | DL13 | Threshold Detector suppresses synthetic alerts on devices where `activated_at` is unset (no patient yet, no caregiver to notify) | Firmware coordination 2026-04-17 |
 | DL14 | Activation re-check on each wake = Device Shadow `desired.activated_at`. Cloud maintains invariant: `desired.activated_at` is non-null **iff** Device Registry status ∈ {`provisioned`, `active_monitoring`}. Every transition out of those states clears `desired.activated_at`. Shadow chosen over retained-MQTT for forward-compat with richer device-targeted state. | Firmware coordination 2026-04-26 §F.9.4 |
 | DL14b | Per-thing IoT policy authorizes MQTT-protocol shadow access on `$aws/things/{thing}/shadow/*` (publish + subscribe + receive) in addition to the REST-API actions `iot:GetThingShadow` / `iot:UpdateThingShadow`. The two grants cover different code paths: REST for cloud-side Lambdas, MQTT topics for firmware via NCS `aws_iot` lib. Wildcard form scoped to the device's own thing — explicit channel enumeration overflows the AWS IoT 2048-byte policy limit. | Firmware coordination 2026-04-28 §F3.2 / §C5.4 / §C6 |
+| DL15 | End-assignment fires a `wipe` downlink cmd on `gs/{serial}/cmd` immediately. Firmware acks via Shadow `reported.wipe_complete = <wipe_id>` + heartbeat `last_cmd_id = <wipe_id>`. Cloud auto-transitions `discontinued → ready_to_provision` on ack, gated by `battery_pct ≥ 0.10` sanity floor in the acking heartbeat. Cmd-still-in-`outstandingWipeCmds`-map is the idempotency invariant (mirrors `outstandingActivationCmds` per DL12). 24h ack window. Shadow `desired.wipe_requested` is non-null iff a wipe is outstanding (mirrors DL14 invariant). Firmware refuses to wipe below 0.10 battery and retries on next wake. | [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md) D1–D6 |
+| DL16 | `device.battery_swapped` audit event fires on mid-deployment cold boot detected via `boot_count` increment + `reset_reason=POWER_ON` while status ∈ {`provisioned`, `active_monitoring`}. Low-severity forensics; no state change. | [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md) D7 |
 
 ### Device & Ingestion
 | # | Requirement | Source |
@@ -1542,13 +1587,13 @@ Path to portal-renders-real-data:
 |--------|-------|-------|--------|---------|--------------|
 | `gosteady-{env}-cognito-pre-token` | Auth | 0A-rev | ✅ Deployed (2026-04-26) | Cognito V2 trigger (PRE_TOKEN_GENERATION_CONFIG) | ARM64 |
 | `gosteady-{env}-activity-processor` | Processing | 1B-rev | ✅ Deployed (2026-04-27) | IoT Rule (`gs/+/activity`) | ARM64 |
-| `gosteady-{env}-heartbeat-processor` | Processing | 1B-rev | ✅ Deployed 2026-04-27; activation-ack rewrite redeploy 2026-05-17 (closes coord §C18.5 Gap 1 + Gap 2: overwrite stale `activated_at` + fold `provisioned → active_monitoring` transition) | IoT Rule (`gs/+/heartbeat`) | ARM64 |
+| `gosteady-{env}-heartbeat-processor` | Processing | 1B-rev | ✅ Deployed 2026-04-27; activation-ack rewrite redeploy 2026-05-17 (closes coord §C18.5 Gap 1 + Gap 2: overwrite stale `activated_at` + fold `provisioned → active_monitoring` transition). 🔲 **Pending:** add `_try_wipe_ack` path + `device.battery_swapped` cold-boot detection per [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md) | IoT Rule (`gs/+/heartbeat`) | ARM64 |
 | `gosteady-{env}-threshold-detector` | Processing | 1B-rev | ✅ Deployed (2026-04-27) | IoT Rule on `$aws/things/+/shadow/update/documents` | ARM64 |
 | `gosteady-{env}-alert-handler` | Processing | 1B-rev | ✅ Deployed (2026-04-27) | IoT Rule (`gs/+/alert`) | ARM64 |
 | `gosteady-{env}-snippet-parser` | Ingestion | 1A-rev | ✅ Deployed (2026-04-27) | IoT Rule (`gs/+/snippet`) | ARM64 |
-| `gosteady-{env}-device-api` | Api | 2A-DL | ✅ Deployed (dev) 2026-05-17 | API Gateway HTTP API: 10 routes under `/api/v1/devices/*` + `/api/v1/patients/{id}/devices` + `/api/v1/admin/devices`. Internal route dispatch | ARM64 |
+| `gosteady-{env}-device-api` | Api | 2A-DL | ✅ Deployed (dev) 2026-05-17. 🔲 **Pending:** `end-assignment` action grows to issue `wipe` downlink cmd + populate `outstandingWipeCmds` map + write Shadow `desired.wipe_requested` per [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md) | API Gateway HTTP API: 10 routes under `/api/v1/devices/*` + `/api/v1/patients/{id}/devices` + `/api/v1/admin/devices`. Internal route dispatch | ARM64 |
 | `gosteady-{env}-discharge-cascade` | Api | 2A-DL | ✅ Deployed (dev) 2026-05-17 | DDB Stream on Patients table with filter for `status=discharged` | ARM64 |
-| `gosteady-{env}-device-shadow-handler` | Api | 2A-DL | ✅ Deployed (dev) 2026-05-17 | IoT Topic Rule on `$aws/things/+/shadow/update/documents` (parallel to threshold-detector); filters for `reported.reset_complete` | ARM64 |
+| `gosteady-{env}-device-shadow-handler` | Api | 2A-DL | ✅ Deployed (dev) 2026-05-17. 🔲 **Pending:** filter migrates from `reported.reset_complete` → `reported.wipe_complete` per [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md); handles auto-recycle transition on wipe ack | IoT Topic Rule on `$aws/things/+/shadow/update/documents` (parallel to threshold-detector) | ARM64 |
 | `gosteady-{env}-audit-forwarder` | Audit | 1.7 | ✅ Deployed (dev) 2026-05-17 | CW Logs subscription filter on each handler log group (`{ $.audit IS TRUE }`) | ARM64 |
 | `gosteady-{env}-jwt-authorizer` | Api | 2A | 🔲 New | API Gateway | ARM64 |
 | `gosteady-{env}-api-stub` | Api | 2A-0 | ✅ Deployed (dev) 2026-05-17 | API Gateway HTTP API `GET /api/v1/me` | ARM64 |
@@ -1632,6 +1677,12 @@ Path to portal-renders-real-data:
 | 5B | End-to-End Validation | — | ⬜ Future |
 
 > Phases 4A/4B/4C (FHIR, HL7v2, Bulk Export) are **cut from active roadmap**. See §12 for trigger criteria to reopen.
+
+### Design memos (cross-cutting decisions not tied to a single phase)
+
+| Memo | Description | Status |
+|---|---|---|
+| [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md) | AA-battery recycle: supersedes DL6 charger-gated reset with wipe-ack auto-recycle. Hardware shift to replaceable AAs with 6–12 mo life invalidated the charger model; new design is software-orchestrated wipe cmd + ack. | Decided 2026-05-17; implementation pending across 3 Lambdas + firmware |
 
 ### Playbooks (operational runbooks distinct from phase specs)
 

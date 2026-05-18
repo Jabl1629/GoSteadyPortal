@@ -6185,3 +6185,89 @@ firmware not in the test loop).*
 (highest-priority cloud-side item). No firmware action items. After
 this, cloud-side queue is 1C-slim or 2A-RD (any order).*
 
+
+---
+---
+
+# Joint cloud + firmware update — 2026-05-17 (directional change: AA-battery recycle — DL6 rewrite; charger-gated reset deprecated)
+
+> **From:** Jace + Claude. **Firmware action required:** new `wipe` cmd handler on `gs/{serial}/cmd` + local-wipe routine + Shadow ack contract. Detail below. Will be implemented in follow-up entry §C21+.
+>
+> **TL;DR:** Hardware direction shifted to replaceable disposable **AA batteries** with 6–12 month life. This invalidates ARCHITECTURE.md DL6's charger-gated reset model — there is no charger circuit on AA hardware, and between-patient handoff has no naturally-occurring physical event (patient deployments are typically 1–2 weeks, far shorter than battery life, so a single AA set serves many patient cycles without swap). Replacement design is **software-orchestrated wipe-ack auto-recycle**: end-assignment fires a `wipe` cmd on `gs/{serial}/cmd`; firmware wipes patient data + acks via Shadow `reported.wipe_complete` + heartbeat `last_cmd_id`; cloud auto-transitions `discontinued → ready_to_provision` on ack + battery floor. Mirrors the activation-ack pattern just shipped (§C19). Full design + decisions log in [`docs/specs/2026-05-17-aa-battery-recycle.md`](../specs/2026-05-17-aa-battery-recycle.md). ARCH §1 / §4 / §7 / §14 / §15 + `phase-2a-device-lifecycle.md` updated in this commit.
+
+---
+
+## C20.1 What changed (one paragraph)
+
+ARCH DL6 was originally "Reset is firmware-driven on charger; no portal reset button" — the charger-attachment moment served as the natural sanitization checkpoint. With replaceable AAs, there is no charger. Battery swap is rare (once or twice a year) and decoupled from patient handoff, so it can't be the trigger either. The new design replaces hardware events with a cloud-orchestrated software flow: `end-assignment` publishes a `wipe` downlink cmd → firmware wipes local patient data → firmware acks via Shadow `reported.wipe_complete` + heartbeat `last_cmd_id` echo → cloud sees the ack and auto-recycles `discontinued → ready_to_provision`. Gated by a `battery_pct ≥ 0.10` sanity floor at ack-time. Force-reset admin override stays as the safety hatch for stuck firmware.
+
+---
+
+## C20.2 Key decisions (memo §3 condensed)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | Trigger = cloud-issued `wipe` cmd, fired immediately on end-assignment | No physical event available; mirrors the activate cmd pattern |
+| D3 | Battery floor = `0.10` at firmware-side wipe-time AND cloud-side ack-time | Margin above 0.05 critical threshold; wipe is multi-second flash I/O |
+| D4 | Wipe scope: `/lfs/activation.bin`, in-progress session `.dat` buffer, calibration drift, `/snippets/*`. **Keep** crash_forensics partition + boot_count + fault_counters (cross-deployment forensic continuity) | Patient-identifying data wiped; forensics survives for debugging |
+| D5 | No grace window / no undo — end-assignment fires wipe immediately | Operationally simple; misclick-recovery deferred to non-breaking add-on if real-world signal emerges |
+| D6 | Idempotency via `outstandingWipeCmds` map (mirrors `outstandingActivationCmds`) | Same pattern as §C19 activation-ack fix; consistency lowers cognitive load |
+| D7 | `device.battery_swapped` audit on mid-deployment cold-boot (boot_count + reset_reason=POWER_ON, status ∈ {provisioned, active_monitoring}) | Cheap forensics; useful for "did the operator swap the AAs last month or did the device just brownout?" |
+| D8 | `force_reset` admin override retained; bypasses wipe predicate | Safety hatch for stuck firmware |
+| D9 | Decommission paths do NOT issue wipe (no ack possible for terminal states) | Avoids outstanding-cmd-map pollution from devices that may never come back |
+| D10 | Cross-facility / cross-client move requires status = `ready_to_provision` (tightens prior L15 from "rejects active_monitoring") | Ownership transfers happen only on clean (wiped) devices |
+
+Full decisions log + alternatives considered: [memo §3](../specs/2026-05-17-aa-battery-recycle.md#3-decisions-log).
+
+---
+
+## C20.3 Firmware-side scope (action required)
+
+The cloud-side implementation is independently testable via synthetic heartbeats, but the **end-to-end loop needs firmware**:
+
+1. **`gs/{serial}/cmd` handler** in `src/cloud.c`: dispatch `cmd: "wipe"` (alongside existing `activate`). Parse `wipe_id` UUID + `ts`.
+2. **Wipe routine** (likely new `src/wipe.c` or extend `activation.c`):
+   - Refuse + retry on next wake if `battery_pct < 0.10`
+   - Remove `/lfs/activation.bin`
+   - Truncate / discard in-progress session `.dat` writer buffer
+   - Reset calibration drift state (in-memory + persisted if applicable)
+   - Delete `/snippets/*` contents
+   - Keep: firmware image, certs (sec_tag 201, modem), boot_count, fault_counters, crash_forensics partition
+3. **Shadow read of `desired.wipe_requested`** on each cellular wake (analog to existing DL14 `desired.activated_at` recheck — likely a small delta to the same code path). If non-null and no on-flash matching wipe_id has been completed → trigger wipe routine.
+4. **Shadow write `reported.wipe_complete = <wipe_id>` + `reported.wipe_completed_at = <ISO ts>`** after successful wipe.
+5. **Echo wipe `cmd_id` via `last_cmd_id`** in next heartbeat — firmware already echoes most recent received cmd_id post §C18 buffer fix, so this should fall out for free as long as the cmd is received via the existing dispatch path.
+6. **Version bump**: `0.10.0-at-timeout` → `0.11.0-wipe-cmd` (or `0.11.0-aa-recycle`).
+
+**Cold-boot detection** (D7) requires **no firmware change** — `reset_reason` is already populated in heartbeat payload from existing crash-forensics infra. Cloud heartbeat-processor handles the audit emission.
+
+---
+
+## C20.4 Cloud-side scope
+
+5 commits planned, in this order (per memo §11):
+1. `audit_catalog.py` additions (zero-risk)
+2. `heartbeat-processor` + `_try_wipe_ack` + cold-boot `device.battery_swapped` detection
+3. `device-shadow-handler` `wipe_complete` filter + auto-recycle path
+4. `device-api` `end_assignment` wipe-cmd publish + force-reset cleanup + move-facility L15 tighten
+5. Observability stack new alarms (`wipe-ack-stuck`, recycle metrics)
+
+Each independently deployable. Synthetic tests T-W1 through T-W9 (memo §8) validate cloud-side without firmware.
+
+---
+
+## C20.5 Sequencing
+
+Per Jace's direction in this batch (single-session both-team work):
+1. **Now (this entry / Commit A)**: docs land — memo + ARCH + 2A-DL + this coord entry
+2. **Firmware work** (next): implement §C20.3 firmware-side changes; bench-validate on `GS9999999998`; bump version; commit
+3. **Cloud work** (after firmware): 5 commits per §C20.4; synthetic-test each; deploy
+4. **E2E bench validation**: full provision → end-assignment → wipe → ack → recycle cycle on real device
+
+The doc edits are the directional commitment; the code is the follow-through.
+
+---
+
+*Entry owner: Jace + Claude (cloud session, 2026-05-17, working autonomously across firmware + cloud while Jace is AFK).*
+*Closes the prior "next-up" item (cloud-queue 1C-slim or 2A-RD) — replaces with the AA-recycle implementation thread. After this batch lands end-to-end, cloud queue returns to 1C-slim / 2A-RD pick.*
+
+

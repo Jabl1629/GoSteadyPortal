@@ -38,7 +38,7 @@ deployed. `2A-0` must ship before this spec's implementation starts.
 | L3 | Ownership claimed at first-provision, not at manufacture or shipping | Architecture DL3 | No pre-allocation overhead; physical possession is sufficient MVP security |
 | L4 | Ownership persists through reset | Architecture DL4 | Prevents inadvertent device "theft" by reset-and-reclaim |
 | L5 | No facility inventory pool / no pre-allocation UI | Architecture DL5 | Provisioning is by typing serial; pool is an unnecessary abstraction |
-| L6 | Reset is firmware-driven on charger; no portal "reset" button | Architecture DL6 | Charger-presence is the natural sanitization checkpoint |
+| L6 | Recycle is software-orchestrated (`end-assignment` fires `wipe` downlink cmd; firmware acks via Shadow + heartbeat; cloud auto-transitions `discontinued → ready_to_provision` on ack + battery floor). No charger dependency. Force-reset admin override remains for stuck firmware. | Architecture DL6 (rewritten 2026-05-17 — see [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md)) | Hardware shift to replaceable AAs with 6–12 mo life invalidated the original charger model |
 | L7 | `force_reset` admin-only with elevated audit | Architecture DL7 | Bypass for stuck firmware; rare; audit-worthy |
 | L8 | Patient discharge auto-ends device assignments → `discontinued` | Architecture DL8 | Prevents zombie assignments; staff still physically handles device |
 | L9 | Cross-facility = client_admin; cross-client = internal_admin | Architecture DL9 | Inventory/financial action; tighter authz than daily ops |
@@ -47,7 +47,7 @@ deployed. `2A-0` must ship before this spec's implementation starts.
 | L12 | Customer tenancy boundary enforced via 2A-0's `enforce_tenancy(claims, target_client_id)` helper called inside every handler. Internal roles (`internal_*`) bypass | Architecture T2 + Phase 2A-0 L5 | The hard security boundary; centralized helper prevents per-handler drift |
 | L13 | Every transition emits an audit event via the 2A-0 `audit_middleware` decorator + `_shared/audit_catalog.py` constants | Architecture §4, §10 + Phase 1.7 (deployed 2026-05-17) | Decorator enforces consistency at infrastructure level; catalog constants catch typos at handler-write time |
 | L14 | Activation cmd publish is atomic with provision: if `iot:Publish` fails, the DDB writes (Device Registry status + DeviceAssignments row) are rolled back. API returns 500. Provision is idempotent so retry is safe | This spec — Open Question Q4 decision 2026-05-17 | Avoids "device shows provisioned in DB but never gets activated" zombie state. Retry-safe per the same `cmd_id` window (DL14a / 24h) |
-| L15 | Cross-facility / cross-client move is rejected (409) on devices in `active_monitoring` state. Caller must `end-assignment` first, then move | This spec — Open Question Q5 decision 2026-05-17 | Forces a deliberate two-step instead of hiding side effects (cascading end-assignment + ownership change) inside a single move operation |
+| L15 | Cross-facility / cross-client move requires status = `ready_to_provision` (tightened 2026-05-17 from prior "rejects active_monitoring"). Caller must `end-assignment` AND wait for wipe-ack before moving. | This spec — Q5 (2026-05-17) + memo D10 (2026-05-17 — [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md)) | Ownership transfers happen only on clean (wiped) devices. Avoids carrying patient-cache residue across ownership boundaries. |
 | L16 | "Stuck in `provisioned` >24 h post-activation-send" ops alarm ships as part of 2A-DL via a CloudWatch Logs metric filter on `device.activation_sent` events vs. `device.activated` events | This spec — Open Question Q6 decision 2026-05-17 | The firmware-ack codepath is the most fragile new surface in 2A-DL (multi-hop: API → IoT publish → device receive → device persist → device echo → cloud heartbeat handler). Shipping the alarm with the feature avoids running it blind |
 
 ## Assumptions
@@ -56,12 +56,12 @@ deployed. `2A-0` must ship before this spec's implementation starts.
 | # | Assumption | Risk if Wrong | Validation Plan |
 |---|-----------|---------------|-----------------|
 | A1 | Caregivers can reliably read and type a 12-character serial (`GS` + 10 digits) without scan | Provisioning friction; typos lead to errors | Field test in pilot facility; add QR support in Phase 2B if error rate >5% |
-| A2 | Charging-gated reset is a firmware capability that ships with the cap | If firmware can't detect charger or reliably wipe + report, the entire `discontinued → ready_to_provision` transition is broken | Firmware spec confirms this in Phase 5A; until then, force-reset is the only path |
+| A2 | **SUPERSEDED 2026-05-17.** Original assumption was charging-gated reset; replaced by wipe-ack-driven recycle per [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md). New assumption: firmware reliably executes the wipe routine on cloud-issued `wipe` cmd and reports `wipe_complete` via Shadow + heartbeat. Validation: firmware bench test (W-R2 in memo); until then, force-reset is the only path. |
 | A3 | Patient discharge is a single signal we can hook (status field on Patients table) | If discharge is split across multiple events, cascade may fire on wrong one | Discharge is a single state transition in the Patients data model (Phase 0B revision) |
 | A4 | "First heartbeat" is reliably distinguishable from subsequent heartbeats (no replay confusion) | First-heartbeat audit event misfires on replay | Heartbeat handler uses `if_not_exists` condition on a `firstHeartbeatAt` field |
 | A5 | Facility/Census IDs in caregiver JWT scope claims accurately reflect their current assignments | Caregiver retains stale scope after reassignment | RoleAssignments table is the source of truth; JWT refreshes pull fresh scope (15-min idle) |
 | A6 | Cross-client moves are vanishingly rare (chain acquisition migrations only) | If common, internal-admin-only is too restrictive | Confirm with sales/ops; widen to client_admin if needed |
-| A7 | Firmware will not emit a `device.reset_complete` message before patient cache is actually wiped | Cloud transitions to `ready_to_provision` while old patient data is still on device | Phase 5A firmware contract: reset_complete is the LAST step after wipe |
+| A7 | Firmware will not emit a `wipe_complete` ack (via Shadow `reported.wipe_complete` or heartbeat `last_cmd_id` echo) before patient cache is actually wiped | Cloud auto-recycles to `ready_to_provision` while old patient data is still on device | Firmware bench test confirms wipe routine completes before ack write (memo W-R2). Until validated, force-reset is the trusted path |
 
 ## Scope
 
@@ -100,29 +100,53 @@ Failure modes:
 - Activation command lost in flight (cellular outage post-publish) → device stays in pre-activation sleep until next provision retry, which republishes a fresh `cmd_id`. The original `cmd_id` remains in `outstandingActivationCmds` for 24h so a late ack (cellular returns within window) still resolves correctly (DL14a).
 - Firmware never echoes `last_cmd_id` (firmware bug, or device permanently offline) → cloud's `Device Registry.activated_at` stays NULL; Threshold Detector continues to suppress synthetic alerts (correct behavior — the device hasn't actually started monitoring). **L16 ops alarm fires** at +24h post-`device.activation_sent`: CloudWatch Logs metric filter counts `device.activation_sent` events without a matching `device.activated` event in 24h.
 
+#### End-assignment + wipe-cmd publish (atomic per L6 / DL15)
+
+> **Updated 2026-05-17** — original spec had end-assignment merely transition state. The hardware shift to replaceable AAs invalidated the charger-gated reset model, so end-assignment now also fires a `wipe` cmd. See [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md).
+
+After a successful end-assignment, the handler performs writes mirroring the provision pattern:
+
+1. Conditional `UpdateItem` on Device Registry: `status = discontinued`, `lastTransitionAt = <now>`, `outstandingWipeCmds.<wipe_id> = <now>`, `wipe_requested_at = <now>`. Conditional check: current status ∈ {`provisioned`, `active_monitoring`}.
+2. Close active DeviceAssignment row (`validUntil = <now>`).
+3. `UpdateThingShadow` setting `desired.activated_at = null` AND `desired.wipe_requested = <wipe_id>` in a single call (DL14 + DL15 invariants).
+4. `iot:Publish` to `gs/{serial}/cmd` with `{cmd: "wipe", cmd_id: "wipe_<uuid>", ts: <now>}`.
+5. Audits: `device.assignment_ended` (with `reason`) + `device.wipe_requested`.
+
+Rollback on step 4 publish failure: REMOVE the `outstandingWipeCmds` entry, restore Shadow `desired.wipe_requested = null`, return 500 with retry-safe response. Status stays at `discontinued` (the assignment is already ended; retry republishes the wipe with a fresh wipe_id).
+
 #### Discharge cascade hook
 - Listener on Patients table updates (DDB Streams or direct invocation from API handler that flips patient status)
 - Iterates active DeviceAssignments for that patient
-- Calls `end-assignment` for each → produces `device.assignment_ended` audit events with `reason: patient_discharged`
+- Calls `end-assignment` internally for each — which transitively fires the wipe cmd path described above
+- Produces `device.assignment_ended` (reason: `patient_discharged`) + `device.wipe_requested` audit chain per device
 
-#### Firmware-driven reset handler
-- IoT topic / Shadow update from device firmware indicating reset complete
-- Validates: device is in `discontinued` state (or `provisioned` for unactivated devices being reset)
-- Transitions Device Registry status → `ready_to_provision`
-- Clears the active DeviceAssignment row's `validUntil` if not already set
-- Clears `Shadow.desired.activated_at` per DL14 invariant (Shadow `desired.activated_at` is non-null iff status ∈ {provisioned, active_monitoring})
-- Emits `device.reset_complete` audit event
-- Does NOT clear `owningClientId` / `owningFacilityId` (ownership persists through reset — DL4)
-- Does NOT publish anything to the device (firmware initiated; no command needed)
+#### Firmware wipe-ack handler (per L6 / DL15)
+
+> **Renamed + rewritten 2026-05-17** (was "Firmware-driven reset handler"). The `reset_complete` Shadow signal is replaced by `wipe_complete`.
+
+Two parallel paths into the same auto-recycle predicate:
+
+**Path A — heartbeat-processor** (extends the `_try_activation_ack` path already in place): on every heartbeat with `last_cmd_id` set, look up `outstandingWipeCmds.<last_cmd_id>`. If match within 24h window AND `battery_pct ≥ 0.10` in this heartbeat AND status = `discontinued`:
+- `UpdateItem` (conditional on cmd-in-map + status=discontinued): SET `status = ready_to_provision`, `last_wipe_at = <heartbeat ts>`, `lastTransitionAt = <now>`; REMOVE `outstandingWipeCmds.#cid`
+- `UpdateThingShadow` to clear `desired.wipe_requested`
+- Audits: `device.wipe_complete` + `device.recycled`
+
+**Path B — device-shadow-handler** (existing 2A-DL Lambda): when `reported.wipe_complete` appears in a Shadow update document, same logic applies. Either path is sufficient; both firing for the same wipe_id is idempotent (CCFE on the second).
+
+Does NOT clear `owningClientId` / `owningFacilityId` (ownership persists through recycle — DL4).
+Does NOT publish anything to the device on success (firmware already wiped; ack flow is complete).
 
 #### Force-reset side effects
 
-Force-reset (`POST /devices/{serial}/force-reset`, facility_admin+) is for stuck devices that fail to report `reset_complete` on the charger. Behavior:
-- Transitions Device Registry status `discontinued → ready_to_provision` regardless of any `reset_complete` ack from the device
+Force-reset (`POST /devices/{serial}/force-reset`, facility_admin+) is for stuck devices that never ack a wipe cmd (firmware bug, device permanently offline, brownout mid-wipe, etc.). Behavior:
+- Transitions Device Registry status `discontinued → ready_to_provision` regardless of any pending wipe-ack
 - Closes any open DeviceAssignment row's `validUntil` (defensive — usually already closed)
 - Clears `Shadow.desired.activated_at` per DL14 invariant
-- **Does NOT publish anything to the device.** If the device were responsive, a normal reset on charger would have worked. Publishing a "force-yourself-reset" command is a Phase 5A firmware capability that doesn't exist yet
+- Clears `Shadow.desired.wipe_requested` per DL15 invariant (the pending wipe is now moot)
+- Clears `Device Registry.outstandingWipeCmds` (any pending entries are now moot)
+- **Does NOT publish anything to the device.** A wipe cmd was already published when end-assignment fired; if the device were responsive, the normal wipe-ack would have completed. Re-publishing achieves nothing.
 - Emits `device.force_reset` audit event with `reason: <free-text from caller>` (required) and `internal_access: true` if invoked by `internal_admin`
+- Important caveat: force-reset bypasses the wipe-ack predicate, so the cloud-side state transitions WITHOUT proof that local data was wiped. The device may retain old patient data until it next cellular-wakes and reads Shadow `desired.activated_at = null` per DL14 (which triggers firmware to drop back into pre-activation). The audit trail makes this caveat explicit so admins know not to force-reset a device they expect to redeploy without physical inspection.
 
 #### Portal UI
 
@@ -173,7 +197,7 @@ Internal-tier roles (`internal_support` read-only, `internal_admin` read+write) 
 - **Real-time device status push** to portal (live signal/battery view) — Phase 2B (2A polls)
 - **Cert-bound ownership** (firmware enforces "device cert must match claimed client") — Phase 5A firmware
 - **Device-level inventory cost tracking / depreciation** — out of product scope
-- **Force-wipe IoT command** (cloud → device "wipe yourself even if not on charger") — Phase 5A firmware
+- ~~**Force-wipe IoT command** (cloud → device "wipe yourself even if not on charger") — Phase 5A firmware~~ — **PROMOTED IN-SCOPE 2026-05-17.** The hardware shift to replaceable AAs made the charger-gated reset model invalid; the cloud-issued `wipe` cmd on `gs/{serial}/cmd` is now the primary recycle mechanism (see L6 + [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md)). Not "force-wipe" framing — the `wipe` cmd is the normal path, not an emergency override.
 
 ## Architecture
 
