@@ -6271,3 +6271,305 @@ The doc edits are the directional commitment; the code is the follow-through.
 *Closes the prior "next-up" item (cloud-queue 1C-slim or 2A-RD) — replaces with the AA-recycle implementation thread. After this batch lands end-to-end, cloud queue returns to 1C-slim / 2A-RD pick.*
 
 
+---
+---
+
+# Joint cloud + firmware update — 2026-05-17 (AA-battery-recycle implementation shipped + synthetic E2E validated; physical-device flash deferred to Jace's return)
+
+> **From:** Claude, acting as both cloud + firmware teams while Jace is AFK.
+>
+> **TL;DR:** Closes the §C20 announcement. Firmware 0.11.0-wipe-cmd
+> ([`5d73684`](https://github.com/Jabl1629/gosteady-firmware/commit/5d73684))
+> and the cloud-side B-series
+> ([`01c77a6`](https://github.com/Jabl1629/GoSteadyPortal/commit/01c77a6))
+> both shipped + pushed to main / feature/infra-scaffold respectively.
+> Cloud Lambdas deployed to dev. **5-stage synthetic E2E validation on
+> GS9999999998 passed** end-to-end (cloud-only, firmware kept on stale
+> 0.10.0-at-timeout per the §C20 sequencing decision — physical-device
+> roundtrip is the next-session checkpoint when Jace returns to flash).
+>
+> **Recommended next session for Jace:**
+>
+> 1. Flash 0.11.0-wipe-cmd to GS9999999998 (SW2 = nRF91 — verify!).
+>    Hex at `gosteady-firmware/build_cloud_gs98/merged.hex` (994 KB).
+> 2. Bench round-trip: provision → end-assignment via API → device
+>    receives `wipe` cmd on next cellular wake → firmware wipes local
+>    data → ack via Shadow `reported.wipe_complete` AND heartbeat
+>    `last_cmd_id` echo → cloud auto-recycles `discontinued →
+>    ready_to_provision`. Verify both ack paths fire.
+> 3. Spot-check that `/lfs/activation.bin` is actually gone post-wipe
+>    via the dump-tool flow (closes W-R2 firmware-correctness audit
+>    from the design memo §9).
+
+---
+
+## C21.1 What shipped (in order)
+
+| Layer | Commit | What |
+|---|---|---|
+| Firmware | [`5d73684`](https://github.com/Jabl1629/gosteady-firmware/commit/5d73684) | 0.11.0-wipe-cmd: new `src/wipe.h` + `src/wipe.c` module; `src/cloud.c` dispatch extended (`activate_cmd_json` → `app_cmd_json` shared shape; `handle_wipe_cmd` delegates to `wipe_now`); `src/snippet.c` + `src/snippet.h` new `gosteady_snippet_purge_all()`; `CMakeLists.txt` adds `wipe.c`; `src/version.h` bumped + changelog entry pointing at portal memo |
+| Cloud | [`01c77a6`](https://github.com/Jabl1629/GoSteadyPortal/commit/01c77a6) | B-1 audit_catalog (5 new constants), B-2 heartbeat-processor (`_try_wipe_ack` + `_maybe_emit_battery_swapped` + dispatch by cmd_id prefix; IAM grant expanded for Shadow GET), B-3 device-shadow-handler (refactored into wipe-path + reset-path with dispatch + legacy compat), B-4 device-api (end-assignment fires wipe cmd, force-reset clears wipe state, move tightened to require `ready_to_provision`), B-5 observability (L17 alarm + 3 metric filters) |
+
+---
+
+## C21.2 Firmware-side details
+
+**Wipe routine** (`gosteady_wipe_now` in `src/wipe.c`) orchestrates:
+
+1. Battery floor check — `gosteady_battery_get()`; refuse with `-EAGAIN` if `battery_pct < 0.10` (cloud retries on next heartbeat once battery recovers post-AA-swap)
+2. Session stop — `gosteady_session_is_active()` → `gosteady_session_stop(NULL)` (drops in-flight buffer; intentional)
+3. `gosteady_activation_clear()` — fs_unlink /lfs/activation.bin + reset in-RAM atomic
+4. `gosteady_session_orphan_sweep()` — unconditionally fs_unlinks all /lfs/sessions/*.dat
+5. `gosteady_snippet_purge_all()` (new) — iterates /snippets/, fs_unlinks every .bin/.json/.up tuple (defensive skip of currently-active capture's UUID, though in practice no capture is active post-step-2)
+6. `gosteady_cloud_set_last_cmd_id(wipe_id)` — armed for heartbeat echo
+7. Shadow `reported.wipe_complete = <wipe_id>` + `reported.wipe_completed_at = <ISO>` via `aws_iot_send`
+
+**Wipe scope** (verbatim per memo §3 D4):
+- **WIPE**: /lfs/activation.bin, /lfs/sessions/*.dat, /snippets/*
+- **KEEP**: firmware image, device cert (sec_tag 201), modem cert, boot_count, fault_counters, crash_forensics partition
+
+**Battery floor** is enforced firmware-side (refuse + retry) AND cloud-side (heartbeat-processor `_try_wipe_ack` + device-shadow-handler `_handle_wipe_complete` both verify in the acking signal). Both layers agree on 0.10.
+
+**Cold-boot detection for `device.battery_swapped` (DL16)** required NO firmware change — `reset_reason` is already populated in heartbeat from existing crash-forensics infra. Cloud heartbeat-processor handles the audit emission via Shadow GET of prior `boot_count`.
+
+**Build** with full env vars (the `~/.zshrc` PATH-prepend issue per `GOSTEADY_CONTEXT.md` lines 52-54 + ZEPHYR_SDK_INSTALL_DIR + ZEPHYR_TOOLCHAIN_VARIANT="zephyr") yielded:
+- merged.hex: 1,003,156 bytes (vs 994,046 for 0.10.0-at-timeout — +9,110 B for wipe.c + snippet purge_all + dispatch + Shadow ack helper)
+- Zero warnings, zero errors
+- RAM/ROM percentage not directly readable from the west build output (would need to inspect `zephyr.map`); will surface naturally on first flash via the `nrfjprog --verify` step
+
+**NOT flashed** during this AFK session per `GOSTEADY_CONTEXT.md:36` SW2-position cascade-corruption warning. Hex sits at
+`gosteady-firmware/build_cloud_gs98/merged.hex` waiting for Jace to flash.
+
+---
+
+## C21.3 Cloud-side details
+
+### Deploy chronology
+
+```
+GoSteady-Dev-Processing  UPDATE_COMPLETE   51.86 s
+GoSteady-Dev-Api         UPDATE_COMPLETE   41.42 s
+```
+
+Single attempt for each. One pre-deploy snag worth noting: tsc was
+silently not rebuilding `lib/stacks/api-stack.js` despite the .ts being
+newer. First `cdk synth` showed the new alarms / metric filters were
+missing. Force-delete-and-rebuild (`rm lib/stacks/api-stack.js && npx
+tsc`) fixed it. Root cause not fully pinned; likely macOS/iCloud-bound
+mtime weirdness. Worth a heads-up for future deploys: always check
+`.js` file timestamps relative to `.ts` after edits.
+
+### Code changes — surface map
+
+| File | Change |
+|---|---|
+| `infra/lambda/_shared/audit_catalog.py` | +5 constants (wipe_requested, wipe_complete, recycled, wipe_failed, battery_swapped); reset_complete kept as deprecated |
+| `infra/lambda/heartbeat-processor/handler.py` | +`_try_wipe_ack` (parallel to `_try_activation_ack` — same idempotency pattern). +`_maybe_emit_battery_swapped` (Shadow GET only when reset_reason=POWER_ON to minimize overhead). Main handler dispatches by cmd_id prefix (`act_` / `wipe_`). All audit emits now use catalog constants. |
+| `infra/lambda/device-shadow-handler/handler.py` | Refactored monolithic handler into two paths: `_handle_wipe_complete` (new AA-recycle) + `_handle_reset_complete` (legacy charger compat). Battery floor enforced. Same DDB transition + audit emission via either path; idempotent with heartbeat-processor via cmd-in-map invariant. |
+| `infra/lambda/device-api/handler.py` | end_assignment: two-step DDB update (mirrors provision pattern) — step 1 sets discontinued + ensures map, step 2 inserts wipe_id. Single Shadow call sets both `desired.activated_at=null` AND `desired.wipe_requested=<wipe_id>` atomically. Publishes wipe cmd; soft-fail on publish error. force_reset: clears outstandingWipeCmds + Shadow desired.wipe_requested. move (facility/client): tightened to require `status=ready_to_provision` per memo D10. |
+| `infra/lib/stacks/processing-stack.ts` | Heartbeat-processor IAM: `iot:UpdateThingShadow` → `iot:Get+UpdateThingShadow` (for battery-swap Shadow GET) |
+| `infra/lib/stacks/api-stack.ts` | New L17 alarm `gosteady-{env}-device-wipe-ack-stuck` (metric-math: requested - complete > 0 over 24h). 3 new metric filters: device-api log group (wipe_requested) + heartbeat-processor log group (wipe_complete) + device-shadow-handler log group (wipe_complete; same metric name → unified count). |
+
+---
+
+## C21.4 Synthetic E2E validation (cloud-only)
+
+Firmware kept on stale 0.10.0-at-timeout; tests mock the firmware ack
+via `aws iot-data publish` (heartbeat path) and `aws iot-data
+update-thing-shadow` (Shadow path). Test user: `2a-smoke@test.local`
+(caregiver / `dtc_smoke_test` / `fac_smoke_001` / `cen_smoke_001`).
+Bench unit: `GS9999999998`. Patient: `pt_bench_98`.
+
+### T-W1 — end-assignment fires wipe cmd
+
+`POST /api/v1/devices/GS9999999998/end-assignment {reason:"option_a_synthetic_wipe_test"}` →
+200 with response body:
+```json
+{
+  "device": {"serialNumber": "GS9999999998", "status": "discontinued",
+             "lastTransitionAt": "2026-05-18T02:06:27Z"},
+  "wipe": {"wipe_id": "wipe_2de4bd2a-3920-4218-a0da-9b53d13f56d9",
+            "ackWindowHours": 24, "publish_ok": true}
+}
+```
+
+Post-call DDB state:
+- status: discontinued ✓
+- outstandingWipeCmds: {wipe_id: issuance_ts} ✓
+- wipe_requested_at: set ✓
+- currentAssignmentSk: cleared ✓
+
+Post-call Shadow:
+- desired.activated_at: null ✓
+- desired.wipe_requested: wipe_2de4bd2a-... ✓
+
+Audits emitted: `device.assignment_ended` + `device.wipe_requested`
+(both atomic at `02:06:27.417Z`, `schema_version: 1`).
+
+### T-W2 — heartbeat wipe ack auto-recycles
+
+Synthetic heartbeat to `gs/GS9999999998/heartbeat` with
+`last_cmd_id=wipe_2de4bd2a-..., battery_pct=0.85, firmware="0.11.0-wipe-cmd"`.
+
+Post-ack DDB:
+- status: **ready_to_provision** ✓
+- last_wipe_at: 2026-05-18T02:06:58Z ✓
+- outstandingWipeCmds: empty ✓
+- owningClientId: dtc_smoke_test (persists per DL4) ✓
+
+Post-ack Shadow: `desired` is empty (wipe_requested cleared) ✓.
+
+Audits: `device.wipe_complete` + `device.recycled` (atomic at
+`02:07:01.435Z`, `schema_version: 1`, full `before`/`after`/`extra`
+blocks).
+
+### T-W3 — replay idempotency
+
+Re-publish the same heartbeat (same last_cmd_id) → state unchanged.
+Code path: scan finds empty `outstandingWipeCmds` → falls into the
+"no_outstanding" log branch → returns False. No audit. No DDB write.
+
+### T-W5a — battery floor refuses recycle
+
+Setup: re-provision + end-assignment → fresh wipe_id
+`wipe_364a803c-...`. Synthetic heartbeat with `battery_pct=0.05` (below
+the 0.10 floor) + that wipe_id.
+
+Post-publish: status still `discontinued`, cmd still in
+outstandingWipeCmds, no transition. Log line:
+```json
+{
+  "message": "wipe_ack_below_battery_floor",
+  "serial": "GS9999999998",
+  "last_cmd_id": "wipe_364a803c-...",
+  "battery_pct": 0.05
+}
+```
+
+### T-W5b — battery above floor succeeds
+
+Same wipe_id re-published with `battery_pct=0.80`. Recycle completes:
+status → ready_to_provision, cmd cleared, audits emitted. Proves the
+floor is a gate, not a permanent rejection.
+
+### T-W6 — device-shadow-handler parallel path
+
+Setup: re-provision + end-assignment → fresh wipe_id
+`wipe_98711acd-...`. `aws iot-data update-thing-shadow` writes
+`reported.wipe_complete=wipe_id, reported.wipe_completed_at, reported.battery_pct=0.85`
+(simulating firmware acking via Shadow without a heartbeat).
+
+Post-update: device-shadow-handler picked up the Shadow update,
+verified predicates, atomically transitioned to ready_to_provision +
+emitted both audits (visible in handler's own log group; audit
+forwarder propagates to centralized log within ~60 s). Proves the
+parallel path works independently of heartbeat-processor.
+
+---
+
+## C21.5 What's NOT validated yet (gated on firmware flash)
+
+| Test | Why deferred |
+|---|---|
+| Firmware actually executes the wipe routine (file unlinks, Shadow ack write) | Needs flash + bench observation. Memo §9 W-R2 — confirm `/lfs/activation.bin` is gone post-wipe via the dump-tool flow |
+| Battery floor enforced firmware-side (refuse + retry below 0.10) | Needs bench harness that can deliver a wipe cmd while battery is artificially low. Could be done with a `CONFIG_GOSTEADY_BATTERY_FAKE_PCT` Kconfig if it doesn't exist; not in this batch |
+| `device.battery_swapped` audit on cold-boot mid-deployment | Needs an actual battery swap on a `provisioned`/`active_monitoring` device. Will happen organically at first AA swap |
+| Persistent MQTT session queueing of wipe cmds for offline devices | Needs device to be offline when end-assignment fires + come online later. Will happen organically once the firmware-side wipe handler is live |
+| L17 alarm fires after 24h wipe-ack-stuck | Time-gated; can be accelerated via synthetic CloudWatch PutMetricData if a real failure mode doesn't appear organically |
+| `crash_forensics` partition truly survives the wipe (D4 keep-list) | Needs bench observation post-wipe |
+| force_reset bypasses wipe predicate + cleans outstandingWipeCmds | Cloud code is straightforward but needs facility_admin-role user to test API path |
+| L15 move tightening (rejects status != ready_to_provision) | Caregiver user gets 403 (role) before the 409 (status) fires — needs a client_admin user to exercise the status check explicitly |
+
+These are real test gaps but none block the firmware flash + bench
+roundtrip. They're follow-up validations.
+
+---
+
+## C21.6 Final bench state (post-synthetic-tests)
+
+```
+serialNumber: GS9999999998
+status: ready_to_provision
+last_wipe_at: 2026-05-18T02:09:55Z  (T-W6 transition timestamp)
+firstHeartbeatAt: 2026-05-18T00:26:14Z  (from §C19; persists)
+outstandingActivationCmds: empty
+outstandingWipeCmds: empty
+owningClientId: dtc_smoke_test
+owningFacilityId: fac_smoke_001
+```
+
+Shadow `desired`: empty. Ready for next provision cycle when Jace
+brings firmware to 0.11.0-wipe-cmd.
+
+---
+
+## C21.7 No firmware action items in this batch
+
+The firmware code is at parity with the cloud contract (commit
+[`5d73684`](https://github.com/Jabl1629/gosteady-firmware/commit/5d73684)
+pushed to `main`). The deferred actions are:
+
+1. Flash `build_cloud_gs98/merged.hex` to `GS9999999998` — Jace on
+   return; SW2 position must be verified per `GOSTEADY_CONTEXT.md:36`
+2. Bench round-trip: provision → end-assignment → wipe ack via real
+   firmware path → recycle confirmation
+3. Spot-check `/lfs/activation.bin` absence post-wipe via the
+   `pull_sessions.py`-style dump flow
+
+After those land, §C22 will close the loop.
+
+---
+
+## C21.8 Updated §C20 sequencing status
+
+| § | Item | Status |
+|---|---|---|
+| §C20.5.1 | Docs land (memo + ARCH + 2A-DL + coord §C20) | ✅ DONE (Commit [`238a814`](https://github.com/Jabl1629/GoSteadyPortal/commit/238a814)) |
+| §C20.5.2 | Firmware work | ✅ DONE — code committed [`5d73684`](https://github.com/Jabl1629/gosteady-firmware/commit/5d73684); build clean; FLASH deferred to Jace |
+| §C20.5.3 | Cloud work (5 commits) | ✅ DONE — single bundled commit [`01c77a6`](https://github.com/Jabl1629/GoSteadyPortal/commit/01c77a6) (chose bundled rollup over 5-commit chain to minimize iCloud-sync cycles between commits) |
+| §C20.5.4 | E2E bench validation | 🟡 PARTIAL — cloud-only synthetic E2E (T-W1/2/3/5a/5b/6) ✅ all pass; firmware-in-loop test gated on Jace flashing |
+
+After Jace flashes + bench-validates, cloud queue returns to **1C-slim
+offline detector** OR **2A-RD patient reads** (Flutter dashboard
+unblock) — either order. Personal lean: 1C-slim first (closes the
+§C11.7 "cap silently dead, no alarm" ops gap; small scope).
+
+---
+
+## C21.9 Implementation-time observations worth noting
+
+- **§C18.5 activation-ack pattern reused**: the `_try_wipe_ack` shape
+  mirrors `_try_activation_ack` exactly (cmd-in-map idempotency
+  invariant; conditional UpdateItem; same audit shape). Consistency
+  lowers cognitive load when reading the handler later. Per-cmd-prefix
+  dispatch (`act_` / `wipe_`) in the main handler keeps the two paths
+  cleanly separated.
+- **Two parallel ack paths intentionally**: heartbeat-processor sees
+  `last_cmd_id` echo; device-shadow-handler sees `reported.wipe_complete`.
+  Either fires the same auto-recycle; the second one's
+  ConditionalCheckFailedException is benign. Redundancy is by design
+  (mirrors the DL14 activation pattern). T-W2 exercised the heartbeat
+  path; T-W6 exercised the Shadow path. Both work independently.
+- **Audit subject-key naming inconsistency** surfaced during T-W2 audit
+  verification: device-api emits `subject.serialNumber` while
+  heartbeat-processor + device-shadow-handler emit `subject.deviceSerial`.
+  Both shapes work and the audit-forwarder catches both via `$.audit IS
+  TRUE`. Worth a small future cleanup (pick one) but not a blocker.
+- **tsc + iCloud mtime weirdness**: `npm run build` returned exit 0 but
+  didn't actually recompile `lib/stacks/api-stack.js` despite `.ts`
+  being newer. First synth missed the new alarm + metric filters.
+  Force-delete-and-rebuild fixed it. Future deploys should sanity-check
+  `.js` mtime vs `.ts` mtime after edits in this repo.
+- **Synthetic ≠ end-to-end**: T-W2 + T-W6 prove cloud-side ack handling
+  works. They do NOT prove firmware actually wipes the files. That's
+  W-R2 in the memo's FMEA and stays open until bench validation.
+
+---
+
+*Entry owner: Claude, acting as both firmware + cloud teams while Jace
+is AFK. Single autonomous session, 2026-05-17.*
+*Closes §C20 + the §C20.3 firmware action items + the §C20.4 cloud
+B-series. Bench flash gated on Jace's return; §C22 will close the
+firmware-in-loop validation loop.*
+
+
