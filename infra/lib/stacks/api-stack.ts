@@ -501,6 +501,78 @@ export class ApiStack extends cdk.Stack {
     });
     stuckAlarm.addAlarmAction(snsAction);
 
+    // ── L17 alarm: wipe-ack stuck >24h (AA-battery-recycle, 2026-05-17) ──
+    // Sibling of L16 for the new wipe-ack path. device-api emits
+    // `device.wipe_requested` on every end-assignment; heartbeat-processor
+    // OR device-shadow-handler emits `device.wipe_complete` on ack.
+    // Math alarm: requested - complete > 0 for 24h indicates at least
+    // one device that received the wipe cmd but never acked (firmware
+    // bug, device permanently offline, etc.). Admin force-reset clears.
+    // Spec: 2026-05-17-aa-battery-recycle.md memo §9 W-R1 + ARCH DL15.
+    const wipeRequestedMetric = deviceApi.function.logGroup.addMetricFilter('WipeRequestedFilter', {
+      filterPattern: logs.FilterPattern.literal('{ $.event = "device.wipe_requested" }'),
+      metricNamespace: `GoSteady/Audit/${env}`,
+      metricName: 'DeviceWipeRequested',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    // device.wipe_complete can fire from either heartbeat-processor or
+    // device-shadow-handler. We attach a metric filter on each log group;
+    // CloudWatch sums them under the same metric name.
+    const wipeCompleteHeartbeatMetric = heartbeatLogGroup.addMetricFilter('WipeCompleteHeartbeatFilter', {
+      filterPattern: logs.FilterPattern.literal('{ $.event = "device.wipe_complete" }'),
+      metricNamespace: `GoSteady/Audit/${env}`,
+      metricName: 'DeviceWipeComplete',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const shadowLogGroup = logs.LogGroup.fromLogGroupName(
+      this, 'DeviceShadowHandlerLogRef',
+      `/aws/lambda/gosteady-${env}-device-shadow-handler`,
+    );
+    const wipeCompleteShadowMetric = shadowLogGroup.addMetricFilter('WipeCompleteShadowFilter', {
+      filterPattern: logs.FilterPattern.literal('{ $.event = "device.wipe_complete" }'),
+      metricNamespace: `GoSteady/Audit/${env}`,
+      metricName: 'DeviceWipeComplete',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    // Reference the unified metric for the math expression (both filters
+    // emit into the same metric name, so we just query the namespace).
+    const wipeRequestedSum = wipeRequestedMetric.metric({
+      period: cdk.Duration.hours(24),
+      statistic: 'Sum',
+    });
+    const wipeCompletedSum = new cloudwatch.Metric({
+      namespace: `GoSteady/Audit/${env}`,
+      metricName: 'DeviceWipeComplete',
+      period: cdk.Duration.hours(24),
+      statistic: 'Sum',
+    });
+    void wipeCompleteHeartbeatMetric;  // referenced for the implicit metric-filter side-effect
+    void wipeCompleteShadowMetric;
+
+    const wipeStuckExpression = new cloudwatch.MathExpression({
+      expression: 'requested - completed',
+      usingMetrics: { requested: wipeRequestedSum, completed: wipeCompletedSum },
+      period: cdk.Duration.hours(24),
+      label: 'unacked_wipes_24h',
+    });
+
+    const wipeStuckAlarm = new cloudwatch.Alarm(this, 'DeviceWipeAckStuck', {
+      alarmName: `gosteady-${env}-device-wipe-ack-stuck`,
+      alarmDescription:
+        'L17: device.wipe_requested count exceeds device.wipe_complete count over 24h — at least ' +
+        'one discontinued device has not acked the wipe cmd (firmware bug, permanently offline, ' +
+        'etc.). Admin force-reset is the recovery path. See ARCH DL15 + 2026-05-17-aa-battery-recycle.md.',
+      metric: wipeStuckExpression,
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    wipeStuckAlarm.addAlarmAction(snsAction);
+
     // ── 2A-DL outputs ──────────────────────────────────────────────
     new cdk.CfnOutput(this, 'DeviceApiName', {
       value: deviceApi.function.functionName,

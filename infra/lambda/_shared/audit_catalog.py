@@ -33,6 +33,12 @@ AUDIT_DEVICE_SNIPPET_UPLOADED = "device.snippet_uploaded"
 # Phase 2A-DL additions (2026-05-17):
 AUDIT_DEVICE_PROVISION_ROLLBACK = "device.provision_rollback"  # L14 — provision rolled back on IoT publish failure
 AUDIT_DEVICE_STUCK_IN_PROVISIONED = "device.stuck_in_provisioned"  # L16 — alarm-emitted, not handler-emitted
+# AA-battery-recycle additions (2026-05-17, coord §C20 + docs/specs/2026-05-17-aa-battery-recycle.md):
+AUDIT_DEVICE_WIPE_REQUESTED = "device.wipe_requested"  # Cloud published wipe cmd on end-assignment
+AUDIT_DEVICE_WIPE_COMPLETE = "device.wipe_complete"    # Firmware acked wipe via Shadow or heartbeat
+AUDIT_DEVICE_RECYCLED = "device.recycled"              # Cloud auto-transitioned discontinued → ready_to_provision
+AUDIT_DEVICE_WIPE_FAILED = "device.wipe_failed"        # Firmware reported wipe failure (warning severity)
+AUDIT_DEVICE_BATTERY_SWAPPED = "device.battery_swapped"  # Mid-deployment cold-boot detected — no state change
 
 # ── Patient / activity / alert (Phase 1B-rev + Phase 2A) ──────────────
 AUDIT_PATIENT_ACTIVITY_CREATE = "patient.activity.create"
@@ -80,6 +86,11 @@ KNOWN_AUDIT_EVENTS = frozenset(
         AUDIT_DEVICE_SNIPPET_UPLOADED,
         AUDIT_DEVICE_PROVISION_ROLLBACK,
         AUDIT_DEVICE_STUCK_IN_PROVISIONED,
+        AUDIT_DEVICE_WIPE_REQUESTED,
+        AUDIT_DEVICE_WIPE_COMPLETE,
+        AUDIT_DEVICE_RECYCLED,
+        AUDIT_DEVICE_WIPE_FAILED,
+        AUDIT_DEVICE_BATTERY_SWAPPED,
         AUDIT_PATIENT_ACTIVITY_CREATE,
         AUDIT_PATIENT_ACTIVITY_READ,
         AUDIT_PATIENT_DETAIL_READ,

@@ -32,6 +32,13 @@ import boto3
 from botocore.exceptions import ClientError
 
 from _shared import audit_logger, emit_audit, get_logger, get_metrics
+from _shared.audit_catalog import (
+    AUDIT_DEVICE_ACTIVATED,
+    AUDIT_DEVICE_BATTERY_SWAPPED,
+    AUDIT_DEVICE_FIRST_HEARTBEAT,
+    AUDIT_DEVICE_RECYCLED,
+    AUDIT_DEVICE_WIPE_COMPLETE,
+)
 from _shared.observability import make_device_metrics
 from aws_lambda_powertools.metrics import MetricUnit
 
@@ -288,7 +295,7 @@ def _try_activation_ack(serial: str, last_cmd_id: str, heartbeat_ts: datetime) -
         activated_after["status"] = "active_monitoring"
 
     emit_audit(
-        "device.activated",
+        AUDIT_DEVICE_ACTIVATED,
         subject={"deviceSerial": serial},
         action="update",
         after=activated_after,
@@ -298,7 +305,7 @@ def _try_activation_ack(serial: str, last_cmd_id: str, heartbeat_ts: datetime) -
 
     if will_transition_status:
         emit_audit(
-            "device.first_heartbeat",
+            AUDIT_DEVICE_FIRST_HEARTBEAT,
             subject={"deviceSerial": serial},
             action="update",
             before={"status": "provisioned"},
@@ -314,6 +321,247 @@ def _try_activation_ack(serial: str, last_cmd_id: str, heartbeat_ts: datetime) -
     return True
 
 
+def _try_wipe_ack(serial: str, last_cmd_id: str, heartbeat_ts: datetime,
+                   battery_pct: float) -> bool:
+    """
+    Sibling of `_try_activation_ack` for the AA-battery-recycle design
+    (firmware coord §C20 / portal `docs/specs/2026-05-17-aa-battery-recycle.md`).
+
+    Look up Device Registry's `outstandingWipeCmds.<last_cmd_id>`. If present
+    within the 24h ack window AND device is currently in `discontinued` AND
+    `battery_pct >= 0.10` in the acking heartbeat, atomically:
+      - SET status = ready_to_provision
+      - SET last_wipe_at = <heartbeat ts>
+      - SET lastTransitionAt = <heartbeat ts>
+      - REMOVE outstandingWipeCmds.<last_cmd_id>
+      - Clear Shadow desired.wipe_requested
+
+    Emits `device.wipe_complete` + `device.recycled` audits. Returns True if
+    the recycle happened, False otherwise (no match in map / battery floor
+    not met / status not discontinued / ConditionalCheckFailedException).
+
+    Idempotency mirrors the activation-ack pattern (DL15): cmd-in-map is the
+    invariant. First successful ack REMOVEs the entry; duplicate falls out at
+    the scan step or at the conditional check.
+    """
+    # Battery floor — sanity check at ack time (mirrors firmware-side floor
+    # in `gosteady_wipe_now` per portal memo D3). Wipe may have completed
+    # firmware-side just before brownout; refuse to auto-recycle from a
+    # device that's about to die. Cloud will see the next ack-bearing
+    # heartbeat once battery recovers.
+    if battery_pct is None or float(battery_pct) < 0.10:
+        logger.info(
+            "wipe_ack_below_battery_floor",
+            extra={
+                "serial": serial,
+                "last_cmd_id": last_cmd_id,
+                "battery_pct": battery_pct,
+            },
+        )
+        return False
+
+    try:
+        item = _device_tbl.get_item(Key={"serialNumber": serial}).get("Item") or {}
+    except ClientError as e:
+        logger.exception("wipe_ack_lookup_failed", extra={"serial": serial, "error": str(e)})
+        return False
+
+    outstanding: dict[str, str] = item.get("outstandingWipeCmds") or {}
+    cutoff = heartbeat_ts - timedelta(hours=ACK_WINDOW_HOURS)
+
+    matched_issued_at: str | None = None
+    for cmd_id, issued_iso in outstanding.items():
+        if cmd_id != last_cmd_id:
+            continue
+        try:
+            issued_at = _parse_iso(str(issued_iso))
+        except (TypeError, ValueError):
+            continue
+        if issued_at >= cutoff:
+            matched_issued_at = str(issued_iso)
+            break
+
+    if matched_issued_at is None:
+        if outstanding:
+            logger.warning(
+                "wipe_ack_no_match",
+                extra={
+                    "serial": serial,
+                    "last_cmd_id": last_cmd_id,
+                    "outstanding_count": len(outstanding),
+                },
+            )
+        else:
+            logger.info(
+                "wipe_ack_no_outstanding",
+                extra={"serial": serial, "last_cmd_id": last_cmd_id},
+            )
+        return False
+
+    current_status = item.get("status")
+    if current_status != "discontinued":
+        # Wipe-ack against a non-discontinued device shouldn't happen in a
+        # well-formed flow — log + bail. Could be a stale cmd_id echo from
+        # a previous cycle that wasn't cleaned up; force_reset clears that.
+        logger.warning(
+            "wipe_ack_wrong_status",
+            extra={
+                "serial": serial,
+                "last_cmd_id": last_cmd_id,
+                "current_status": current_status,
+            },
+        )
+        return False
+
+    wiped_at_iso = heartbeat_ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        _device_tbl.update_item(
+            Key={"serialNumber": serial},
+            UpdateExpression=(
+                "SET #s = :rp, last_wipe_at = :w, lastTransitionAt = :w "
+                "REMOVE outstandingWipeCmds.#cid"
+            ),
+            ConditionExpression=(
+                "attribute_exists(outstandingWipeCmds.#cid) AND #s = :disc"
+            ),
+            ExpressionAttributeNames={"#cid": last_cmd_id, "#s": "status"},
+            ExpressionAttributeValues={
+                ":rp": "ready_to_provision",
+                ":w": wiped_at_iso,
+                ":disc": "discontinued",
+            },
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            logger.info(
+                "wipe_ack_skipped",
+                extra={
+                    "serial": serial,
+                    "last_cmd_id": last_cmd_id,
+                    "read_status": current_status,
+                },
+            )
+            return False
+        logger.exception("wipe_ack_write_failed", extra={"serial": serial})
+        raise
+
+    # Clear Shadow desired.wipe_requested (best-effort — non-fatal on failure;
+    # device-shadow-handler's path will pick it up on the same ack or admin
+    # force_reset will eventually clean it up).
+    try:
+        _iot_data.update_thing_shadow(
+            thingName=serial,
+            payload=json.dumps({"state": {"desired": {"wipe_requested": None}}}).encode("utf-8"),
+        )
+    except ClientError as e:
+        logger.warning(
+            "wipe_ack_shadow_desired_clear_failed",
+            extra={"serial": serial, "error": str(e)},
+        )
+
+    emit_audit(
+        AUDIT_DEVICE_WIPE_COMPLETE,
+        subject={"deviceSerial": serial},
+        action="update",
+        after={
+            "last_wipe_at": wiped_at_iso,
+            "matched_cmd_id": last_cmd_id,
+            "battery_pct": float(battery_pct),
+        },
+        extra={"cmd_issued_at": matched_issued_at},
+    )
+    emit_audit(
+        AUDIT_DEVICE_RECYCLED,
+        subject={"deviceSerial": serial},
+        action="update",
+        before={"status": "discontinued"},
+        after={"status": "ready_to_provision", "last_wipe_at": wiped_at_iso},
+    )
+    metrics.add_metric(name="device_wipe_complete_count", unit=MetricUnit.Count, value=1)
+    metrics.add_metric(name="device_recycled_count", unit=MetricUnit.Count, value=1)
+    return True
+
+
+def _maybe_emit_battery_swapped(serial: str, event: dict) -> None:
+    """
+    DL16 / portal memo D7: emit `device.battery_swapped` audit when a
+    mid-deployment cold boot is detected (boot_count increment +
+    `reset_reason == "POWER_ON"`) while status ∈ {provisioned, active_monitoring}.
+
+    Low-severity forensics — no state change. Useful for operations to
+    distinguish "operator swapped the AAs last month" from "device
+    brownout-rebooted."
+
+    Strategy: only does the (slightly expensive) Shadow GET when
+    reset_reason == "POWER_ON" — keeps the per-heartbeat overhead near zero
+    for the common case (heartbeats with reset_reason == "SOFTWARE" or
+    absent).
+    """
+    reset_reason = event.get("reset_reason")
+    current_boot_count = event.get("boot_count")
+    if reset_reason != "POWER_ON" or current_boot_count is None:
+        return
+
+    # Read prior boot_count from Shadow.reported BEFORE writing the new
+    # heartbeat (handler caller must invoke this before update_thing_shadow).
+    prior_boot_count: int | None = None
+    prior_status: str | None = None
+    try:
+        resp = _iot_data.get_thing_shadow(thingName=serial)
+        doc = json.loads(resp["payload"].read())
+        reported = doc.get("state", {}).get("reported", {}) or {}
+        prior_boot_count = reported.get("boot_count")
+    except _iot_data.exceptions.ResourceNotFoundException:
+        # No shadow yet — first heartbeat for this device; can't detect.
+        return
+    except (ClientError, KeyError, ValueError, AttributeError) as e:
+        logger.debug(
+            "battery_swap_shadow_read_failed",
+            extra={"serial": serial, "error": str(e)},
+        )
+        return
+
+    if prior_boot_count is None:
+        return
+
+    try:
+        if int(current_boot_count) <= int(prior_boot_count):
+            return  # not an increment — likely the same boot reporting again
+    except (TypeError, ValueError):
+        return
+
+    # Need device status to decide whether this is a mid-deployment swap
+    # (worth auditing) vs pre-activation cold-boot (expected, not worth audit).
+    try:
+        item = _device_tbl.get_item(Key={"serialNumber": serial}).get("Item") or {}
+        prior_status = item.get("status")
+    except ClientError as e:
+        logger.debug(
+            "battery_swap_status_read_failed",
+            extra={"serial": serial, "error": str(e)},
+        )
+        return
+
+    if prior_status not in ("provisioned", "active_monitoring"):
+        # Pre-activation or post-recycle cold-boots are expected — no audit.
+        return
+
+    emit_audit(
+        AUDIT_DEVICE_BATTERY_SWAPPED,
+        subject={"deviceSerial": serial},
+        action="event",
+        extra={
+            "priorBootCount": int(prior_boot_count),
+            "newBootCount": int(current_boot_count),
+            "resetReason": reset_reason,
+            "batteryPct": event.get("battery_pct"),
+            "status": prior_status,
+        },
+    )
+    metrics.add_metric(name="device_battery_swapped_count", unit=MetricUnit.Count, value=1)
+
+
 @logger.inject_lambda_context(log_event=False, correlation_id_path="thingName")
 @metrics.log_metrics(capture_cold_start_metric=True)
 def handler(event: dict, _context):
@@ -326,6 +574,10 @@ def handler(event: dict, _context):
         return {"statusCode": 400, "body": f"invalid payload: {reason}"}
 
     heartbeat_ts = _parse_iso(event["ts"])
+
+    # Battery-swap detection must read prior Shadow BEFORE we overwrite it.
+    _maybe_emit_battery_swapped(serial, event)
+
     reported = _shadow_reported(event)
 
     try:
@@ -344,7 +596,22 @@ def handler(event: dict, _context):
 
     last_cmd_id = event.get("last_cmd_id")
     if isinstance(last_cmd_id, str) and last_cmd_id:
-        _try_activation_ack(serial, last_cmd_id, heartbeat_ts)
+        # Dispatch ack path by cmd_id prefix. `act_` and `wipe_` are the two
+        # downlink cmd kinds in v1 (ARCH §7). Unknown prefix logs + skips;
+        # cloud is forward-compatible with new cmds added on the firmware side.
+        if last_cmd_id.startswith("act_"):
+            _try_activation_ack(serial, last_cmd_id, heartbeat_ts)
+        elif last_cmd_id.startswith("wipe_"):
+            try:
+                battery_pct_val = float(event.get("battery_pct"))
+            except (TypeError, ValueError):
+                battery_pct_val = 0.0
+            _try_wipe_ack(serial, last_cmd_id, heartbeat_ts, battery_pct_val)
+        else:
+            logger.info(
+                "heartbeat_with_unknown_cmd_prefix",
+                extra={"serial": serial, "last_cmd_id": last_cmd_id},
+            )
 
     logger.info(
         "heartbeat_ok",

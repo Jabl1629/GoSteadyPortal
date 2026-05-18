@@ -146,11 +146,15 @@ export class ProcessingStack extends cdk.Stack {
     );
 
     deviceTable.grantReadWriteData(this.heartbeatProcessor);
-    // Shadow update for Shadow.reported writes; targets the device's own thing
+    // Shadow get + update for Shadow.reported reads/writes. Get added
+    // 2026-05-17 for the AA-recycle DL16 battery-swap detection path
+    // (`_maybe_emit_battery_swapped` reads prior boot_count from
+    // Shadow.reported before overwriting it). Wipe-ack path also clears
+    // Shadow.desired.wipe_requested. Targets the device's own thing.
     this.heartbeatProcessor.addToRolePolicy(
       new iam.PolicyStatement({
-        sid: 'ShadowUpdateOnAnyThing',
-        actions: ['iot:UpdateThingShadow'],
+        sid: 'ShadowGetAndUpdateOnAnyThing',
+        actions: ['iot:GetThingShadow', 'iot:UpdateThingShadow'],
         resources: [`arn:aws:iot:${region}:${account}:thing/*`],
       }),
     );

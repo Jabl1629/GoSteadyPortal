@@ -53,6 +53,7 @@ from _shared.audit_catalog import (
     AUDIT_DEVICE_PROVISION_ROLLBACK,
     AUDIT_DEVICE_RECOVERED,
     AUDIT_DEVICE_ACTIVATION_SENT,
+    AUDIT_DEVICE_WIPE_REQUESTED,
 )
 from _shared.observability import emit_audit, get_logger
 
@@ -154,6 +155,18 @@ def _set_shadow_desired_activated_at(serial: str, value_iso: str | None) -> None
     states (end-assignment, decommission, force-reset, recovery, etc.).
     """
     payload = json.dumps({"state": {"desired": {"activated_at": value_iso}}})
+    iot_data.update_thing_shadow(thingName=serial, payload=payload.encode())
+
+
+def _set_shadow_desired(serial: str, fields: dict[str, Any]) -> None:
+    """
+    Set multiple `desired.*` keys atomically (single UpdateThingShadow).
+    Each value is the new value or None to clear the key. Used by
+    end-assignment to update both `desired.activated_at = null` (DL14)
+    and `desired.wipe_requested = <wipe_id>` (DL15) in one Shadow call,
+    keeping the two invariants consistent.
+    """
+    payload = json.dumps({"state": {"desired": fields}})
     iot_data.update_thing_shadow(thingName=serial, payload=payload.encode())
 
 
@@ -462,6 +475,7 @@ def _action_end_assignment(
 
     now_iso = _now_iso()
     assignment_sk = device.get("currentAssignmentSk")
+    wipe_id = f"wipe_{uuid.uuid4()}"
 
     # Close the assignment row's validUntil (if there is one)
     if assignment_sk:
@@ -474,18 +488,63 @@ def _action_end_assignment(
         except ClientError:
             logger.exception("assignment_close_failed", extra={"serial": serial})
 
+    # Step 1: state transition + ensure outstandingWipeCmds map exists.
+    # Same two-step idiom as provision (DDB can't do
+    # "SET outstandingWipeCmds = if_not_exists(...)"
+    # alongside "SET outstandingWipeCmds.#cid = ..." in one expression).
     _devices.update_item(
         Key={"serialNumber": serial},
-        UpdateExpression="SET #status = :discontinued, lastTransitionAt = :now REMOVE currentAssignmentSk",
+        UpdateExpression=(
+            "SET #status = :discontinued, "
+            "lastTransitionAt = :now, "
+            "wipe_requested_at = :now, "
+            "outstandingWipeCmds = if_not_exists(outstandingWipeCmds, :empty) "
+            "REMOVE currentAssignmentSk"
+        ),
         ExpressionAttributeNames={"#status": "status"},
-        ExpressionAttributeValues={":discontinued": "discontinued", ":now": now_iso},
+        ExpressionAttributeValues={
+            ":discontinued": "discontinued",
+            ":now": now_iso,
+            ":empty": {},
+        },
     )
 
-    # DL14: clear desired.activated_at on every transition out of {provisioned, active_monitoring}
+    # Step 2: write the new wipe_id into the map.
+    _devices.update_item(
+        Key={"serialNumber": serial},
+        UpdateExpression="SET outstandingWipeCmds.#cid = :now",
+        ExpressionAttributeNames={"#cid": wipe_id},
+        ExpressionAttributeValues={":now": now_iso},
+    )
+
+    # DL14 + DL15: clear desired.activated_at AND set desired.wipe_requested
+    # in a single Shadow call. Keeps both invariants atomic.
     try:
-        _set_shadow_desired_activated_at(serial, None)
+        _set_shadow_desired(serial, {"activated_at": None, "wipe_requested": wipe_id})
     except ClientError:
-        logger.exception("shadow_clear_failed", extra={"serial": serial})
+        logger.exception("shadow_set_failed", extra={"serial": serial})
+
+    # Publish wipe cmd to gs/{serial}/cmd. Best-effort: if publish fails,
+    # status stays discontinued, outstandingWipeCmds keeps the entry, and
+    # an admin force-reset is the recovery path. Memo §5 spelled out a
+    # 500-on-failure path but that races with the existing end-assignment
+    # idempotency (a retry would 409 on status); the simpler model is to
+    # log + emit a warning audit + return 200 (end-assignment succeeded),
+    # and let the wipe-ack-stuck alarm (L17 in observability) catch it.
+    wipe_publish_ok = True
+    try:
+        cmd_payload = {"cmd": "wipe", "cmd_id": wipe_id, "ts": now_iso}
+        iot_data.publish(
+            topic=f"gs/{serial}/cmd",
+            qos=1,
+            payload=json.dumps(cmd_payload),
+        )
+    except ClientError as exc:
+        wipe_publish_ok = False
+        logger.exception(
+            "wipe_cmd_publish_failed",
+            extra={"serial": serial, "wipe_id": wipe_id, "iot_error": str(exc)},
+        )
 
     body = _parse_body(event)
     actor = {"userId": claims["userId"], "role": claims["role"], "clientId": claims["clientId"]}
@@ -497,6 +556,17 @@ def _action_end_assignment(
         action="update",
         extra={"reason": body.get("reason", "manual"), "previousState": current_state},
     )
+    emit_audit(
+        event=AUDIT_DEVICE_WIPE_REQUESTED,
+        actor=actor,
+        subject=subject,
+        action="create",
+        extra={
+            "wipe_id": wipe_id,
+            "topic": f"gs/{serial}/cmd",
+            "publish_ok": wipe_publish_ok,
+        },
+    )
 
     return ok_response(
         {
@@ -504,7 +574,12 @@ def _action_end_assignment(
                 "serialNumber": serial,
                 "status": "discontinued",
                 "lastTransitionAt": now_iso,
-            }
+            },
+            "wipe": {
+                "wipe_id": wipe_id,
+                "ackWindowHours": ACTIVATION_ACK_WINDOW_HOURS,
+                "publish_ok": wipe_publish_ok,
+            },
         }
     )
 
@@ -646,15 +721,24 @@ def _action_force_reset(
         raise ApiError(code=transition.code, message=transition.message, status=409)
 
     now_iso = _now_iso()
+    # Force-reset clears the new wipe state too (DL15) — the wipe cmd
+    # is moot once admin overrides directly to ready_to_provision.
+    # Caveat: force-reset bypasses the wipe-ack predicate, so the device
+    # may retain old patient data until it next reads Shadow desired
+    # and re-enters pre-activation per DL14. Caller assumed responsibility
+    # via the `reason` field and the elevated audit.
     _devices.update_item(
         Key={"serialNumber": serial},
-        UpdateExpression="SET #status = :ready, lastTransitionAt = :now REMOVE currentAssignmentSk",
+        UpdateExpression=(
+            "SET #status = :ready, lastTransitionAt = :now "
+            "REMOVE currentAssignmentSk, outstandingWipeCmds, wipe_requested_at"
+        ),
         ExpressionAttributeNames={"#status": "status"},
         ExpressionAttributeValues={":ready": STATE_READY, ":now": now_iso},
     )
 
     try:
-        _set_shadow_desired_activated_at(serial, None)
+        _set_shadow_desired(serial, {"activated_at": None, "wipe_requested": None})
     except ClientError:
         logger.exception("shadow_clear_failed", extra={"serial": serial})
 
@@ -704,9 +788,28 @@ def _action_move(
     enforce_tenancy(claims, device.get("owningClientId"))
 
     current_state = device.get("status", STATE_READY)
+    # L15 (tightened 2026-05-17 per memo D10): cross-facility / cross-client
+    # move requires status = ready_to_provision. Caller must end-assignment
+    # AND wait for wipe-ack before moving — ensures ownership transfers
+    # happen only on clean (wiped) devices, no patient-cache residue
+    # crosses ownership boundaries.
+    if current_state != STATE_READY:
+        raise ApiError(
+            code="INVALID_TRANSITION",
+            message=(
+                "Move requires device in ready_to_provision state. "
+                "End the current assignment and wait for the wipe-ack auto-recycle "
+                "(or force-reset if the device is stuck) before moving."
+            ),
+            status=409,
+            details={
+                "currentStatus": current_state,
+                "requiredStatus": STATE_READY,
+                "spec": "phase-2a-device-lifecycle.md L15 (tightened by 2026-05-17-aa-battery-recycle.md D10)",
+            },
+        )
     transition = validate_transition(current_state, action)
     if isinstance(transition, TransitionError):
-        # L15: rejects active_monitoring devices
         raise ApiError(
             code=transition.code,
             message=transition.message,
