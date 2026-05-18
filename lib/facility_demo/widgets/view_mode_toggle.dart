@@ -28,16 +28,16 @@ class ViewModeToggle extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           _Segment(
-            icon: Icons.grid_view_rounded,
-            label: CensusViewMode.tile.label,
-            active: selected == CensusViewMode.tile,
-            onTap: () => onChanged(CensusViewMode.tile),
-          ),
-          _Segment(
             icon: Icons.view_list_rounded,
             label: CensusViewMode.list.label,
             active: selected == CensusViewMode.list,
             onTap: () => onChanged(CensusViewMode.list),
+          ),
+          _Segment(
+            icon: Icons.grid_view_rounded,
+            label: CensusViewMode.tile.label,
+            active: selected == CensusViewMode.tile,
+            onTap: () => onChanged(CensusViewMode.tile),
           ),
         ],
       ),

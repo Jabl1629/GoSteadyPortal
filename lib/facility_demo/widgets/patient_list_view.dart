@@ -51,15 +51,14 @@ class PatientListView extends StatelessWidget {
   static const List<_ColumnSpec> _columns = [
     _ColumnSpec('Resident', 180, _CellAlign.start),
     _ColumnSpec('Location', 195, _CellAlign.start),
-    _ColumnSpec('Alerts (7d)', 80, _CellAlign.center),
     _ColumnSpec('Needs review', 100, _CellAlign.center),
-    _ColumnSpec('Active today', 85, _CellAlign.end),
-    _ColumnSpec('Active 7d avg', 90, _CellAlign.end),
-    _ColumnSpec('Active 30d avg', 95, _CellAlign.end),
-    _ColumnSpec('Steps today', 85, _CellAlign.end),
-    _ColumnSpec('Step trend', 75, _CellAlign.center),
-    _ColumnSpec('Gait (3d)', 80, _CellAlign.end),
-    _ColumnSpec('Gait trend', 75, _CellAlign.center),
+    _ColumnSpec('Active minutes today', 120, _CellAlign.end),
+    _ColumnSpec('Active minutes 7d avg', 125, _CellAlign.end),
+    _ColumnSpec('Active minutes 30d avg', 130, _CellAlign.end),
+    _ColumnSpec('Steps today', 90, _CellAlign.end),
+    _ColumnSpec('Step trend', 80, _CellAlign.center),
+    _ColumnSpec('Gait (3d)', 85, _CellAlign.end),
+    _ColumnSpec('Gait trend', 80, _CellAlign.center),
   ];
 
   static double get _tableWidth =>
@@ -227,44 +226,37 @@ class _DataRowState extends State<_DataRow> {
               ),
               _cell(
                 widget.columns[2],
-                child: _CountText(
-                  count: stats.alertsThisWeek,
-                  mutedZero: true,
-                ),
-              ),
-              _cell(
-                widget.columns[3],
                 child: _NeedsReviewCell(
                   count: r.activeNotifications.length,
                   severity: r.highestSeverity,
                 ),
               ),
               _cell(
-                widget.columns[4],
+                widget.columns[3],
                 child: _MetricText(value: stats.activeMinutesToday.toString()),
               ),
               _cell(
-                widget.columns[5],
+                widget.columns[4],
                 child: _MetricText(
                   value: stats.activeMinutes7dAvg.round().toString(),
                   muted: true,
                 ),
               ),
               _cell(
-                widget.columns[6],
+                widget.columns[5],
                 child: _MetricText(
                   value: stats.activeMinutes30dAvg.round().toString(),
                   muted: true,
                 ),
               ),
               _cell(
-                widget.columns[7],
+                widget.columns[6],
                 child: _MetricText(
                   value: NumberFormat('#,##0').format(stats.stepsToday),
                 ),
               ),
               _cell(
-                widget.columns[8],
+                widget.columns[7],
                 child: _TrendCell(
                   trend: stats.stepsTrend7d,
                   recent: stats.stepsRecentAvg,
@@ -273,7 +265,7 @@ class _DataRowState extends State<_DataRow> {
                 ),
               ),
               _cell(
-                widget.columns[9],
+                widget.columns[8],
                 child: _MetricText(
                   value: stats.gaitSpeed3dAvg > 0
                       ? stats.gaitSpeed3dAvg.toStringAsFixed(2)
@@ -282,7 +274,7 @@ class _DataRowState extends State<_DataRow> {
                 ),
               ),
               _cell(
-                widget.columns[10],
+                widget.columns[9],
                 child: _TrendCell(
                   trend: stats.gaitSpeedTrend,
                   recent: stats.gaitSpeed3dAvg,
@@ -382,25 +374,6 @@ class _NeedsReviewCell extends StatelessWidget {
           fontSize: 13,
           fontWeight: FontWeight.w700,
         ),
-      ),
-    );
-  }
-}
-
-class _CountText extends StatelessWidget {
-  const _CountText({required this.count, this.mutedZero = false});
-  final int count;
-  final bool mutedZero;
-
-  @override
-  Widget build(BuildContext context) {
-    final isZero = count == 0;
-    return Text(
-      isZero ? '—' : count.toString(),
-      style: TextStyle(
-        color: (isZero && mutedZero) ? AppTheme.textSoft : AppTheme.textDark,
-        fontSize: 14,
-        fontWeight: FontWeight.w500,
       ),
     );
   }

@@ -74,7 +74,7 @@ class FacilitySelection extends ChangeNotifier {
   String? _selectedPatientId;
   CensusSortMode _sortMode = CensusSortMode.notificationsFirst;
   CensusFilterMode _filterMode = CensusFilterMode.all;
-  CensusViewMode _viewMode = CensusViewMode.tile;
+  CensusViewMode _viewMode = CensusViewMode.list;
 
   // ── Read ───────────────────────────────────────────────────────────────
 
