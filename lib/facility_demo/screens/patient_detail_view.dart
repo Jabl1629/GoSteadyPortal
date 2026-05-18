@@ -9,6 +9,7 @@ import '../models/patient.dart';
 import '../state/facility_selection.dart';
 import '../state/notification_state.dart';
 import '../widgets/notification_review_panel.dart';
+import '../widgets/resident_settings_dialog.dart';
 
 /// Right pane (or full-screen overlay on medium screens) of the facility
 /// shell. Empty state when no patient selected; full reuse of the existing
@@ -106,6 +107,11 @@ class _PatientView extends StatelessWidget {
                 unit: unitDisplay,
                 room: patient.room,
                 compact: isPhone,
+                onSettingsTap: () => ResidentSettingsDialog.show(
+                  context,
+                  patient: patient,
+                  data: data,
+                ),
               ),
               const SizedBox(height: 20),
               if (active.isNotEmpty) ...[
@@ -136,12 +142,14 @@ class _PatientHeader extends StatelessWidget {
     required this.name,
     required this.unit,
     required this.room,
+    required this.onSettingsTap,
     this.compact = false,
   });
 
   final String name;
   final String unit;
   final String room;
+  final VoidCallback onSettingsTap;
   final bool compact;
 
   @override
@@ -149,12 +157,24 @@ class _PatientHeader extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          name,
-          style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                fontSize: compact ? 24 : 30,
-                fontWeight: FontWeight.w500,
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(
+              child: Text(
+                name,
+                style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                      fontSize: compact ? 24 : 30,
+                      fontWeight: FontWeight.w500,
+                    ),
               ),
+            ),
+            const SizedBox(width: 8),
+            _SettingsGearButton(
+              onTap: onSettingsTap,
+              compact: compact,
+            ),
+          ],
         ),
         const SizedBox(height: 4),
         Text(
@@ -166,6 +186,56 @@ class _PatientHeader extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _SettingsGearButton extends StatefulWidget {
+  const _SettingsGearButton({required this.onTap, this.compact = false});
+
+  final VoidCallback onTap;
+  final bool compact;
+
+  @override
+  State<_SettingsGearButton> createState() => _SettingsGearButtonState();
+}
+
+class _SettingsGearButtonState extends State<_SettingsGearButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = widget.compact ? 36.0 : 40.0;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Tooltip(
+          message: 'Resident settings',
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              color: _hover
+                  ? AppTheme.sage.withOpacity(0.10)
+                  : AppTheme.sage.withOpacity(0.06),
+              borderRadius: BorderRadius.circular(100),
+              border: Border.all(
+                color: AppTheme.sage.withOpacity(_hover ? 0.35 : 0.2),
+                width: 1,
+              ),
+            ),
+            child: Icon(
+              Icons.settings_rounded,
+              size: widget.compact ? 17 : 19,
+              color: AppTheme.sage,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -5,6 +5,7 @@ import '../../theme/app_theme.dart';
 import '../data/facility_seed.dart';
 import '../models/facility.dart';
 import '../models/unit.dart';
+import 'form_fields.dart';
 
 /// Cosmetic "Add Resident" intake form. Submits to a SnackBar — there is
 /// no persistence layer yet. When the AWS write path lands, swap the
@@ -95,14 +96,14 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
                 LayoutBuilder(
                   builder: (context, c) {
                     final canRowName = c.maxWidth >= 360;
-                    final first = _LabeledField(
+                    final first = LabeledField(
                       label: 'First name',
                       controller: _firstName,
                       hint: 'Margaret',
                       textCapitalization: TextCapitalization.words,
                       validator: _requiredText,
                     );
-                    final last = _LabeledField(
+                    final last = LabeledField(
                       label: 'Last name',
                       controller: _lastName,
                       hint: 'O’Sullivan',
@@ -126,7 +127,7 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
                   },
                 ),
                 const SizedBox(height: 14),
-                _LabeledField(
+                LabeledField(
                   label: 'Device ID',
                   controller: _deviceId,
                   hint: '10-digit serial',
@@ -142,7 +143,7 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
                   },
                 ),
                 const SizedBox(height: 14),
-                _LabeledDropdown<Facility>(
+                LabeledDropdown<Facility>(
                   label: 'Facility',
                   hint: 'Select facility',
                   value: _facility,
@@ -155,7 +156,7 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
                   validator: (v) => v == null ? 'Required' : null,
                 ),
                 const SizedBox(height: 14),
-                _LabeledDropdown<Unit>(
+                LabeledDropdown<Unit>(
                   label: 'Unit',
                   hint: _facility == null
                       ? 'Choose a facility first'
@@ -170,7 +171,7 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
                   enabled: _facility != null,
                 ),
                 const SizedBox(height: 14),
-                _LabeledField(
+                LabeledField(
                   label: 'Room',
                   controller: _room,
                   hint: 'e.g. 203, 12A, R-4',
@@ -282,153 +283,3 @@ class _Header extends StatelessWidget {
   }
 }
 
-class _LabeledField extends StatelessWidget {
-  const _LabeledField({
-    required this.label,
-    required this.controller,
-    this.hint,
-    this.keyboardType,
-    this.inputFormatters,
-    this.validator,
-    this.textCapitalization = TextCapitalization.none,
-  });
-
-  final String label;
-  final TextEditingController controller;
-  final String? hint;
-  final TextInputType? keyboardType;
-  final List<TextInputFormatter>? inputFormatters;
-  final String? Function(String?)? validator;
-  final TextCapitalization textCapitalization;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _FieldLabel(label),
-        const SizedBox(height: 6),
-        TextFormField(
-          controller: controller,
-          keyboardType: keyboardType,
-          inputFormatters: inputFormatters,
-          validator: validator,
-          textCapitalization: textCapitalization,
-          autovalidateMode: AutovalidateMode.onUserInteraction,
-          style: const TextStyle(fontSize: 14, color: AppTheme.textDark),
-          decoration: _inputDecoration(hint: hint, enabled: true),
-        ),
-      ],
-    );
-  }
-}
-
-class _LabeledDropdown<T> extends StatelessWidget {
-  const _LabeledDropdown({
-    required this.label,
-    required this.value,
-    required this.options,
-    required this.optionLabel,
-    required this.onChanged,
-    this.hint,
-    this.validator,
-    this.enabled = true,
-  });
-
-  final String label;
-  final T? value;
-  final List<T> options;
-  final String Function(T) optionLabel;
-  final ValueChanged<T?>? onChanged;
-  final String? hint;
-  final String? Function(T?)? validator;
-  final bool enabled;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _FieldLabel(label),
-        const SizedBox(height: 6),
-        DropdownButtonFormField<T>(
-          value: value,
-          items: options
-              .map(
-                (o) => DropdownMenuItem(
-                  value: o,
-                  child: Text(
-                    optionLabel(o),
-                    style:
-                        const TextStyle(fontSize: 14, color: AppTheme.textDark),
-                  ),
-                ),
-              )
-              .toList(),
-          onChanged: enabled ? onChanged : null,
-          validator: validator,
-          autovalidateMode: AutovalidateMode.onUserInteraction,
-          icon: Icon(
-            Icons.keyboard_arrow_down_rounded,
-            size: 20,
-            color: enabled
-                ? AppTheme.textSoft
-                : AppTheme.textSoft.withOpacity(0.4),
-          ),
-          isDense: true,
-          dropdownColor: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          decoration: _inputDecoration(hint: hint, enabled: enabled),
-        ),
-      ],
-    );
-  }
-}
-
-class _FieldLabel extends StatelessWidget {
-  const _FieldLabel(this.text);
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      text,
-      style: const TextStyle(
-        color: AppTheme.textDark,
-        fontSize: 13,
-        fontWeight: FontWeight.w600,
-      ),
-    );
-  }
-}
-
-InputDecoration _inputDecoration({String? hint, required bool enabled}) {
-  const errorColor = Color(0xFFB85C4F);
-  OutlineInputBorder border(Color color, {double width = 1}) => OutlineInputBorder(
-        borderRadius: BorderRadius.circular(10),
-        borderSide: BorderSide(color: color, width: width),
-      );
-  return InputDecoration(
-    hintText: hint,
-    hintStyle: TextStyle(
-      color: AppTheme.textSoft.withOpacity(0.7),
-      fontSize: 14,
-    ),
-    isDense: true,
-    contentPadding:
-        const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-    filled: true,
-    fillColor:
-        enabled ? AppTheme.cream : AppTheme.cream.withOpacity(0.5),
-    border: border(AppTheme.border.withOpacity(0.6)),
-    enabledBorder: border(AppTheme.border.withOpacity(0.6)),
-    focusedBorder: border(AppTheme.sage, width: 1.5),
-    errorBorder: border(errorColor),
-    focusedErrorBorder: border(errorColor, width: 1.5),
-    errorStyle: const TextStyle(
-      color: errorColor,
-      fontSize: 12,
-      fontWeight: FontWeight.w500,
-    ),
-  );
-}

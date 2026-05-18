@@ -123,7 +123,7 @@ class FacilitySeed {
     ),
     Patient(
       id: 'pt_010',
-      displayName: 'George Washington Jr.',
+      displayName: 'George Wallace',
       facilityId: 'fac_cedar',
       unitId: 'cen_cc_ltc',
       room: '108',
