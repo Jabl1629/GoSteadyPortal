@@ -98,6 +98,69 @@ class FacilityMockData {
     );
   }
 
+  /// All stats the list-view table needs for one patient, derived from
+  /// the same 182-day generated history that drives the tile view + charts.
+  /// Trends compare last N days vs the immediately prior N days using
+  /// `Trend.compute` (±5% threshold).
+  PatientRowStats rowStatsFor(String patientId) {
+    final gen = _gen(patientId);
+    final history = gen.last182Days;
+
+    final last7 = history.sublist(history.length - 7);
+    final prior7 = history.sublist(history.length - 14, history.length - 7);
+    final last30 = history.sublist(history.length - 30);
+    final last3 = history.sublist(history.length - 3);
+    // Gait trend compares the 3-day average to the prior 30-day baseline
+    // (days 4-33). Day-over-day noise in seeded gait data is too large
+    // for a 3d-vs-3d comparison to catch real slow decline.
+    final priorGaitWindow =
+        history.sublist(history.length - 33, history.length - 3);
+
+    double meanActiveMin(List<DailyActivity> days) {
+      if (days.isEmpty) return 0;
+      final total = days.fold<int>(0, (s, d) => s + d.totalTimeInMotionMinutes);
+      return total / days.length;
+    }
+
+    double meanSteps(List<DailyActivity> days) {
+      if (days.isEmpty) return 0;
+      final total = days.fold<int>(0, (s, d) => s + d.totalSteps);
+      return total / days.length;
+    }
+
+    double meanGait(List<DailyActivity> days) {
+      final active = days.where((d) => d.avgGaitSpeedMs > 0).toList();
+      if (active.isEmpty) return 0;
+      final total = active.fold<double>(0, (s, d) => s + d.avgGaitSpeedMs);
+      return total / active.length;
+    }
+
+    final activeMin7d = meanActiveMin(last7);
+    final activeMin30d = meanActiveMin(last30);
+    final stepsRecent = meanSteps(last7);
+    final stepsPrior = meanSteps(prior7);
+    final stepsTrend = Trend.compute(stepsRecent, stepsPrior);
+    // Gait speed degrades slowly; small absolute changes are clinically
+    // meaningful, so we use a tighter (3%) threshold than for step counts.
+    final gaitRecent = meanGait(last3);
+    final gaitPrior = meanGait(priorGaitWindow);
+    final gaitTrend = Trend.compute(gaitRecent, gaitPrior, threshold: 0.03);
+
+    return PatientRowStats(
+      alertsThisWeek: _activitySpecs[patientId]?.alertsThisWeek ?? 0,
+      activeMinutesToday: gen.today.totalTimeInMotionMinutes,
+      activeMinutes7dAvg: activeMin7d,
+      activeMinutes30dAvg: activeMin30d,
+      stepsToday: gen.today.totalSteps,
+      stepsTrend7d: stepsTrend,
+      stepsRecentAvg: stepsRecent,
+      stepsPriorAvg: stepsPrior,
+      gaitSpeed3dAvg: gaitRecent,
+      gaitSpeedTrend: gaitTrend,
+      gaitSpeedPriorAvg: gaitPrior,
+    );
+  }
+
   // ── Internals ──────────────────────────────────────────────────────────
 
   PatientSummary _summaryFor(Patient p) {
@@ -432,6 +495,7 @@ class FacilityMockData {
       signalDbm: -82,
       lastSeenAgo: const Duration(minutes: 47),
       baselineGaitSpeedMs: 0.65,
+      alertsThisWeek: 1,
     ),
     'pt_002': _ActivitySpec(
       // Robert Chen — "below typical activity" demo case.
@@ -445,6 +509,7 @@ class FacilityMockData {
       signalDbm: -91,
       lastSeenAgo: const Duration(hours: 1, minutes: 12),
       baselineGaitSpeedMs: 0.55,
+      alertsThisWeek: 3,
     ),
     'pt_003': _ActivitySpec(
       targetStepsToday: 0,
@@ -455,6 +520,7 @@ class FacilityMockData {
       signalDbm: -108,
       lastSeenAgo: const Duration(hours: 9, minutes: 22),
       baselineGaitSpeedMs: 0.62,
+      alertsThisWeek: 2,
     ),
     'pt_004': _ActivitySpec(
       targetStepsToday: 894,
@@ -465,6 +531,7 @@ class FacilityMockData {
       signalDbm: -75,
       lastSeenAgo: const Duration(minutes: 31),
       baselineGaitSpeedMs: 0.85,
+      alertsThisWeek: 0,
     ),
     'pt_005': _ActivitySpec(
       targetStepsToday: 521,
@@ -475,6 +542,7 @@ class FacilityMockData {
       signalDbm: -84,
       lastSeenAgo: const Duration(minutes: 58),
       baselineGaitSpeedMs: 0.70,
+      alertsThisWeek: 1,
     ),
     'pt_006': _ActivitySpec(
       // Frank Kowalski — "declining trend" demo case. Peak bumped from
@@ -493,6 +561,7 @@ class FacilityMockData {
       lastSeenAgo: const Duration(hours: 2, minutes: 5),
       baselineGaitSpeedMs: 0.50,
       historicalPeakGaitSpeedMs: 0.78,
+      alertsThisWeek: 5,
     ),
     'pt_007': _ActivitySpec(
       targetStepsToday: 612,
@@ -503,6 +572,7 @@ class FacilityMockData {
       signalDbm: -80,
       lastSeenAgo: const Duration(minutes: 22),
       baselineGaitSpeedMs: 0.75,
+      alertsThisWeek: 1,
     ),
     'pt_008': _ActivitySpec(
       targetStepsToday: 445,
@@ -513,6 +583,7 @@ class FacilityMockData {
       signalDbm: -86,
       lastSeenAgo: const Duration(minutes: 39),
       baselineGaitSpeedMs: 0.65,
+      alertsThisWeek: 0,
     ),
     'pt_009': _ActivitySpec(
       targetStepsToday: 234,
@@ -523,6 +594,7 @@ class FacilityMockData {
       signalDbm: -89,
       lastSeenAgo: const Duration(hours: 1, minutes: 4),
       baselineGaitSpeedMs: 0.55,
+      alertsThisWeek: 1,
     ),
     'pt_010': _ActivitySpec(
       targetStepsToday: 156,
@@ -533,6 +605,7 @@ class FacilityMockData {
       signalDbm: -94,
       lastSeenAgo: const Duration(hours: 1, minutes: 38),
       baselineGaitSpeedMs: 0.50,
+      alertsThisWeek: 2,
     ),
   };
 }
@@ -556,6 +629,12 @@ class _ActivitySpec {
   /// Ignored otherwise.
   final double historicalPeakGaitSpeedMs;
 
+  /// Total alerts fired for this patient over the last 7 days. Pre-baked
+  /// per-patient so the list view's "Alerts (7d)" column shows a
+  /// plausible, deterministic count. Higher for patients with current
+  /// active notifications.
+  final int alertsThisWeek;
+
   _ActivitySpec({
     required this.targetStepsToday,
     required this.targetActiveMinToday,
@@ -568,6 +647,7 @@ class _ActivitySpec {
     required this.lastSeenAgo,
     required this.baselineGaitSpeedMs,
     this.historicalPeakGaitSpeedMs = 0,
+    this.alertsThisWeek = 0,
   });
 }
 
@@ -582,5 +662,64 @@ class _PatientGenerated {
     required this.last182Days,
     required this.last6Months,
     required this.device,
+  });
+}
+
+/// Direction of a derived trend. Threshold of ±5% by default — anything
+/// inside the band is treated as "flat" so we don't show meaningless
+/// up/down indicators on noise.
+enum Trend {
+  up,
+  down,
+  flat;
+
+  static const double defaultThreshold = 0.05;
+
+  /// Compare a recent-period mean to a prior-period mean. Returns
+  /// `Trend.flat` if either input is zero (no signal).
+  static Trend compute(double recent, double prior,
+      {double threshold = defaultThreshold}) {
+    if (prior <= 0 || recent <= 0) return Trend.flat;
+    final delta = (recent - prior) / prior;
+    if (delta > threshold) return Trend.up;
+    if (delta < -threshold) return Trend.down;
+    return Trend.flat;
+  }
+
+  /// Percent delta from prior → recent, e.g. -12 means "12% lower."
+  /// Returns 0 if either input is zero.
+  static double percentDelta(double recent, double prior) {
+    if (prior <= 0 || recent <= 0) return 0;
+    return ((recent - prior) / prior) * 100;
+  }
+}
+
+/// Pre-computed per-patient stats consumed by the list view. Built once
+/// per patient by `FacilityMockData.rowStatsFor`.
+class PatientRowStats {
+  final int alertsThisWeek;
+  final int activeMinutesToday;
+  final double activeMinutes7dAvg;
+  final double activeMinutes30dAvg;
+  final int stepsToday;
+  final Trend stepsTrend7d;
+  final double stepsRecentAvg; // mean of last 7 days
+  final double stepsPriorAvg; // mean of days 8-14
+  final double gaitSpeed3dAvg; // m/s, last 3 days
+  final Trend gaitSpeedTrend;
+  final double gaitSpeedPriorAvg;
+
+  const PatientRowStats({
+    required this.alertsThisWeek,
+    required this.activeMinutesToday,
+    required this.activeMinutes7dAvg,
+    required this.activeMinutes30dAvg,
+    required this.stepsToday,
+    required this.stepsTrend7d,
+    required this.stepsRecentAvg,
+    required this.stepsPriorAvg,
+    required this.gaitSpeed3dAvg,
+    required this.gaitSpeedTrend,
+    required this.gaitSpeedPriorAvg,
   });
 }

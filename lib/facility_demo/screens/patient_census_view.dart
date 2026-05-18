@@ -7,8 +7,10 @@ import '../models/notification.dart';
 import '../models/patient.dart';
 import '../state/facility_selection.dart';
 import '../state/notification_state.dart';
+import '../widgets/patient_list_view.dart';
 import '../widgets/patient_tile.dart';
 import '../widgets/simple_select_dropdown.dart';
+import '../widgets/view_mode_toggle.dart';
 
 /// Left/main pane of the facility shell. Renders one tile per patient
 /// matching the current unit selection, sort, and filter. Click a tile ->
@@ -53,6 +55,20 @@ class PatientCensusView extends StatelessWidget {
               const SizedBox(height: 18),
               if (filtered.isEmpty)
                 _EmptyState(filterMode: selection.filterMode)
+              else if (selection.viewMode == CensusViewMode.list)
+                PatientListView(
+                  rows: filtered
+                      .map((r) => PatientListRow(
+                            patient: r.summary.patient,
+                            unitDisplay:
+                                unitDisplayFor(data, r.summary.patient.unitId),
+                            stats: data.rowStatsFor(r.summary.patient.id),
+                            activeNotifications: r.active,
+                          ))
+                      .toList(),
+                  selectedPatientId: selection.selectedPatientId,
+                  onSelect: selection.selectPatient,
+                )
               else
                 _Grid(
                   rows: filtered,
@@ -167,6 +183,14 @@ class _Header extends StatelessWidget {
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
                 ),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: ViewModeToggle(
+                selected: selection.viewMode,
+                onChanged: selection.setViewMode,
               ),
             ),
           ],

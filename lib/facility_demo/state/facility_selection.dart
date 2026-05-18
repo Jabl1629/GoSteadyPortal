@@ -5,6 +5,20 @@ import '../models/unit.dart';
 
 enum FacilityCheckState { all, none, partial }
 
+enum CensusViewMode {
+  tile,
+  list;
+
+  String get label {
+    switch (this) {
+      case CensusViewMode.tile:
+        return 'Tile';
+      case CensusViewMode.list:
+        return 'List';
+    }
+  }
+}
+
 enum CensusSortMode {
   notificationsFirst,
   nameAZ,
@@ -60,6 +74,7 @@ class FacilitySelection extends ChangeNotifier {
   String? _selectedPatientId;
   CensusSortMode _sortMode = CensusSortMode.notificationsFirst;
   CensusFilterMode _filterMode = CensusFilterMode.all;
+  CensusViewMode _viewMode = CensusViewMode.tile;
 
   // ── Read ───────────────────────────────────────────────────────────────
 
@@ -67,6 +82,7 @@ class FacilitySelection extends ChangeNotifier {
   String? get selectedPatientId => _selectedPatientId;
   CensusSortMode get sortMode => _sortMode;
   CensusFilterMode get filterMode => _filterMode;
+  CensusViewMode get viewMode => _viewMode;
 
   void setSortMode(CensusSortMode mode) {
     if (_sortMode == mode) return;
@@ -77,6 +93,12 @@ class FacilitySelection extends ChangeNotifier {
   void setFilterMode(CensusFilterMode mode) {
     if (_filterMode == mode) return;
     _filterMode = mode;
+    notifyListeners();
+  }
+
+  void setViewMode(CensusViewMode mode) {
+    if (_viewMode == mode) return;
+    _viewMode = mode;
     notifyListeners();
   }
 
