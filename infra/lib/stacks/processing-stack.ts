@@ -3,6 +3,10 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as iot from 'aws-cdk-lib/aws-iot';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import * as path from 'path';
 import { Construct } from 'constructs';
 import { GoSteadyEnvConfig } from '../config.js';
@@ -48,6 +52,7 @@ export class ProcessingStack extends cdk.Stack {
   public readonly heartbeatProcessor: lambda.Function;
   public readonly thresholdDetector: lambda.Function;
   public readonly alertHandler: lambda.Function;
+  public readonly connectionCoordinator: lambda.Function;
 
   constructor(scope: Construct, id: string, props: ProcessingStackProps) {
     super(scope, id, props);
@@ -213,6 +218,103 @@ export class ProcessingStack extends cdk.Stack {
     identityKey.grantDecrypt(this.alertHandler);
     identityKey.grant(this.alertHandler, 'kms:GenerateDataKey');
 
+    // ── Connection Coordinator (coord §C23) ──────────────────────
+    // Addresses §C22 Finding 2: AWS IoT MQTT 3.1.1 persistent_session
+    // 1h timer expires before firmware's 1h heartbeat → broker drops
+    // queued cmds every cycle. This Lambda subscribes to lifecycle
+    // events ($aws/events/presence/connected/+) and re-publishes any
+    // pending cmds for the connecting serial within milliseconds, so
+    // the cmd lands in the active subscription window before firmware
+    // disconnects.
+    //
+    // Also folds in §C22 Finding 7: opportunistic sweep of stale
+    // outstandingActivationCmds / outstandingWipeCmds entries on the
+    // same DDB GetItem (no separate sweeper Lambda needed).
+    const coordinator = new ProcessingLambda(this, 'ConnectionCoordinator', {
+      config,
+      functionName: `gosteady-${p}-connection-coordinator`,
+      handlerDir: path.join(lambdaDir, 'connection-coordinator'),
+      description: 'Coord §C23: re-publish pending cmds on firmware connect (AWS IoT 1h persistent_session workaround)',
+      memoryMb: config.processingHeartbeatMemoryMb,
+      timeoutSeconds: config.processingLambdaTimeoutSeconds,
+      environment: {
+        DEVICE_TABLE: deviceTable.tableName,
+        ENVIRONMENT: p,
+        ACK_WINDOW_HOURS: String(config.activationAckWindowHours),
+      },
+      powertoolsLayer,
+      tracingActive: true,
+    });
+    this.connectionCoordinator = coordinator.function;
+
+    // IAM: read+sweep on Device Registry, publish to gs/*/cmd
+    deviceTable.grantReadWriteData(this.connectionCoordinator);
+    this.connectionCoordinator.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishToAnyDeviceCmd',
+        actions: ['iot:Publish'],
+        resources: [`arn:aws:iot:${region}:${account}:topic/gs/*/cmd`],
+      }),
+    );
+
+    // IoT Topic Rule: filter on `connected` lifecycle events.
+    // Topic pattern $aws/events/presence/connected/+ — `+` matches the
+    // clientId (= device serial). SQL only forwards eventType='connected'
+    // (defense-in-depth alongside the topic filter).
+    const coordRule = new iot.CfnTopicRule(this, 'ConnectionCoordinatorRule', {
+      ruleName: `gosteady_${p}_connection_coordinator`,
+      topicRulePayload: {
+        sql: "SELECT clientId, timestamp, eventType FROM '$aws/events/presence/connected/+' WHERE eventType = 'connected'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        description:
+          'Coord §C23: forwards $aws/events/presence/connected events to connection-coordinator Lambda',
+        actions: [
+          {
+            lambda: {
+              functionArn: this.connectionCoordinator.functionArn,
+            },
+          },
+        ],
+      },
+    });
+
+    this.connectionCoordinator.addPermission('AllowIoTRuleInvoke', {
+      principal: new iam.ServicePrincipal('iot.amazonaws.com'),
+      action: 'lambda:InvokeFunction',
+      sourceArn: coordRule.attrArn,
+    });
+
+    // ── Alarm: stale-cmd-sweep rate (coord §C23 ops signal) ──────
+    // device_cmd_swept_stale_count > 5 in 1h indicates cmds aging out
+    // of the 24h ack window without firmware ack — real reliability
+    // problem that needs investigation. Note device.cmd_swept_stale
+    // emits ONE audit event per Lambda invocation with swept_count in
+    // extra, so this metric counts sweep-invocations not individual
+    // cmds; threshold accordingly.
+    const opsTopicArn = cdk.Fn.importValue(`${p}-CostAlarmTopic`);
+    const opsTopic = sns.Topic.fromTopicArn(this, 'OpsTopicRef', opsTopicArn);
+
+    const sweepMetric = new cloudwatch.Metric({
+      namespace: `GoSteady/Coordinator/${p}`,
+      metricName: 'device_cmd_swept_stale_count',
+      period: cdk.Duration.hours(1),
+      statistic: 'Sum',
+    });
+    const sweepAlarm = new cloudwatch.Alarm(this, 'CoordinatorStaleCmdSweepRate', {
+      alarmName: `gosteady-${p}-coordinator-stale-cmd-sweep-rate`,
+      alarmDescription:
+        'Coord §C23: connection-coordinator swept >5 stale cmd entries in 1h. ' +
+        'Indicates cmds are aging out of the 24h ack window without firmware ack — ' +
+        'investigate firmware connectivity or cmd-delivery path.',
+      metric: sweepMetric,
+      threshold: 5,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    sweepAlarm.addAlarmAction(new cloudwatch_actions.SnsAction(opsTopic));
+
     // ── Outputs ──────────────────────────────────────────────────
     new cdk.CfnOutput(this, 'ActivityProcessorArn', {
       value: this.activityProcessor.functionArn,
@@ -229,6 +331,14 @@ export class ProcessingStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AlertHandlerArn', {
       value: this.alertHandler.functionArn,
       exportName: `${p}-AlertHandlerArn`,
+    });
+    new cdk.CfnOutput(this, 'ConnectionCoordinatorArn', {
+      value: this.connectionCoordinator.functionArn,
+      exportName: `${p}-ConnectionCoordinatorArn`,
+    });
+    new cdk.CfnOutput(this, 'ConnectionCoordinatorName', {
+      value: this.connectionCoordinator.functionName,
+      exportName: `${p}-ConnectionCoordinatorName`,
     });
   }
 }

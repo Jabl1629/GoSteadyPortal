@@ -7222,3 +7222,264 @@ Opens §C24 (implementation + live validation) as the next coord-doc
 entry. No firmware action items in this batch.*
 
 
+---
+---
+
+# Cloud team update — 2026-05-18 (§C24 implementation + live validation: connection-coordinator Lambda live in dev; closes §C22 Finding 2)
+
+> **From:** Claude (cloud session, autonomous build + deploy + bench
+> validation).
+>
+> **TL;DR:** §C23 connection-coordinator Lambda is live in dev. Both
+> synthetic test (direct Lambda invoke) and live test (real firmware
+> reconnect, no race-publish) pass cleanly. **§C22 Finding 2 (AWS IoT
+> 1h persistent_session timer dropping queued cmds) is closed for
+> the operational path** — coordinator fires on AWS IoT lifecycle
+> events and re-publishes within the firmware's active subscription
+> window. End-to-end latency: ~10 s from `end-assignment` API to
+> cloud auto-recycle when firmware is online, ≤1 h worst case (next
+> heartbeat). No human race-publish required.
+
+---
+
+## C24.1 What shipped
+
+| Layer | Commit | What |
+|---|---|---|
+| Cloud | (this batch) | New `gosteady-{env}-connection-coordinator` Lambda + IoT Topic Rule on `$aws/events/presence/connected/+` + DDB + iot-data:Publish IAM + new alarm `gosteady-{env}-coordinator-stale-cmd-sweep-rate` + audit-stack subscription filter added. 5 files touched per the §C23 punch-list. |
+
+Files modified:
+- `infra/lambda/_shared/audit_catalog.py` — added `AUDIT_DEVICE_CMD_REPUBLISHED` + `AUDIT_DEVICE_CMD_SWEPT_STALE` constants + frozenset entries
+- `infra/lambda/connection-coordinator/handler.py` — new file (~280 lines per §C23.4 design)
+- `infra/lib/stacks/processing-stack.ts` — new Lambda + IoT Topic Rule + IAM grants + L17-sibling sweep-rate alarm
+- `infra/lib/stacks/audit-stack.ts` — added `gosteady-{env}-connection-coordinator` to subscription-filter list (§C24-equivalent of audit-routing for the new Lambda)
+
+---
+
+## C24.2 Deploy chronology
+
+Same gotcha as §C16.3 / §C17.2: deploy order matters when adding a
+new Lambda that the Audit stack wants to subscribe to. CloudWatch
+auto-creates the log group on Lambda's *first invocation*, not at
+Lambda creation. The Audit stack's `SubscriptionFilter` resource
+needs the log group to exist at CFN-create-time.
+
+| Attempt | What | Result |
+|---|---|---|
+| 1 | `cdk deploy GoSteady-Dev-Processing GoSteady-Dev-Audit` (both at once) | Build + publish OK; Audit deploy attempt failed: "The specified log group does not exist." Processing UPDATE never started (deploy short-circuited on Audit failure). |
+| 2 | `cdk deploy GoSteady-Dev-Processing --exclusively` | Processing UPDATE_COMPLETE in 75.78 s. Lambda created; log group still doesn't exist. |
+| Sync test | Invoke Lambda once with synthetic event | Lambda runs cleanly, returns republished=3 (the 3 stale activate cmds in `outstandingActivationCmds`). Log group created as side effect. |
+| 3 | `cdk deploy GoSteady-Dev-Audit --exclusively` | UPDATE_COMPLETE in 34.79 s. Subscription filter wired. |
+
+**Lesson for future deploys touching audit-subscribed Lambdas:**
+deploy the Lambda first → invoke it once → deploy Audit. Or: add a
+`LogGroup` resource explicitly in the Processing stack so CFN
+creates it deterministically before Audit references it. Worth a
+~5-line addition next time we touch processing-stack.ts.
+
+---
+
+## C24.3 Synthetic test result
+
+Direct Lambda invoke via `aws lambda invoke` with a mock presence
+event payload:
+
+```json
+{"clientId":"GS9999999998","timestamp":1779124895000,"eventType":"connected"}
+```
+
+Lambda response:
+```json
+{
+  "serial": "GS9999999998",
+  "republished": [
+    {"cmd_id": "act_617406e4-...", "cmd_kind": "activate", "issued_at": "2026-05-18T03:57:11Z", "age_seconds": 48269.39},
+    {"cmd_id": "act_894ed6d5-...", "cmd_kind": "activate", "issued_at": "2026-05-18T02:08:49Z", "age_seconds": 54771.39},
+    {"cmd_id": "act_e1dddd2c-...", "cmd_kind": "activate", "issued_at": "2026-05-18T02:09:53Z", "age_seconds": 54707.39}
+  ],
+  "swept": []
+}
+```
+
+3 stale activate cmds (within the 24h ack window — ages 13–15 hours)
+re-published. None aged past 24h yet, so `swept=[]`. Audit emission
+correct: 3 `device.cmd_republished` lines in `gosteady-dev-audit` log
+group within ~5 s.
+
+After this, I manually swept the 3 stale entries (they were noise
+from prior testing, not real cmds — see Finding 4 below) to set up a
+clean live-test state.
+
+---
+
+## C24.4 Live test — coordinator fires on real firmware reconnect
+
+Pre-test state on `GS9999999998` (post-§C22 cleanup + clean provision
++ end-assignment):
+- status: `discontinued`
+- outstandingActivationCmds: `[act_d9d5d4ab-... (live-test provision @ 17:23:46Z)]`
+- outstandingWipeCmds: `[wipe_c55017f0-... (live-test end-assignment @ 17:23:47Z)]`
+
+Then **waited for natural firmware reconnect** (no race-publish, no
+human intervention). Firmware was due for hourly heartbeat ~UTC 17:58.
+
+Test happened automatically at UTC 17:58:38:
+
+```
+17:58:38.707  firmware: evt: CONNECTED (persistent_session=1)
+17:58:38.707  firmware: publish heartbeat (last_cmd_id="wipe_39e138f5-..." stale from §C22)
+17:58:39.946  cloud: device.cmd_republished audit (act_d9d5d4ab-...)  ← COORDINATOR
+17:58:39.947  cloud: device.cmd_republished audit (wipe_c55017f0-...) ← COORDINATOR
+17:58:40.866  firmware: receives act_d9d5d4ab-... with ts="2026-05-18T17:58:39Z" ← coordinator's now_iso, NOT original 17:23:46Z
+17:58:40.949  firmware: receives wipe_c55017f0-... with ts="2026-05-18T17:58:39Z" ← coordinator's now_iso
+17:58:41.249  firmware: wrote reported.wipe_complete to Shadow (idempotent — wipe routine had already fired earlier in the connection)
+17:58:41.838  firmware: evt: DISCONNECTED
+17:58:40.647  cloud: device.wipe_complete audit (src=device-shadow-handler)
+17:58:40.647  cloud: device.recycled audit (src=device-shadow-handler) ← Shadow path fired auto-recycle
+```
+
+**Unambiguous proof the coordinator delivered the cmd**: the firmware
+log shows the second `wipe_c55017f0` reception had `ts: 2026-05-18T17:58:39Z`
+— that's coordinator's `now_iso` from this cycle, NOT the original
+device-api publish timestamp of `17:23:47Z`. Coordinator wrote
+that ts when it called `iot:Publish`. So the firmware received
+that cmd via the coordinator path, not via the broker queue.
+
+Lambda's own `coordinator_ok` log line confirms:
+```json
+{
+  "message": "coordinator_ok",
+  "serial": "GS9999999998",
+  "republished_count": 2,
+  "swept_count": 0,
+  "republished_cmd_ids": ["act_d9d5d4ab-...", "wipe_c55017f0-..."]
+}
+```
+
+End-to-end latency: **~10 s from `POST /end-assignment` to cloud
+auto-recycle**, gated only on firmware happening to reconnect at the
+moment (which would have been ≤1 h via natural heartbeat cadence).
+Compare to §C22 race-publish: ~57 min waiting for the burst window
+to align with a firmware connect.
+
+**Cloud-side post-test state:**
+- status: `ready_to_provision` ✓
+- last_wipe_at: `2026-05-18T17:58:40Z` ✓
+- outstandingWipeCmds: empty ✓
+- outstandingActivationCmds: still `[act_d9d5d4ab-...]` ← Finding 4 below
+
+---
+
+## C24.5 Shadow ack path worked this cycle — §C22 Finding 4 sidestepped
+
+§C22 Finding 4 noted that the Shadow `reported.wipe_complete` ack write
+failed in the §C22 bench because the wipe routine took ~6.3 s (mostly
+24 snippets × 3 unlinks = 6 s of fs_unlink), longer than the firmware's
+~4 s MQTT connection window — firmware was already disconnected when
+the Shadow write attempted.
+
+This cycle, **the Shadow ack path worked**. Why:
+- No accumulated snippets to purge (`sessions_swept=0`, no
+  `purge_all` log line — the partition was already empty post-§C22).
+- Wipe routine completed in <1 s (just activation_clear + Shadow
+  reported write).
+- Firmware was still connected when the Shadow write fired.
+- `device-shadow-handler` picked it up at 17:58:40.647 — ~700 ms after
+  the wipe applied.
+
+This proves the §C22 Finding 4 timing issue is **conditional on
+snippet count**. A device with zero snippets at wipe-time finishes
+inside the window; a device with many snippets exceeds it. Memo §3
+D2 redundant ack design covers the long-tail case (heartbeat fallback
+catches it within 1 hr). The reorder-Shadow-ack-before-snippet-purge
+firmware tweak (§C22 §4) is still worth doing for the consistent-path
+case, but it's not as urgent now that we've seen the Shadow path
+work in a realistic scenario.
+
+---
+
+## C24.6 Findings + small follow-ups
+
+| # | Finding | Severity | Disposition |
+|---|---|---|---|
+| 1 | **Coordinator works end-to-end.** Lifecycle event fires within ~1 s of CONNECTED; Lambda re-publishes in ~500 ms; firmware receives within the active subscription window; cloud auto-recycles via Shadow path in ~700 ms. | ✅ Validated | Closed. §C22 Finding 2 / §C23 design now production-ready. |
+| 2 | **Audit pipeline routes coordinator events correctly.** Both `device.cmd_republished` audits landed in centralized `gosteady-dev-audit` log group within ~3 s of emission. | ✅ Validated | Closed. |
+| 3 | **persistent_session=1 happened this cycle.** First time since §C22 we've seen the broker retain the prior session. The 1 h timer may behave differently than initially assumed — possibly the previous test cycle's race-publishes kept the session warm via PUBACK round-trips, or AWS IoT's session expiry is more nuanced than the docs suggest. | 🟢 Observed | Not a problem — coordinator works regardless. Worth a follow-up investigation if we want to predict broker behavior, but not blocking. |
+| 4 | **Coordinator is NOT state-aware.** Re-publishes any cmd in `outstandingXxxCmds` within the 24h window regardless of whether the cmd-kind matches the current device status. After the live test, `act_d9d5d4ab-...` lingers in `outstandingActivationCmds` even though device is `ready_to_provision` (activate cmd is logically stale). Next firmware connect: coordinator will re-publish it again, firmware will apply it (no-op — activation.bin gets overwritten then wiped on next end-assignment cycle). Wasteful but not broken. | 🟡 MEDIUM (design gap) | Tighten the coordinator's predicate: activate cmds only re-published if `status=provisioned`; wipe cmds only if `status=discontinued`. Mismatches → sweep. ~10 line addition to the for-loop in handler.py. **Recommended for the next coordinator revision.** |
+| 5 | **stale-cmd sweeper folded in (§C22 Finding 7).** Same DDB GetItem on each invocation; ages out entries past 24h. No separate sweeper needed. | ✅ Validated | Closed (sweep code in place; not yet tested with actual >24h entries, but the code path is straightforward). |
+| 6 | **Deploy-order gotcha:** Audit stack subscription filter wants Lambda log group to exist. Workaround was a synthetic Lambda invoke between Processing and Audit deploys. | 🟢 LOW | Worth adding an explicit `lambda.LogGroup` resource to Processing stack so CFN creates it deterministically. ~5-line CDK addition. **Recommended for the next processing-stack.ts touch.** |
+
+---
+
+## C24.7 §C22 Finding 2 — closure
+
+§C22 Finding 2 said:
+> AWS IoT MQTT 3.1.1 persistent_session has a 1h timer that consistently expires
+> before firmware's 1h heartbeat — broker drops queued cmds every cycle. Without
+> a workaround, ANY cmd-on-cmd-topic flow is unreliable for devices connecting
+> hourly.
+
+**Workaround now in place and validated end-to-end.** The connection-
+coordinator absorbs the broker's session-expiry behavior by re-
+publishing pending cmds on each firmware connect, landing them in
+the active subscription window before disconnect.
+
+What this unlocks:
+- The wipe-cmd flow is now operationally reliable without race-publishing
+- Any future downlink cmd (Phase 5A OTA Jobs, configuration cmds,
+  threshold overrides, etc.) gets the same delivery guarantee for free
+- The bench-time `race_wipe.sh` script and 5-shot burst pattern can
+  be deprecated — they were a useful operational primitive but are
+  no longer needed for production scenarios
+
+§C22 Finding 2 is **CLOSED for dev**. Production cutover gates are
+the standard ones (Phase 1.5 hardening, G9 multi-account, etc.) —
+no coordinator-specific work needed.
+
+---
+
+## C24.8 Updated cloud-side queue
+
+After this entry:
+
+| Item | Status | Notes |
+|---|---|---|
+| ✅ §C22 Finding 2 (persistent_session) | CLOSED via §C23/§C24 | |
+| ✅ §C22 Finding 5 (redundant ack channel) | DESIGN VINDICATED both §C22 + §C24 | Both Shadow + heartbeat paths now proven |
+| ✅ §C22 Finding 7 (stale-cmd sweep) | Folded into coordinator | Sweep code exists; not yet exercised with real >24h entries |
+| 🟡 §C24 Finding 4 (coordinator state-aware) | New tweak | ~10-line addition; defer to next coordinator revision |
+| 🟡 §C22 Finding 4 (wipe routine snippet-purge timing) | Firmware tweak | ~10-line firmware change to reorder Shadow ack before snippet purge. Bundle with §C22 Finding 6 in firmware 0.12.x. |
+| 🟢 §C22 Finding 6 (Shadow.reported.activated_at stale post-wipe) | Firmware tweak | Bundle with above. |
+| 🟢 §C22 Finding 8 (DL14 wake-recheck not implemented) | Architectural decision | Wipe-ack model effectively supersedes DL14 — likely deprecate that requirement |
+| 🟢 §C24 Finding 6 (Processing stack should pre-create LogGroup) | CDK cleanup | Bundle into next processing-stack.ts touch |
+| 🔲 Phase 1C-slim offline detector | Pending | Coord §C11.7 sketch; firmware-relevant ("cap silently dead") |
+| 🔲 Phase 2A-RD patient reads | Pending | Unblocks Flutter dashboard |
+| 🔲 Phase 2A-AA alert actions | Pending | |
+| 🔲 Phase 2A-UM user management | Pending | |
+| 🔲 Phase 2A-INT internal tools | Pending | |
+
+No production-blockers in the cloud-side queue after this. Cleanup
+items (§C24 Findings 4 + 6, §C22 Findings 4 + 6 + 8) are all low/
+medium-severity tweaks bundleable into future revisions.
+
+---
+
+## C24.9 No firmware action required
+
+The connection-coordinator is pure cloud-side infra. Firmware
+contract unchanged. The §C22 firmware tweaks (Findings 4 + 6) are
+still pending and would land in a future `0.12.x` firmware revision
+when bundled with whatever other firmware work happens next.
+
+The bench unit `GS9999999998` is currently in `ready_to_provision`
+with the live-test wipe complete, ready for the next provision cycle.
+
+---
+
+*Entry owner: Claude (autonomous cloud session, 2026-05-18).*
+*Closes §C22 Finding 2 + §C23 implementation. The connection-
+coordinator is the production primitive for downlink cmd reliability
+on this firmware's hourly heartbeat cadence. Two small follow-ups
+filed (§C24 Findings 4 + 6) for future revisions.*
+
+

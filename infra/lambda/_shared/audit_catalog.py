@@ -39,6 +39,9 @@ AUDIT_DEVICE_WIPE_COMPLETE = "device.wipe_complete"    # Firmware acked wipe via
 AUDIT_DEVICE_RECYCLED = "device.recycled"              # Cloud auto-transitioned discontinued → ready_to_provision
 AUDIT_DEVICE_WIPE_FAILED = "device.wipe_failed"        # Firmware reported wipe failure (warning severity)
 AUDIT_DEVICE_BATTERY_SWAPPED = "device.battery_swapped"  # Mid-deployment cold-boot detected — no state change
+# Connection-coordinator additions (2026-05-18, coord §C23 — addresses §C22 Finding 2 + Finding 7):
+AUDIT_DEVICE_CMD_REPUBLISHED = "device.cmd_republished"  # Coordinator Lambda re-published a queued cmd on firmware connect
+AUDIT_DEVICE_CMD_SWEPT_STALE = "device.cmd_swept_stale"  # Coordinator Lambda removed a stale outstandingXxxCmds entry (>24h old)
 
 # ── Patient / activity / alert (Phase 1B-rev + Phase 2A) ──────────────
 AUDIT_PATIENT_ACTIVITY_CREATE = "patient.activity.create"
@@ -91,6 +94,8 @@ KNOWN_AUDIT_EVENTS = frozenset(
         AUDIT_DEVICE_RECYCLED,
         AUDIT_DEVICE_WIPE_FAILED,
         AUDIT_DEVICE_BATTERY_SWAPPED,
+        AUDIT_DEVICE_CMD_REPUBLISHED,
+        AUDIT_DEVICE_CMD_SWEPT_STALE,
         AUDIT_PATIENT_ACTIVITY_CREATE,
         AUDIT_PATIENT_ACTIVITY_READ,
         AUDIT_PATIENT_DETAIL_READ,

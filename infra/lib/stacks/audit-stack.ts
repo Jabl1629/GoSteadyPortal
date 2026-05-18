@@ -163,6 +163,10 @@ export class AuditStack extends cdk.Stack {
       `gosteady-${env}-device-api`,
       `gosteady-${env}-discharge-cascade`,
       `gosteady-${env}-device-shadow-handler`,
+      // Coord §C23 (2026-05-18): connection-coordinator emits
+      // device.cmd_republished + device.cmd_swept_stale audits on
+      // firmware connect.
+      `gosteady-${env}-connection-coordinator`,
     ];
 
     const forwarderDestination = new logsDestinations.LambdaDestination(forwarder.function);
