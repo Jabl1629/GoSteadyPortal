@@ -7,6 +7,7 @@ import '../models/notification.dart';
 import '../models/patient.dart';
 import '../state/facility_selection.dart';
 import '../state/notification_state.dart';
+import '../widgets/add_resident_dialog.dart';
 import '../widgets/patient_list_view.dart';
 import '../widgets/patient_tile.dart';
 import '../widgets/simple_select_dropdown.dart';
@@ -157,7 +158,7 @@ class _Header extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Wrap(
+    final controls = Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
       runSpacing: 12,
       spacing: 12,
@@ -210,6 +211,57 @@ class _Header extends StatelessWidget {
           onChanged: selection.setFilterMode,
         ),
       ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, c) {
+        // On wide layouts, pin the Add Resident button to the right edge
+        // while the controls wrap on the left. On narrow phones, drop the
+        // button onto its own row so the long text doesn't crowd Filter.
+        final wide = c.maxWidth >= 720;
+        if (wide) {
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(child: controls),
+              const SizedBox(width: 16),
+              const _AddResidentButton(),
+            ],
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Align(
+              alignment: Alignment.centerRight,
+              child: _AddResidentButton(),
+            ),
+            const SizedBox(height: 14),
+            controls,
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _AddResidentButton extends StatelessWidget {
+  const _AddResidentButton();
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton.icon(
+      onPressed: () => AddResidentDialog.show(context),
+      icon: const Icon(Icons.add_rounded, size: 18),
+      label: const Text('Add Resident'),
+      style: FilledButton.styleFrom(
+        backgroundColor: AppTheme.sage,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(100)),
+        textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+        elevation: 0,
+      ),
     );
   }
 }
