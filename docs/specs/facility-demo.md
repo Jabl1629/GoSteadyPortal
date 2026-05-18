@@ -484,7 +484,8 @@ work continues independently in Phase 2B.
 | 2026-05-08 | `0761175` + `83783b4` | Full mobile + tablet responsive pass — `?w=NUMBER` URL viewport override for autonomous testing, top-bar collapse, full-bleed phone overlay, stacked Acknowledge button, tile dedupe |
 | 2026-05-08 | `46717e3` | `dart format` cleanup |
 | 2026-05-08 | `8f63d1b` | First deploy: GitHub Pages at `jabl1629.github.io/GoSteadyPortal/` (later replaced) |
-| 2026-05-18 | (this) | Migrated deploy target to `gosteady.co/facilitydemo` (Netlify subdir of marketing site). `tools/deploy-demo.sh` now drops build into `Jabl1629/GoSteadyWeb` under `facilitydemo/` and pushes. |
+| 2026-05-18 | `901f3de` | Migrated deploy target to `gosteady.co/facilitydemo` (Netlify subdir of marketing site). `tools/deploy-demo.sh` now drops build into `Jabl1629/GoSteadyWeb` under `facilitydemo/` and pushes. |
+| 2026-05-18 | `4bbc671` | Patient Census gets a Tile/List view toggle. New `PatientListView` is an 11-column table — Resident · Location · Alerts (7d) · Needs review · Active today/7d/30d · Steps today · Step trend · Gait (3d) · Gait trend. Severity-coded notification cells; colored trend arrows with %-delta tooltips. Rows clickable → same patient overlay as the tile view. Sort + filter apply to both views. |
 
 ---
 
