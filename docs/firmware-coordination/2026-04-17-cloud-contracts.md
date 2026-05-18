@@ -6573,3 +6573,337 @@ B-series. Bench flash gated on Jace's return; §C22 will close the
 firmware-in-loop validation loop.*
 
 
+---
+---
+
+# Joint cloud + firmware update — 2026-05-18 (Phase 2A-DL + AA-battery-recycle physical-device bench test: end-to-end wipe-ack auto-recycle validated; three structural findings worth filing)
+
+> **From:** Claude (autonomous bench session, with Jace confirming SW2-nRF91 position from elsewhere before flash).
+>
+> **TL;DR:** Flashed firmware 0.11.0-wipe-cmd to `GS9999999998` per §C21
+> deferred action. Ran end-to-end bench validation of the AA-recycle
+> wipe-cmd path. **Full roundtrip succeeded** — cloud `end-assignment`
+> → firmware receives `wipe` cmd → wipes `/lfs/activation.bin` +
+> 24 `/snippets/*` tuples → cloud auto-recycles to
+> `ready_to_provision`. Memo W-R2 ("firmware actually wipes") closed:
+> LIST shows `/lfs/sessions/` empty; firmware log lines confirm
+> activation + snippet purges. **Three structural findings surfaced**:
+> (1) AWS IoT MQTT 3.1.1 persistent_session has a 1h timer that
+> consistently expires before firmware's 1h heartbeat — broker drops
+> queued cmds every cycle, making the activate/wipe cmd flow
+> operationally unreliable without intervention; (2) wipe routine
+> takes ~6.3 s, longer than the firmware's ~4 s MQTT connection
+> window, causing `reported.wipe_complete` Shadow ack to fail with
+> `-EOPNOTSUPP`; (3) the redundant heartbeat-ack channel design saved
+> the test — caught what the Shadow ack missed and made the entire
+> recycle work. All three are now-known shape, not blockers.
+>
+> **Next batch:** §C23 design memo for a cloud-side
+> connection-coordinator Lambda that addresses finding (1) — listens
+> to AWS IoT lifecycle events, re-publishes pending cmds on each
+> firmware connection.
+
+---
+
+## C22.1 Bench test chronology
+
+```
+UTC 2026-05-17 21:55:27   Flashed merged.hex (994 KB) via nrfjprog
+                          -f NRF91 --recover --program --verify
+                          --reset --snr 802006700. Programming +
+                          verify successful. -256 J-Link warnings
+                          benign per §C12.8.
+UTC 2026-05-17 21:55:42   firmware first heartbeat post-flash:
+                          version "0.11.0-wipe-cmd", boot_count=9,
+                          uptime_s=15, persistent_session=1 (broker
+                          recognized recent client_id from pre-flash
+                          session at 21:54)
+UTC 2026-05-17 21:57:11   Cloud-side: POST /provision via 2A-DL API
+                          → 200 with activate cmd_id act_617406e4-...
+                          published to gs/GS9999999998/cmd
+                          [QUEUED on broker; firmware offline]
+UTC 2026-05-17 22:55:54   firmware reconnect 1h after first connect.
+                          persistent_session=0 (AWS IoT 1h timer
+                          expired the prior session). Heartbeat
+                          publishes with stale §C18 cmd_id. The
+                          queued activate cmd from 21:57 is GONE
+                          — broker dropped it. No DATA_RECEIVED
+                          on type=0 (gs/.../cmd).
+UTC 2026-05-18 04:59:23   Cloud-side: POST /end-assignment via API
+                          → 200 with wipe_id wipe_39e138f5-...
+                          published to gs/GS9999999998/cmd
+                          [QUEUED on broker; firmware offline]
+UTC 2026-05-18 06:00 →    Race-publish watcher armed (single-shot).
+                          ~05:58 UTC                        BUSTED: log_console.py rotated to
+                          uart0_2026-05-18.log at midnight UTC;
+                          watcher kept tailing yesterday's file
+                          and fired zero publishes across 7
+                          firmware reconnect cycles overnight.
+UTC 2026-05-18 14:38      Replaced with rotation-aware 5-shot
+                          burst watcher on today's log file
+                          (uart0_2026-05-18.log).
+UTC 2026-05-18 14:58:12   firmware reconnect for next heartbeat.
+                          persistent_session=0 (as expected — the
+                          cycle has been 0 every time since 22:55:54).
+                          Heartbeat publishes (stale §C18 cmd_id).
+UTC 2026-05-18 14:58:12   ↑ within milliseconds: 5-shot burst watcher
+                          fires aws iot-data publish × 5 @ 300ms,
+                          all carrying wipe_39e138f5-... wipe cmd.
+UTC 2026-05-18 14:58:14   firmware: evt: DATA_RECEIVED len=95
+                          type_received=0 (APPLICATION_SPECIFIC =
+                          gs/.../cmd). One of the burst publishes
+                          landed in the active subscription window.
+UTC 2026-05-18 14:58:14   firmware: "wipe cmd received: cmd_id=
+                          wipe_39e138f5-..." (parsed cleanly)
+UTC 2026-05-18 14:58:14.419 gs_wipe: "battery_pct=0.964 mv=4135
+                              — proceeding" (memo D3 floor 0.10 met)
+UTC 2026-05-18 14:58:14.502 gs_activation: "activation cleared
+                              — device re-entered pre-activation state"
+                              (/lfs/activation.bin fs_unlink succeeded)
+UTC 2026-05-18 14:58:14.526 gs_wipe: "session purge removed 0
+                              .dat file(s)" (FMEA 6.2 orphan_sweep
+                              had already cleared the partition)
+UTC 2026-05-18 14:58:20.862 gs_snippet: "purge_all: deleted 24
+                              snippet tuple(s)" (24 × 3 fs_unlinks
+                              = 72 LittleFS deletes, ~85ms each)
+UTC 2026-05-18 14:58:20.863 gs_wipe: "wipe_complete shadow send
+                              FAILED: -95" (-EOPNOTSUPP — firmware
+                              already disconnected from broker at
+                              this point)
+UTC 2026-05-18 14:58:20.863 gs_wipe: "shadow ack failed (-70) —
+                              heartbeat last_cmd_id echo is fallback"
+                              (redundant ack channel armed)
+UTC 2026-05-18 14:58:18.254 firmware DISCONNECTED (5 seconds after
+                              CONNECTED — wipe routine still finishing)
+UTC 2026-05-18 15:58:24   firmware reconnect next heartbeat tick.
+                          last_cmd_id="wipe_39e138f5-..." in payload.
+                          Cloud heartbeat-processor sees the echo.
+UTC 2026-05-18 15:58:25.868 cloud: device.wipe_complete audit
+                                  emitted by heartbeat-processor
+UTC 2026-05-18 15:58:25.869 cloud: device.recycled audit emitted
+                                  atomically with wipe_complete
+                                  (same Lambda invocation, both
+                                  emitted before return)
+UTC 2026-05-18 15:58:16   Device Registry: status=ready_to_provision,
+                          last_wipe_at=15:58:16Z, lastTransitionAt=
+                          15:58:16Z, outstandingWipeCmds=empty,
+                          Shadow desired empty
+```
+
+End-to-end: **wipe cmd received by firmware to cloud-side recycle: ~60 minutes** (gated entirely on firmware's hourly heartbeat cadence for the echo).
+
+---
+
+## C22.2 Memo W-R2 closure — "firmware actually wipes" spot-check
+
+Per the memo §9 FMEA, the design assumption was that firmware
+reliably executes the wipe routine + the unlink calls actually
+remove the files. Spot-check evidence:
+
+1. **`/lfs/activation.bin` removed.** Evidence: gs_activation log
+   line "activation cleared — device re-entered pre-activation
+   state" + atomic `s_activated` reset to 0. Direct filesystem
+   inspection not possible via uart1 LIST (that protocol is
+   sessions-only), but the log line is the canonical authoritative
+   signal (gs_activation only logs after successful fs_unlink).
+   No subsequent boot will load activation state until a fresh
+   activate cmd arrives.
+
+2. **`/lfs/sessions/` empty.** Evidence: `tools/pull_sessions.py
+   --list-only --port /dev/cu.usbmodem11105` returned "device has
+   0 session file(s):" post-wipe. Confirms `gosteady_session_orphan_sweep`
+   left the partition clean (no orphan .dat files surviving).
+
+3. **`/snippets/` purged of 24 tuples.** Evidence: gs_snippet log
+   line "purge_all: deleted 24 snippet tuple(s)". Each tuple is
+   .bin + .json + .up = 3 files, so 72 individual fs_unlinks. The
+   timing observation in §C22.3 corroborates this — 6.3 s of
+   wall-clock time consumed by these unlinks at ~85ms each is
+   consistent with LittleFS-over-SPI-NOR performance on the
+   GD25LE255E (~8 MHz spi3 per GOSTEADY_CONTEXT.md).
+
+Memo §9 FMEA W-R2 is **closed** for cmd-driven wipe. The remaining
+W-R2-adjacent assertion (does the wipe routine still run correctly
+if forced-reset bypasses the wipe predicate?) is unchanged from §C21
+— admin force-reset is the explicit escape hatch and accepts the
+caveat that filesystem may retain old data.
+
+---
+
+## C22.3 Three structural findings worth filing
+
+### Finding 1: AWS IoT MQTT 3.1.1 persistent_session has a 1h timer; firmware's hourly heartbeat sits at that edge
+
+**Severity: 🔴 HIGH** (production-blocker for downlink cmd reliability)
+
+**Symptom:** Every firmware reconnect after a ≥1h offline window reports `persistent_session=0`. Per AWS IoT Core docs, this means the broker discarded the prior session (and any queued QoS-1 messages) before the firmware reconnected. The activate cmd from 2026-05-17 21:57 and the wipe cmd from 2026-05-18 04:59 were both lost this way — never delivered to firmware despite cloud-side `iot:Publish` returning success.
+
+**Impact:** Any cmd-on-cmd-topic flow (activate, wipe, future cmds) is operationally unreliable without intervention for devices that connect ≤ hourly. The cloud-side outstandingActivationCmds / outstandingWipeCmds maps + 24h ack window only help if the cmd ever reaches the firmware in the first place.
+
+**Mitigation (validated this session):** Race-publish on firmware CONNECTED event. Cloud-side tooling watches AWS IoT lifecycle events (or, as a stopgap, tails the uart0 log over uart-CDC) and re-publishes any pending cmd within milliseconds of the firmware's connect, landing in the active subscription window before disconnect. Worked first-try with a 5-shot burst at 300ms spacing (4.5s total span comfortably within the firmware's ~4s connection window). Single-shot also expected to work given the small publish latency (<1s); not yet characterized.
+
+**Production fix:** §C23 design memo for a cloud-side connection-coordinator Lambda that subscribes to `$aws/events/presence/connected/{thingName}` and re-publishes any outstanding cmds (sweep Device Registry's outstandingActivationCmds + outstandingWipeCmds for the connecting serial). Effort: 1-2 days. **Alternative considered:** shorten firmware heartbeat to ≤50 min — but that doubles battery drain on the cmd-delivery path and changes M14.5 power-budget assumptions; not the right place to absorb this.
+
+---
+
+### Finding 2: Wipe routine takes ~6.3s, longer than firmware's ~4s MQTT connection window
+
+**Severity: 🟡 MEDIUM** (covered by fallback path; worth optimizing)
+
+**Symptom:** Wipe routine sequence took longer than the firmware's normal MQTT connection lifetime:
+- 14:58:14.419 — battery floor check + log (~0.5s after cmd received)
+- 14:58:14.502 — `gosteady_activation_clear()` completes (~80ms)
+- 14:58:14.526 — `gosteady_session_orphan_sweep()` completes (~24ms — no .dat files to delete)
+- 14:58:20.862 — `gosteady_snippet_purge_all()` completes (~6.3s for 24 tuples × 3 files = 72 fs_unlinks @ ~85ms each)
+- 14:58:20.863 — Shadow `reported.wipe_complete` ack publish **FAILS** with `-EOPNOTSUPP` (-95) → firmware logs "wipe_complete shadow send failed: -95" + "shadow ack failed (-70) — heartbeat last_cmd_id echo is fallback"
+- 14:58:18.254 — firmware DISCONNECTED at +5.5s (mid-purge!)
+
+Firmware was already disconnected (+5.5s) before the wipe routine finished (+6.3s). The `aws_iot_send` call to write `reported.wipe_complete` had no transport.
+
+**Impact:** Without the heartbeat-ack fallback channel, the wipe would have been a silent failure — firmware completed the wipe locally but cloud never received the ack signal. Auto-recycle wouldn't have fired. Admin force-reset would have been needed.
+
+**Mitigation (worked this session):** The redundant ack channel design (memo §3 D2) — `gosteady_cloud_set_last_cmd_id(wipe_id)` is called BEFORE the Shadow ack attempt (wipe.c:191 vs :208), so the next heartbeat (1h later) echoed the wipe_id correctly. Cloud's heartbeat-processor `_try_wipe_ack` matched and auto-recycled. **Cost:** 1-hour delay for the ack to land (next natural heartbeat).
+
+**Production fix candidates** (pick one):
+- **(a) Reorder wipe routine: emit Shadow ack BEFORE snippet purge.** The wipe is "logically committed" the moment `gosteady_activation_clear` succeeds — patient-identifying data is gone, only sensor-history housekeeping remains. Shipping the Shadow ack at that point would land in the firmware's still-active connection window. Snippet purge then continues post-ack; even if firmware crashes mid-purge, the next boot's `gosteady_snippet_init` rotation pass would catch leftover snippets (FMEA 6.1 already handles partial state). ~10 line change in `src/wipe.c`. **My lean.**
+- **(b) Batched fs_unlink in LittleFS.** Would require deeper LittleFS knowledge; unclear if SPI-NOR + LittleFS supports batch-delete primitives. Likely not worth the effort.
+- **(c) Cap snippet count per deployment.** Adds operational constraint without addressing the underlying timing.
+
+**Severity is MEDIUM not HIGH** because the fallback ack path is built into the design and validated working this session. If we strip the fallback (e.g. as a simplification later), this becomes HIGH.
+
+---
+
+### Finding 3: Redundant ack channel design validated — pays off exactly as specced
+
+**Severity: ✅ DESIGN VINDICATED** (architectural lesson; not a problem)
+
+**Memo §3 D2** explicitly specified TWO ack paths:
+1. Firmware writes Shadow `reported.wipe_complete = <wipe_id>` (the "durable state of record" path; device-shadow-handler picks it up)
+2. Firmware echoes `last_cmd_id = <wipe_id>` on next heartbeat (the "transport-cheap" path; heartbeat-processor picks it up)
+
+Either alone is sufficient; both firing is idempotent.
+
+**This session demonstrated why:** path (1) failed silently due to the timing issue in Finding 2; path (2) absorbed it. Without path (2), the entire wipe-ack flow would have been a silent failure and we'd have spent hours debugging.
+
+**Lesson worth keeping:** when a path is "best-effort" (Shadow write inside a time-bounded MQTT window), don't lean on it alone. The heartbeat-echo path is intrinsically next-tick-deterministic — slower but inevitable.
+
+---
+
+## C22.4 All 8 findings (full table)
+
+| # | Finding | Severity | Disposition |
+|---|---|---|---|
+| 1 | **AA-recycle end-to-end roundtrip works.** End-assignment → wipe cmd → firmware wipe → ack → cloud auto-recycle. Status flipped to `ready_to_provision`, audits emitted, outstandingWipeCmds cleared, Shadow desired empty. | ✅ Validated | Closed. Documented here. |
+| 2 | **AWS IoT MQTT 3.1.1 persistent_session 1h timer expires before firmware's 1h heartbeat.** Broker drops queued cmds every cycle. | 🔴 HIGH | §C23 connection-coordinator Lambda. Pre-first-prod-customer. |
+| 3 | **5-shot burst race-publish works.** Lands cmd in active subscription window. | ✅ Bench tooling | Keep as bench primitive; replaced by Lambda for production. |
+| 4 | **Wipe routine takes ~6.3 s; Shadow ack publish fails because firmware already disconnected.** Snippet purge dominates timing. | 🟡 MEDIUM | Firmware: reorder Shadow ack to fire after `activation_clear`, before `snippet_purge_all`. ~10 lines. |
+| 5 | **Redundant ack channel design (heartbeat + Shadow) paid off.** Heartbeat path caught what Shadow path dropped. | ✅ Design vindicated | Don't simplify to one path. |
+| 6 | **`Shadow.reported.activated_at` stale post-wipe.** Firmware doesn't write null on activation_clear. | 🟢 LOW | Bundle with #4 firmware fix. |
+| 7 | **Stale `outstandingActivationCmds` map entries persist forever.** 3 stale entries from pre-flash testing. | 🟢 LOW | Cloud sweeper (could fold into Phase 1C). |
+| 8 | **Firmware DL14 wake-time Shadow recheck not implemented.** Firmware receives UPDATE_DELTA, falls into `default: break`. | 🟢 LOW | Architectural decision: implement vs deprecate DL14. Wipe-ack model effectively supersedes. |
+
+---
+
+## C22.5 Audit chain emitted this cycle
+
+Centralized `gosteady-dev-audit` log group, last 90 min for `GS9999999998`:
+
+```
+[2026-05-18 15:58:25,868] device.wipe_complete  src=gosteady-dev-heartbeat-processor
+[2026-05-18 15:58:25,869] device.recycled       src=gosteady-dev-heartbeat-processor
+```
+
+Both atomic at 15:58:25.868-.869 (one Lambda invocation, two emit_audit calls). `schema_version: 1` on both. Source is heartbeat-processor — confirms the heartbeat-ack path closed the loop (NOT the Shadow path, which failed firmware-side per Finding 2).
+
+The `device.assignment_ended` + `device.wipe_requested` from yesterday's end-assignment at 04:59:23 are in the older portion of the centralized log; both fired correctly at the time per §C21's earlier validation.
+
+---
+
+## C22.6 Final bench state (validated)
+
+```
+serialNumber:          GS9999999998
+status:                ready_to_provision
+activated_at:          2026-05-18T00:27:52Z   (left from §C19 synthetic; stale but unused)
+last_wipe_at:          2026-05-18T15:58:16Z   (the heartbeat-ack timestamp — Finding 5 path)
+wipe_requested_at:     2026-05-18T04:59:23Z   (when cloud published the wipe cmd)
+lastTransitionAt:      2026-05-18T15:58:16Z   (recycle event)
+outstandingActivationCmds: 3 stale (Finding 7; will not ack)
+outstandingWipeCmds:   <empty>                ✅
+owningClientId:        dtc_smoke_test         (persists per DL4)
+owningFacilityId:      fac_smoke_001
+Shadow.desired:        <empty>                ✅ (DL14 + DL15 invariants both clean)
+Shadow.reported.firmware:     "0.11.0-wipe-cmd"
+Shadow.reported.battery_pct:  0.964
+Shadow.reported.last_cmd_id:  wipe_39e138f5-... (the wipe-ack echo)
+Shadow.reported.activated_at: "2026-05-17T22:01:56Z"   (Finding 6 — stale)
+Shadow.reported.wipe_complete: wipe_98711acd-... (left from §C21 synthetic test; not the current cycle's; Finding 6-adjacent)
+Filesystem (post-wipe):
+  /lfs/sessions/                 0 files (verified via uart1 LIST)
+  /lfs/activation.bin            absent (firmware log line)
+  /snippets/*                    24 tuples purged (firmware log line)
+  /lfs/boot_count, /lfs/forensics  KEPT (memo D4 keep-list)
+```
+
+---
+
+## C22.7 Suggested ordering for the follow-ups
+
+| Tier | Item | Effort |
+|---|---|---|
+| **Production-blocker** | §C23 connection-coordinator Lambda (Finding 2) | 1-2 days. Must land before first prod customer. |
+| **Pre-prod hardening** | Firmware wipe reorder (Finding 4) | ~10 line change in `src/wipe.c`. Next firmware revision. Bundle with Finding 6 fix. |
+| **Pre-prod hardening** | Firmware Shadow.reported.activated_at=null on activation_clear (Finding 6) | ~5 line change. Bundle with Finding 4. |
+| **Operational hygiene** | Stale outstandingActivationCmds sweeper (Finding 7) | ~5 line addition to device-api OR fold into Phase 1C. Cheap. |
+| **Architectural** | DL14 wake-time Shadow recheck — implement vs deprecate (Finding 8) | Decision needed first. Wipe-ack supersedes DL14 effectively. |
+| **Documentation** | (this entry + §C23) | Now. |
+
+---
+
+## C22.8 What worked vs what hit a wall
+
+**Worked exactly as designed:**
+- Firmware boots cleanly with `0.11.0-wipe-cmd`, cellular reattach on iBasis trial, hourly heartbeat publishing
+- `gosteady_wipe_now` orchestration: battery floor check, session_stop (no-op — no active session), activation_clear, session_orphan_sweep, snippet_purge_all, last_cmd_id arming
+- `gosteady_session_orphan_sweep`: returned 0 file removals (clean partition from prior boot)
+- `gosteady_snippet_purge_all`: deleted 24 tuples successfully
+- Cloud-side heartbeat-processor's `_try_wipe_ack` matched the cmd_id and auto-recycled
+- Audit emission for both events
+- DL14 + DL15 Shadow invariants maintained (desired empty post-recycle)
+
+**Hit a wall (3 findings above):**
+- Broker dropped cmds queued during firmware's 1-hour offline windows (Finding 2)
+- Shadow ack write timed out of the connection window due to snippet purge duration (Finding 4)
+
+**Saved by the design:**
+- Redundant heartbeat-ack path absorbed the Shadow ack failure (Finding 5 — design vindicated)
+- 5-shot burst race-publish landed the cmd in the active subscription window (Finding 3 — workaround validated)
+
+---
+
+## C22.9 §C20 sequencing — closure
+
+| § | Item | Status |
+|---|---|---|
+| §C20.5.1 | Docs land (memo + ARCH + 2A-DL + coord §C20) | ✅ DONE (`238a814`) |
+| §C20.5.2 | Firmware work | ✅ DONE (`5d73684` committed; flashed + bench-validated this session) |
+| §C20.5.3 | Cloud work (B-series) | ✅ DONE (`01c77a6`) |
+| §C20.5.4 | E2E bench validation | ✅ **DONE** this session |
+
+§C20 fully closed. The AA-recycle directional change is now end-to-end validated. Remaining cleanup is items #4-#8 in §C22.4 (none blocking).
+
+After this entry, the cloud-side queue returns to:
+- **Production-blocker:** §C23 connection-coordinator Lambda
+- **Pending choice:** 1C-slim offline detector OR 2A-RD patient reads (any order)
+
+---
+
+*Entry owner: Claude (autonomous bench session, 2026-05-18), with
+Jace confirming SW2-nRF91 position before flash + reading
+notifications throughout.*
+*Closes the §C21 deferred bench checkpoint. Opens §C23 connection-
+coordinator Lambda direction. Three architectural findings (Finding
+2/4/5) are real signals — Finding 2 in particular is the next-priority
+work, Finding 4 is a small firmware tweak.*
+
+
