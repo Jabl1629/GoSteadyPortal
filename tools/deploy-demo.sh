@@ -1,68 +1,108 @@
 #!/usr/bin/env bash
-# Build the facility demo and force-push it to the gh-pages branch so
-# GitHub Pages serves the latest at https://jabl1629.github.io/GoSteadyPortal/
+# Build the facility demo and drop it into the GoSteadyWeb repo as the
+# /facilitydemo subdirectory. Push GoSteadyWeb → Netlify auto-deploys to
+# https://gosteady.co/facilitydemo/
 #
 # Usage:
-#   tools/deploy-demo.sh
+#   tools/deploy-demo.sh                    # build + commit + push
+#   tools/deploy-demo.sh --skip-push        # build + commit, hold the push
+#   tools/deploy-demo.sh --build-only       # build but leave artifacts in /tmp
 #
 # Notes:
-#   - Designed to be run from the repo root.
-#   - Uses a temporary clone in /tmp/gh-pages-deploy so the iCloud-synced
-#     primary checkout is never put on the orphan branch (which would force
-#     iCloud to reindex thousands of files unnecessarily).
-#   - Pages picks up the push within ~30–90 s.
+#   - Designed to be run from the GoSteadyPortal repo root.
+#   - Builds in /tmp so the iCloud-synced primary checkout doesn't have to
+#     materialize the build/ folder (28 MB of canvaskit + main.dart.js).
+#   - Assumes the GoSteadyWeb checkout lives at $WEB_REPO (default below).
+#   - Only stages files under facilitydemo/ — never touches anything else
+#     that may be in your GoSteadyWeb working tree.
 set -euo pipefail
 
-REPO_OWNER="Jabl1629"
-REPO_NAME="GoSteadyPortal"
-REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
-BASE_HREF="/${REPO_NAME}/"
-DEPLOY_TMP="/tmp/gh-pages-deploy"
-
-# Resolve the repo root regardless of where the script was invoked from.
-cd "$(git rev-parse --show-toplevel)"
-REPO_ROOT="$(pwd)"
-BUILD_OUT="${REPO_ROOT}/build/web-facility-demo"
+# ── Config ─────────────────────────────────────────────────────────────
+WEB_REPO="${WEB_REPO:-$HOME/Documents/GoSteadyWeb}"
+BASE_HREF="/facilitydemo/"
+SUBDIR="facilitydemo"
 TARGET="lib/facility_demo/main_demo.dart"
+BUILD_OUT="/tmp/portal-build-out"
 
-if [[ ! -f "${TARGET}" ]]; then
-  echo "Error: ${TARGET} not found. Run from the gosteady-portal root."
+# ── Args ───────────────────────────────────────────────────────────────
+SKIP_PUSH=0
+BUILD_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --skip-push)  SKIP_PUSH=1 ;;
+    --build-only) BUILD_ONLY=1 ;;
+    -h|--help)
+      sed -n '1,/^set /p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *) echo "Unknown arg: $arg" >&2; exit 2 ;;
+  esac
+done
+
+# ── Resolve repo roots ────────────────────────────────────────────────
+PORTAL_REPO="$(git rev-parse --show-toplevel)"
+if [[ ! -f "${PORTAL_REPO}/${TARGET}" ]]; then
+  echo "Error: ${TARGET} not in ${PORTAL_REPO}. Run from the gosteady-portal root."
+  exit 1
+fi
+if [[ ! -d "${WEB_REPO}/.git" ]]; then
+  echo "Error: ${WEB_REPO} is not a git checkout (expected GoSteadyWeb)."
+  echo "Override with WEB_REPO=/path/to/GoSteadyWeb"
   exit 1
 fi
 
+PORTAL_BRANCH="$(git -C "${PORTAL_REPO}" rev-parse --abbrev-ref HEAD)"
+PORTAL_SHA="$(git -C "${PORTAL_REPO}" rev-parse --short HEAD)"
+
+# ── Build ──────────────────────────────────────────────────────────────
 echo "==> Building ${TARGET} with --base-href ${BASE_HREF}"
+echo "    portal repo:  ${PORTAL_REPO}"
+echo "    portal HEAD:  ${PORTAL_BRANCH} @ ${PORTAL_SHA}"
+echo "    output dir:   ${BUILD_OUT}"
+
 rm -rf "${BUILD_OUT}"
-flutter build web -t "${TARGET}" --base-href "${BASE_HREF}" --output "${BUILD_OUT}"
+(cd "${PORTAL_REPO}" && flutter build web \
+  -t "${TARGET}" \
+  --base-href "${BASE_HREF}" \
+  --output "${BUILD_OUT}")
 
-echo "==> Preparing fresh clone at ${DEPLOY_TMP}"
-rm -rf "${DEPLOY_TMP}"
-git clone --depth 1 "${REPO_URL}" "${DEPLOY_TMP}"
+if [[ "${BUILD_ONLY}" == "1" ]]; then
+  echo
+  echo "✅ Build complete (build-only). Artifacts: ${BUILD_OUT}"
+  exit 0
+fi
 
-echo "==> Resetting to orphan gh-pages branch"
-cd "${DEPLOY_TMP}"
-git checkout --orphan gh-pages
-git rm -rf . >/dev/null
+# ── Drop into GoSteadyWeb ─────────────────────────────────────────────
+echo
+echo "==> Replacing ${WEB_REPO}/${SUBDIR}/ with new build"
+rm -rf "${WEB_REPO:?}/${SUBDIR}"
+mkdir -p "${WEB_REPO}/${SUBDIR}"
+cp -R "${BUILD_OUT}/." "${WEB_REPO}/${SUBDIR}/"
 
-echo "==> Copying build artifacts to root + adding .nojekyll"
-cp -R "${BUILD_OUT}/." .
-touch .nojekyll
+# ── Commit + push ──────────────────────────────────────────────────────
+cd "${WEB_REPO}"
+git add "${SUBDIR}/"
 
-COMMIT_SHA="$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
-COMMIT_BRANCH="$(git -C "${REPO_ROOT}" rev-parse --abbrev-ref HEAD)"
-COMMIT_MSG="Deploy facility demo from ${COMMIT_BRANCH} @ ${COMMIT_SHA}"
+if git diff --cached --quiet; then
+  echo "==> Nothing changed in ${SUBDIR}/; skipping commit."
+else
+  echo "==> Committing"
+  git -c user.email="deploy@gosteady.local" \
+      -c user.name="GoSteady Deploy" \
+      commit -m "Deploy facility demo from ${PORTAL_BRANCH} @ ${PORTAL_SHA}"
+fi
 
-git add -A
-git -c user.email="deploy@gosteady.local" -c user.name="GoSteady Deploy" \
-  commit -m "${COMMIT_MSG}"
+if [[ "${SKIP_PUSH}" == "1" ]]; then
+  echo
+  echo "✅ Build + commit complete. Push held (--skip-push)."
+  echo "   Run: cd ${WEB_REPO} && git push origin main"
+  exit 0
+fi
 
-echo "==> Force-pushing gh-pages"
-git push -f origin gh-pages
+echo "==> Pushing to origin/main"
+git push origin main
 
 echo
 echo "✅ Deploy complete."
-echo "   Live URL: https://${REPO_OWNER,,}.github.io/${REPO_NAME}/"
-echo "   GitHub Pages will rebuild within ~30–90 seconds."
-echo
-echo "Cleaning up ${DEPLOY_TMP}…"
-cd "${REPO_ROOT}"
-rm -rf "${DEPLOY_TMP}"
+echo "   Live URL: https://gosteady.co/facilitydemo/"
+echo "   Netlify will rebuild within ~30–60 seconds."

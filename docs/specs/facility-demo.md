@@ -483,42 +483,55 @@ work continues independently in Phase 2B.
 | 2026-05-08 | `b3d0cd8` + `b739028` | Gait-speed chart added; cleaner range/avg summary chip; tooltip restructured to avg / min / max stacked |
 | 2026-05-08 | `0761175` + `83783b4` | Full mobile + tablet responsive pass — `?w=NUMBER` URL viewport override for autonomous testing, top-bar collapse, full-bleed phone overlay, stacked Acknowledge button, tile dedupe |
 | 2026-05-08 | `46717e3` | `dart format` cleanup |
+| 2026-05-08 | `8f63d1b` | First deploy: GitHub Pages at `jabl1629.github.io/GoSteadyPortal/` (later replaced) |
+| 2026-05-18 | (this) | Migrated deploy target to `gosteady.co/facilitydemo` (Netlify subdir of marketing site). `tools/deploy-demo.sh` now drops build into `Jabl1629/GoSteadyWeb` under `facilitydemo/` and pushes. |
 
 ---
 
 ## 12. Deploy
 
 ### Live URL
-**https://jabl1629.github.io/GoSteadyPortal/**
+**https://gosteady.co/facilitydemo/**
 
-Hosted on GitHub Pages from the `gh-pages` branch root. Repo is public, so the
-URL is open — no auth needed at the page level (the demo's "Sign in to demo"
-button is mock auth that always succeeds).
+Served as a `/facilitydemo` subdirectory of the marketing site (Netlify),
+not a standalone deploy. The build artifacts live in
+[`Jabl1629/GoSteadyWeb`](https://github.com/Jabl1629/GoSteadyWeb) under
+`facilitydemo/` on `main`; Netlify auto-deploys on push.
+
+No auth at the page level — the demo's "Sign in to demo" button is mock auth
+that always succeeds.
 
 ### How re-deploy works
 
 ```bash
-./tools/deploy-demo.sh
+./tools/deploy-demo.sh                # build + commit + push
+./tools/deploy-demo.sh --skip-push    # build + commit, hold the push
+./tools/deploy-demo.sh --build-only   # build only, no GoSteadyWeb changes
 ```
 
 The script:
-1. Builds with `flutter build web -t lib/facility_demo/main_demo.dart --base-href /GoSteadyPortal/`
-2. Clones a fresh checkout to `/tmp/gh-pages-deploy` (avoids touching the
-   iCloud-synced primary repo)
-3. Creates an orphan `gh-pages` branch, copies the build artifacts to root,
-   adds `.nojekyll` so GitHub doesn't rewrite asset paths
-4. Force-pushes to `origin/gh-pages`
+1. Runs `flutter build web -t lib/facility_demo/main_demo.dart --base-href /facilitydemo/`
+   into `/tmp/portal-build-out/` (keeps the build/ folder out of the
+   iCloud-synced primary checkout).
+2. Replaces `$WEB_REPO/facilitydemo/` (default `~/Documents/GoSteadyWeb/facilitydemo/`)
+   with the new artifacts.
+3. Stages only the `facilitydemo/` subtree (won't touch other working-tree
+   changes in GoSteadyWeb), commits with a message referencing the source
+   `feature/facility-demo` SHA, and pushes `origin/main`.
 
-GitHub Pages picks up the push within ~30–90 seconds.
+Netlify picks up the push within ~30–60 seconds.
 
-### Pages config (one-time, already done)
+Override the GoSteadyWeb location with `WEB_REPO=/path/to/checkout
+./tools/deploy-demo.sh` if your clone lives elsewhere.
 
-```bash
-gh api -X POST repos/Jabl1629/GoSteadyPortal/pages \
-  -f "source[branch]=gh-pages" -f "source[path]=/"
-```
+### Why not GitHub Pages
 
-HTTPS enforced. No CNAME (using the default `*.github.io` domain).
+The earlier setup served the demo from
+`https://jabl1629.github.io/GoSteadyPortal/` via the `gh-pages` branch of
+this repo. That branch is no longer the source of truth and may be deleted
+or left stale. Using the gosteady.co subpath keeps everything under one
+domain (better for sharing the link with partners, and aligns with the
+eventual Phase 3A production URL `portal.gosteady.co`).
 
 ---
 
