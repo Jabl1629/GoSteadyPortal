@@ -23,7 +23,7 @@ class ViewModeToggle extends StatelessWidget {
         borderRadius: BorderRadius.circular(100),
         border: Border.all(color: AppTheme.border.withOpacity(0.5), width: 1),
       ),
-      padding: const EdgeInsets.all(3),
+      padding: const EdgeInsets.all(2),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -67,7 +67,7 @@ class _Segment extends StatelessWidget {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
           curve: Curves.easeOut,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
             color: active ? AppTheme.sage : Colors.transparent,
             borderRadius: BorderRadius.circular(100),

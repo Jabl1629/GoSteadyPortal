@@ -160,7 +160,7 @@ class _Header extends StatelessWidget {
     return Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
       runSpacing: 12,
-      spacing: 16,
+      spacing: 12,
       children: [
         Row(
           mainAxisSize: MainAxisSize.min,
@@ -171,31 +171,28 @@ class _Header extends StatelessWidget {
               style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                     fontSize: 24,
                     fontWeight: FontWeight.w600,
+                    height: 1.0,
                   ),
             ),
             const SizedBox(width: 12),
             Padding(
-              padding: const EdgeInsets.only(bottom: 6),
+              padding: const EdgeInsets.only(bottom: 3),
               child: Text(
                 _countLabel(),
                 style: const TextStyle(
                   color: AppTheme.textSoft,
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
+                  height: 1.0,
                 ),
-              ),
-            ),
-            const SizedBox(width: 14),
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: ViewModeToggle(
-                selected: selection.viewMode,
-                onChanged: selection.setViewMode,
               ),
             ),
           ],
         ),
-        const SizedBox(width: 8),
+        ViewModeToggle(
+          selected: selection.viewMode,
+          onChanged: selection.setViewMode,
+        ),
         SimpleSelectDropdown<CensusSortMode>(
           label: 'Sort',
           icon: Icons.sort_rounded,
