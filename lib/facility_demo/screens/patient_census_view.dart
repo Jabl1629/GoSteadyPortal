@@ -43,7 +43,7 @@ class PatientCensusView extends StatelessWidget {
         _applySort(filtered, selection.sortMode);
 
         return SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 24, 16, 32),
+          padding: const EdgeInsets.fromLTRB(10, 24, 10, 32),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [

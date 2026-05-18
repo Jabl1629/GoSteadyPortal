@@ -498,11 +498,12 @@ class FacilityMockData {
       alertsThisWeek: 1,
     ),
     'pt_002': _ActivitySpec(
-      // Robert Chen — "below typical activity" demo case.
-      // Baseline lifted from spec target (220) so today (142) lands well
-      // below the 70% threshold even after seeded jitter on the median.
-      targetStepsToday: 142,
-      targetActiveMinToday: 11,
+      // Robert Chen — "below typical activity" demo case. Today drops
+      // further from 142/11 to 78/6 so the daily values land in the
+      // rust tier; baseline 280 keeps the 7d/30d averages mid-range and
+      // the contrast obvious.
+      targetStepsToday: 78,
+      targetActiveMinToday: 6,
       historicalBaselineSteps: 280,
       stepsPerActiveMinute: 12.9,
       batteryMv: 3520,
@@ -523,9 +524,12 @@ class FacilityMockData {
       alertsThisWeek: 2,
     ),
     'pt_004': _ActivitySpec(
-      targetStepsToday: 894,
-      targetActiveMinToday: 47,
-      historicalBaselineSteps: 920,
+      // Eleanor Park — the facility's most active resident. Today and
+      // baselines both pushed higher (1240 / 68 vs 894 / 47) so her row
+      // anchors the sage / high-tier end of the variance demo.
+      targetStepsToday: 1240,
+      targetActiveMinToday: 68,
+      historicalBaselineSteps: 1100,
       stepsPerActiveMinute: 19.0,
       batteryMv: 3580,
       signalDbm: -75,
@@ -564,9 +568,12 @@ class FacilityMockData {
       alertsThisWeek: 5,
     ),
     'pt_007': _ActivitySpec(
-      targetStepsToday: 612,
-      targetActiveMinToday: 38,
-      historicalBaselineSteps: 580,
+      // Dorothy Williams — strong rehab recovery. Pushed up to 720 / 51
+      // (was 612 / 38) so she pairs with Eleanor at the high-activity
+      // end of the color-tier spread.
+      targetStepsToday: 720,
+      targetActiveMinToday: 51,
+      historicalBaselineSteps: 720,
       stepsPerActiveMinute: 16.1,
       batteryMv: 3560,
       signalDbm: -80,
@@ -586,9 +593,12 @@ class FacilityMockData {
       alertsThisWeek: 0,
     ),
     'pt_009': _ActivitySpec(
-      targetStepsToday: 234,
-      targetActiveMinToday: 18,
-      historicalBaselineSteps: 245,
+      // Ruth Patel — low-baseline long-term resident. Pulled down to
+      // 145 / 11 (was 234 / 18) so she lands in the amber tier alongside
+      // George + Frank rather than mid-range.
+      targetStepsToday: 145,
+      targetActiveMinToday: 11,
+      historicalBaselineSteps: 145,
       stepsPerActiveMinute: 13.0,
       batteryMv: 3500,
       signalDbm: -89,
