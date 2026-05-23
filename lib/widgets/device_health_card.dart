@@ -39,9 +39,7 @@ class DeviceStatusBar extends StatelessWidget {
             _Indicator(
               icon: Icons.cloud_done_rounded,
               label: device.lastSeenDescription,
-              color: device.isOnline
-                  ? AppTheme.statusOk
-                  : AppTheme.statusAlert,
+              color: device.isOnline ? AppTheme.statusOk : AppTheme.statusAlert,
             ),
             const SizedBox(width: 8),
             Icon(

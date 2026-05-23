@@ -93,8 +93,8 @@ class AuthService extends ChangeNotifier {
     ];
 
     try {
-      final result = await _pool.signUp(email, password,
-          userAttributes: attributes);
+      final result =
+          await _pool.signUp(email, password, userAttributes: attributes);
       return !(result.userConfirmed ?? false);
     } on CognitoClientException catch (e) {
       throw AuthException(_friendlyMessage(e.code, e.message));

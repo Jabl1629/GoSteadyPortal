@@ -467,8 +467,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 subtitle: 'I monitor a walker',
                 icon: Icons.favorite_outline_rounded,
                 selected: _selectedRole == UserRole.caregiver,
-                onTap: () =>
-                    setState(() => _selectedRole = UserRole.caregiver),
+                onTap: () => setState(() => _selectedRole = UserRole.caregiver),
               ),
             ),
           ],

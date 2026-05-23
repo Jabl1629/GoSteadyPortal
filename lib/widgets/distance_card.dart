@@ -27,65 +27,85 @@ class TodayCard extends StatelessWidget {
     final feet = today.totalDistanceFt;
     final steps = today.totalSteps;
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(32, 28, 32, 30),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(AppTheme.cardRadius),
-        boxShadow: AppTheme.cardShadowElevated,
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          stops: [0.0, 0.5, 1.0],
-          colors: [
-            Color(0xFF5A8E6A),
-            AppTheme.sage,
-            Color(0xFF375A42),
-          ],
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Today\'s Activity',
-            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                  color: Colors.white,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w500,
-                ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isNarrow = constraints.maxWidth < 420;
+        final activeMetric = _Metric(
+          icon: Icons.timer_outlined,
+          value: _motionLabel,
+          label: 'Active time',
+        );
+        final distanceMetric = _Metric(
+          icon: Icons.directions_walk_rounded,
+          value: '${formatter.format(feet.round())} ft',
+          label: '${formatter.format(steps)} steps',
+        );
+
+        return Container(
+          padding: EdgeInsets.fromLTRB(
+            isNarrow ? 22 : 32,
+            isNarrow ? 18 : 20,
+            isNarrow ? 22 : 32,
+            isNarrow ? 20 : 22,
           ),
-          const SizedBox(height: 24),
-          IntrinsicHeight(
-            child: Row(
-              children: [
-                // Active time — left
-                Expanded(
-                  child: _Metric(
-                    icon: Icons.timer_outlined,
-                    value: _motionLabel,
-                    label: 'Active time',
-                  ),
-                ),
-                VerticalDivider(
-                  width: 32,
-                  thickness: 1,
-                  indent: 4,
-                  endIndent: 4,
-                  color: Colors.white.withOpacity(0.18),
-                ),
-                // Distance — right
-                Expanded(
-                  child: _Metric(
-                    icon: Icons.directions_walk_rounded,
-                    value: '${formatter.format(feet.round())} ft',
-                    label: '${formatter.format(steps)} steps',
-                  ),
-                ),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(AppTheme.cardRadius),
+            boxShadow: AppTheme.cardShadowElevated,
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              stops: [0.0, 0.5, 1.0],
+              colors: [
+                Color(0xFF5A8E6A),
+                AppTheme.sage,
+                Color(0xFF375A42),
               ],
             ),
           ),
-        ],
-      ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Today\'s Activity',
+                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w500,
+                    ),
+              ),
+              const SizedBox(height: 14),
+              if (isNarrow) ...[
+                activeMetric,
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  child: Container(
+                    height: 1,
+                    color: Colors.white.withOpacity(0.18),
+                  ),
+                ),
+                distanceMetric,
+              ] else
+                IntrinsicHeight(
+                  child: Row(
+                    children: [
+                      // Active time — left
+                      Expanded(child: activeMetric),
+                      VerticalDivider(
+                        width: 32,
+                        thickness: 1,
+                        indent: 4,
+                        endIndent: 4,
+                        color: Colors.white.withOpacity(0.18),
+                      ),
+                      // Distance — right
+                      Expanded(child: distanceMetric),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

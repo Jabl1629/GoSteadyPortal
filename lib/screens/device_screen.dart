@@ -90,9 +90,12 @@ class DeviceScreen extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(height: 16),
-                          _InfoRow(label: 'Serial number', value: device.serialNumber),
+                          _InfoRow(
+                              label: 'Serial number',
+                              value: device.serialNumber),
                           const SizedBox(height: 12),
-                          _InfoRow(label: 'Firmware', value: device.firmwareVersion),
+                          _InfoRow(
+                              label: 'Firmware', value: device.firmwareVersion),
                           const SizedBox(height: 12),
                           _InfoRow(label: 'Sensor', value: device.sensorModel),
                           const SizedBox(height: 12),
