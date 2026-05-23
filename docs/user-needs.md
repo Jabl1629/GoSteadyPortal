@@ -1,10 +1,12 @@
 # GoSteady Facility Portal — User Needs
 
-> **Status:** V1 working draft, generated from the live demo at
-> [gosteady.co/facilitydemo](https://gosteady.co/facilitydemo/).
-> Bring this to the cloud working session to confirm coverage,
-> challenge assumptions, and resolve the open questions in §7.
-> Story IDs (US-xx) are stable references for the working session.
+> **Status:** V1 spec (post-decision). Generated from the live demo at
+> [gosteady.co/facilitydemo](https://gosteady.co/facilitydemo/) and
+> revised through working-session prep (2026-05) — the 12 original
+> open questions are now resolved in §7. New requirements that
+> emerged during prep (Care Note, Pause Notifications rename, smart
+> debounce) are integrated into the relevant capability sections.
+> Story IDs (US-xx) are stable references for downstream work.
 
 ---
 
@@ -26,13 +28,12 @@ charting work for nurses.
 
 ### Primary portal users
 
-- **Care Staff** (CNA, floor nurse, day-shift staff). Lives in the
-  Census view; triages notifications; checks individual residents
-  during rounds. Read-heavy.
-- **Administrator** (Director of Nursing, facility director, fleet
-  manager). All Care Staff capabilities plus resident lifecycle (add,
-  edit, transfer, discharge) and device fleet (replace, discontinue,
-  diagnose). Write-heavy at lower frequency.
+- **Care Staff** (any authorized facility user — CNA, floor nurse,
+  day-shift staff, DON, facility director). All Care Staff have the
+  same permissions in V1: read everything, acknowledge notifications,
+  pause notifications, add/edit/discharge residents, replace/discontinue
+  devices. The Admin vs. Care Staff split is reserved for V2 once we
+  see whether real customers want role-gating.
 
 ### Subject of monitoring (not a portal user)
 
@@ -231,6 +232,22 @@ and the hardware is healthy.
 resident detail (via a Back link or by closing the overlay) so that I
 can move on to the next resident efficiently.
 
+**US-44.** As Care Staff, I can read and edit a **Care Note** at the
+top of a resident's detail view so that the team has context (e.g.,
+"Back from hospital Feb 12 — slow start expected") when interpreting
+that resident's activity numbers.
+
+- **Single overwriteable text block**, not a feed of past notes —
+  keeps it from drifting into a parallel charting system
+- Max ~280 characters; forces brevity, fits one line on phone
+- **Inline editable**: click to edit, save on blur or Enter; no modal
+- Displays last-editor name and timestamp ("Updated by J. Blackburn ·
+  2h ago")
+- Empty state shows a subtle "+ Add care note" link
+- Lives between the resident header and the notification review
+  panel — first thing read after the name
+- Edits are written to the audit log (§5)
+
 ---
 
 ### 4.4 Notifications & Alerts
@@ -245,6 +262,11 @@ residents whose patterns suggest a problem:
   below this resident's recent personal baseline
 - **Declining trend** — the resident's multi-day average has been
   decreasing relative to their longer-term baseline
+- **Debounce** — if a notification was already raised yesterday and
+  the condition is unchanged (still no activity, still below typical),
+  the rule does **not** raise a duplicate today. The original
+  notification remains active until acknowledged. This prevents the
+  daily-alert-pileup that drove "Pause Notifications" (§4.5 US-31).
 
 **US-23.** As Care Staff, every notification carries a **severity**
 (critical, standard) so that I can prioritize critical issues first.
@@ -287,12 +309,12 @@ the active list** so that I'm only ever shown what still needs review.
 
 ### 4.5 Resident Lifecycle
 
-**US-28.** As an Administrator, I can **register a new resident** in
+**US-28.** As Care Staff, I can **register a new resident** in
 the system with first name, last name, facility, unit, room, and device
 ID so that they can start being monitored.
 
-- The **device ID must be exactly 10 digits**; non-numeric input is
-  rejected at the field level
+- The **device ID must match the format `GS` + 10 digits** (e.g.,
+  `GS0000000123`); non-conforming input is rejected at the field level
 - The **Unit dropdown is constrained by the Facility** I select; I
   cannot assign a resident to a unit that doesn't exist at their
   facility
@@ -300,7 +322,7 @@ ID so that they can start being monitored.
 - Action is accessible from a primary "Add Resident" CTA in the top
   right of the Census header
 
-**US-29.** As an Administrator, I can **edit a resident's name, unit,
+**US-29.** As Care Staff, I can **edit a resident's name, unit,
 and room** so that the record stays accurate as they move between
 rooms or wings.
 
@@ -309,35 +331,51 @@ rooms or wings.
 - Unit dropdown includes units from all facilities (allowing
   cross-facility transfer in one operation)
 
-**US-30.** As an Administrator, I can **transfer a resident from one
+**US-30.** As Care Staff, I can **transfer a resident from one
 facility to another** via Edit Resident Info so that residents moving
 between sister properties keep one continuous record.
 
 - No separate "Transfer" action needed; Unit change covers it
 - Activity history is unbroken across the transfer
 
-**US-31.** As an Administrator, I can **pause monitoring** for a
+**US-31.** As Care Staff, I can **pause notifications** for a
 resident for N days (1–90) with a reason (in hospital, at rehab
 elsewhere, family visit / off-site, on vacation, other) so that the
-team isn't paged about expected no-data days while the resident is
+team isn't paged about expected absences while the resident is
 off-site.
 
-- Activity tracking continues; only **alerts** are paused
+- Activity tracking continues normally — only **notifications** are
+  paused (the name was renamed from "Pause Monitoring" to avoid
+  implying we stop collecting data, which we don't)
 - Default duration: 7 days
-- Pause auto-expires (open question — see §7)
+- Pause **auto-resumes early** if activity data starts streaming
+  again before the timer expires (the reason for pausing is gone)
+- Pause **auto-resumes** when the timer expires; staff can also
+  manually unpause earlier
+- **Census tile and list row** show a paused-bell icon so it's
+  visible at a glance without opening the resident
+- **Resident detail** shows a clear banner with the countdown
+  (e.g., "Notifications paused — 4 days remaining · in hospital")
+  and a button to unpause early
+- Pause start, end, and reason are written to the audit log (§5)
 
-**US-32.** As an Administrator, I can **discharge a resident** with a
+**US-32.** As Care Staff, I can **discharge a resident** with a
 reason (transferred / moved home / hospital admission / deceased /
 other) and optional free-text notes so that their record is archived
 cleanly.
 
 - Discharge **preserves activity history** for compliance and family
-  inquiries
+  inquiries (default retention: 7 years, V2 configurable)
 - Discharged resident is removed from the active Census
+- **Assigned device is automatically released** to the unassigned
+  pool — no need to discontinue the device first
+- Discharged record stays in a **recoverable state for 7 days** —
+  reachable via support-mediated restore; archived permanently after
+  the 7-day window (no self-serve "Undo" button in the app)
 - The destructive nature is communicated in the dialog ("This archives
   X and stops all monitoring. Activity history is preserved.")
 
-**US-33.** As an Administrator, **destructive actions** (Discontinue
+**US-33.** As Care Staff, **destructive actions** (Discontinue
 Device, Discharge Resident) are visually distinct (warn-red accent) and
 require explicit confirmation so that I don't trigger them by accident.
 
@@ -346,7 +384,7 @@ require explicit confirmation so that I don't trigger them by accident.
 - No double-confirm modal needed (the confirm modal *is* the
   destructive page)
 
-**US-34.** As an Administrator, all resident-lifecycle actions are
+**US-34.** As Care Staff, all resident-lifecycle actions are
 reached from **one consistent settings menu** (the gear icon next to
 the resident name) so that I don't hunt for them across screens.
 
@@ -357,18 +395,18 @@ the resident name) so that I don't hunt for them across screens.
 
 ### 4.6 Device Management
 
-**US-35.** As an Administrator, I can **replace a resident's device**
+**US-35.** As Care Staff, I can **replace a resident's device**
 with a new one and a reason (damaged / battery worn / upgraded model /
 lost or misplaced / other) so that I can continue to monitor their
 mobility through a hardware change.
 
 - Current device ID is shown as a read-only chip before the form
-- New device ID must be exactly 10 digits
+- New device ID must match `GS` + 10 digits
 - Replacement is **transparent to the resident's activity history**
   (no gap, no duplicate, no rebaseline)
 - Old device is automatically released and available for re-assignment
 
-**US-36.** As an Administrator, I can **discontinue a resident's
+**US-36.** As Care Staff, I can **discontinue a resident's
 device** without discharging the resident so that I can keep the
 resident in the system while their walker is out for repair.
 
@@ -377,7 +415,7 @@ resident in the system while their walker is out for repair.
   notify on)
 - I can assign a new device any time via Replace Device
 
-**US-37.** As an Administrator, I can see the **device serial, battery
+**US-37.** As Care Staff, I can see the **device serial, battery
 level, cellular signal, last data received, and firmware version** for
 any resident's assigned device so that I can troubleshoot connectivity
 issues without leaving the portal.
@@ -469,6 +507,31 @@ the right account.
 - Refreshing the page returns me to the same Census state (filter,
   sort, view mode) when possible
 
+### Auditability
+- **Every lifecycle action is logged** to an immutable audit row in
+  V1: who, when, what action, before/after values, originating IP
+- Covered actions: Add Resident, Edit Resident Info, Pause/Resume
+  Notifications, Discharge, Restore (support-mediated), Replace
+  Device, Discontinue Device, Acknowledge Notification, edit Care Note
+- **No UI in V1** — write-side only. V2 adds a per-resident
+  audit view. Backfilling history later is impossible, so we start
+  logging from day one.
+
+### Forward compatibility
+To keep V1 cheap and the V3 family-member portal cheap to add:
+- The auth model retains the `isCaregiver` role flag (no UI yet)
+- Resident-scoped views render correctly given a single-resident
+  context — no implicit dependency on the Census being loaded
+- The data layer does **not** assume "current user has access to
+  every resident in the facility" — resident lookup is always
+  permission-checked, even when the user is currently in V1's
+  full-facility view
+
+### Device identifier format
+- All device serials are `GS` + 10 digits (e.g., `GS0000000123`).
+  One format end-to-end: firmware, AWS data layer, portal forms,
+  RMA/packing-slip systems. No bare 10-digit IDs anywhere.
+
 ---
 
 ## 6. Explicitly Out of Scope (V1)
@@ -480,66 +543,121 @@ tracked so we don't lose them.
 - **Per-resident alert threshold customization** (defaults only in V1)
 - **Care team / family contact management** (which staff member is the
   primary nurse for a resident, who gets paged)
-- **External notification routing** (email, SMS, push) — the portal
-  alerts you in-app only
+- **External notification routing UI** — V1 is in-app only. V2 adds
+  daily email digests at shift change; V3 adds push notifications
+  (mobile app required) and critical-only SMS. See §7 #6.
 - **Activity export** (CSV / PDF for medical records, V2)
 - **Multi-resident comparison** view (side-by-side trend charts)
-- **Audit log** of administrative actions (who discharged whom, who
-  replaced what device)
-- **Soft-undo / restore** for discharged residents
+- **Audit log viewing UI** — V1 logs every lifecycle action silently
+  (see §5 Auditability); a per-resident audit view ships in V2
+- **Self-serve "Undo" for discharge** — V1 uses support-mediated
+  restore within 7 days; no in-app undo button (see §7 #11)
 - **Real-time device commands** (remote LED indicator, "find walker"
   alert)
 - **Photo upload** for resident records
 - **Clinical fields** (DOB, sex, medications, allergies, diagnoses,
   fall-risk score) — V1 carries only what the activity dashboard needs
 - **Family member portal** (read-only resident view for outside
-  caregivers)
+  caregivers) — V1 reserves three architectural guardrails so V3
+  can add this cheaply; see §5 Forward Compatibility and §7 #10.
 
 ---
 
-## 7. Open Questions for the Working Session
+## 7. V1 Decisions Log
 
-Bring these to the working session — each one is a decision that
-materially shapes V1.
+The original Open Questions were resolved in working-session prep
+(2026-05). Decisions and rationale below. Bring these forward into
+V2 planning when relevant.
 
-1. **Permission model.** Confirm the Care Staff vs. Administrator split:
-   which roles can Add Resident, Edit Info, Replace Device, Discontinue
-   Device, Discharge Resident, Pause Monitoring? The demo doesn't gate
-   any of these.
-2. **Discharge data retention.** How long do we preserve activity
-   history after discharge — indefinitely, the compliance window
-   (typically 7 years for SNF), or facility-configurable?
-3. **Pause Monitoring auto-resume.** Does monitoring auto-resume after
-   the N days elapse, or stay paused until manually unpaused? What if
-   data starts streaming again mid-pause?
-4. **Replace Device baseline.** When a device is replaced, does the
-   activity baseline carry over (continuous personal baseline) or
-   reset (treat as a re-baseline event)? Affects all "below typical"
-   notifications immediately after a swap.
-5. **Discharge vs. Discontinue ordering.** Can I discharge a resident
-   while a device is still assigned, or do I have to discontinue
-   first? UX should not require two destructive operations to remove
-   a resident.
-6. **Notification delivery.** V1 is in-app only. When and how do we
-   add email/SMS/push? Does that need to be in V1 to be useful?
-7. **"Today" boundary.** Is "today" wall-clock midnight in facility
-   time, or a shift-aware boundary (e.g., 06:00 to 06:00)? Affects
-   "No activity today" sensitivity.
-8. **Device ID format.** Demo accepts a 10-digit numeric ID. Production
-   serials are `GS` + 10 digits. Pick one and make the data model
-   consistent.
-9. **Multi-tenancy / Clients.** The architecture supports a Client
-   tier above Facility (corporate operators owning multiple
-   facilities). V1 portal: do users see one client only, or can a
-   corporate admin span clients?
-10. **Family-member portal.** Even though out of scope for V1, do we
-    want to constrain V1 decisions to keep the door open? (auth model,
-    read-only scoping, opt-in alert routing)
-11. **Soft-undo for discharge.** Is the destructive flow truly
-    one-way, or do we need an "undo within 24 hours" path?
-12. **Audit log.** Compliance review needs this eventually. Should it
-    start in V1 as background logging (even without a UI) so we have
-    the data when we need it?
+1. **Permission model — single role for V1.** All authorized facility
+   users (CNA, floor nurse, DON, facility director) are "Care Staff"
+   and can perform every action: read, acknowledge, pause
+   notifications, add / edit / discharge residents, replace /
+   discontinue devices. Role gating (Admin vs. Care Staff) is reserved
+   for V2 once real customer feedback justifies the split.
+
+2. **Discharge data retention — 7 years default in V1.** Matches the
+   SNF compliance window. V2 adds facility-configurable retention,
+   overridable **upward only** (never below regulatory minimum).
+   Activity history is preserved across discharge in all cases.
+
+3. **Pause Notifications (renamed from "Pause Monitoring").** Monitoring
+   continues; only notifications are paused. Auto-resumes when the
+   timer expires **or** when activity data starts streaming again
+   mid-pause (whichever comes first). Census tiles show a paused-bell
+   icon; resident detail shows a countdown banner ("Notifications
+   paused — 4 days remaining"). Smart debounce on the underlying
+   "No activity" rule (§4.4 US-22) also reduces the noise this was
+   primarily added to solve.
+
+4. **Replace Device — continuous personal baseline.** A device swap
+   never resets a resident's activity baseline. Their body and walking
+   patterns don't change because the hardware changed. Prevents
+   spurious "below typical" alerts on Day 1 of a new device.
+
+5. **Discharge vs. Discontinue — Discharge auto-releases the device.**
+   No two-step destructive flow. Discharging a resident with an
+   assigned device automatically releases the device to the unassigned
+   pool. Discontinue Device remains as a separate action for "keep
+   resident, retire the walker."
+
+6. **Notification delivery channels.**
+   - **V1**: in-app only (current demo behavior)
+   - **V2**: daily email digest sent at start of shift
+   - **V3**: push notifications (requires a mobile app) + SMS for
+     critical-severity only
+   Email-per-notification is rejected — too noisy.
+
+7. **"Today" boundary — wall-clock midnight in facility local time.**
+   Shift-aware boundaries (e.g., 06:00 to 06:00) were rejected: they
+   create more confusion than they solve and break the meaning of
+   "yesterday" for families and external auditors. A shift-aware view
+   can be added separately if needed; it shouldn't redefine "today".
+
+8. **Device ID format — `GS` + 10 digits everywhere.** Matches
+   production firmware. Update the demo to enforce the `GS` prefix.
+   One format end-to-end avoids data migration headaches when the live
+   API comes online.
+
+9. **Multi-tenancy / Clients — single Client per user in V1.** The
+   Client tier exists in the data model (corporate operators owning
+   multiple facilities) but the V1 portal assumes one Client per
+   signed-in user. Corporate-admin (spans Clients) is a V2 feature
+   once a real multi-property operator signs.
+
+10. **Family-member portal — reserve the door, don't build.** Three
+    architectural guardrails in V1 keep the V3 family portal cheap to
+    add: (a) `isCaregiver` role flag stays in the auth model, (b)
+    resident-scoped views render correctly given a single-resident
+    context, (c) the data layer never assumes "user has access to all
+    residents in their facility" — every resident fetch is permission-
+    checked. See §5 Forward Compatibility.
+
+11. **Soft-undo for discharge — support-mediated restore within 7 days.**
+    No self-serve "Undo" button in the app (would make discharge too
+    casual). The discharged record sits in a recoverable state for 7
+    days; internal support tooling can restore. After 7 days, archived
+    permanently per the retention policy.
+
+12. **Audit log — yes, silently in V1.** No UI. Every lifecycle action
+    writes an immutable audit row from day one. See §5 Auditability
+    for the full list of covered actions. V2 adds a per-resident
+    audit view. Backfilling history later is impossible, so we start
+    logging now.
+
+### Decisions still pending (raised during prep, defer to working session)
+
+*None at the time of writing.*
+
+### New requirements that emerged from prep
+
+- **Care Note** at the top of resident detail (§4.3 US-44) —
+  emerged from the Q3 discussion as a lighter-weight alternative to
+  Pause Notifications for annotating activity gaps. Kept Pause and
+  added the note.
+- **Smart debounce** on the No-Activity rule (§4.4 US-22) — emerged
+  as a complement to Pause Notifications to reduce day-over-day
+  alert noise.
 
 ---
 
@@ -577,7 +695,7 @@ materially shapes V1.
 | US-28 | Add Resident |
 | US-29 | Edit Resident Info |
 | US-30 | Cross-facility transfer via Edit |
-| US-31 | Pause Monitoring |
+| US-31 | Pause Notifications (renamed from Pause Monitoring) |
 | US-32 | Discharge Resident |
 | US-33 | Destructive actions visually distinct |
 | US-34 | One settings menu for lifecycle |
@@ -590,3 +708,4 @@ materially shapes V1.
 | US-41 | Tablet responsive |
 | US-42 | Desktop responsive |
 | US-43 | Identity in header |
+| US-44 | Care Note on resident detail |
