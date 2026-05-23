@@ -819,42 +819,48 @@ V1's single "Care Staff" role is the union of `caregiver` +
 
 ## Appendix C — Device Lifecycle States
 
-> Devices (GoSteady walker caps) move through a **five-state
-> machine** defined in
-> [`specs/ARCHITECTURE.md`](specs/ARCHITECTURE.md) §4, detailed in
-> [`specs/phase-2a-device-lifecycle.md`](specs/phase-2a-device-lifecycle.md),
-> and with the recycle path rewritten 2026-05-17 in the
-> [AA-battery-recycle memo](specs/2026-05-17-aa-battery-recycle.md)
-> (the cap is AA-powered, not rechargeable — so recycle is
-> cloud-orchestrated via a `wipe` cmd, not charger-gated). All device
-> serial numbers follow `GS` + 10 digits (e.g., `GS0000000123`).
+> Devices (GoSteady walker caps) move through a **five-state machine**
+> defined in [`specs/ARCHITECTURE.md`](specs/ARCHITECTURE.md) §4 and
+> detailed in
+> [`specs/phase-2a-device-lifecycle.md`](specs/phase-2a-device-lifecycle.md).
+> The `discontinued → ready_to_provision` recycle path was rewritten
+> 2026-05-17 — see
+> [`specs/2026-05-17-aa-battery-recycle.md`](specs/2026-05-17-aa-battery-recycle.md)
+> — because shipping hardware uses replaceable AA cells (6–12 month
+> life) with no charger contact, invalidating the original
+> charger-gated reset design. Recycle is now **software-orchestrated**
+> via a `wipe` cmd + firmware ack. All device serial numbers follow
+> `GS` + 10 digits (e.g., `GS0000000123`).
 
 ### State machine
 
 ```
                   ┌──────────────────────┐
-                  │  ready_to_provision  │ ◄──── auto-recycle (cloud-side
-                  └──────────┬───────────┘        on firmware wipe-ack +
-                             │ assign                 battery-floor sanity)
-                             ▼                              ▲
-                     ┌──────────────┐                       │
-                     │ provisioned  │                       │
-                     └──────┬───────┘                       │
-                            │ first message from device     │
-                            ▼                               │
-                  ┌─────────────────────┐                   │
+                  │  ready_to_provision  │ ◄──── auto on firmware wipe-ack
+                  └──────────┬───────────┘        (cloud → wipe cmd post-end-
+                             │ assign(patient)    assignment; firmware wipes
+                             ▼                    local data; ack via Shadow
+                     ┌──────────────┐             reported.wipe_complete +
+                     │ provisioned  │             heartbeat last_cmd_id;
+                     └──────┬───────┘             cloud auto-transitions
+                            │ first heartbeat     once battery_pct ≥ 0.10
+                            ▼                     in acking heartbeat)
+                  ┌─────────────────────┐                   ▲
                   │ active_monitoring   │                   │
-                  └──────────┬──────────┘                   │ cloud publishes
-                             │ end assignment               │ `wipe` cmd;
-                             ▼                              │ firmware acks via
-                     ┌──────────────┐                       │ Shadow + heartbeat
+                  └──────────┬──────────┘                   │
+                             │ end_assignment()             │
+                             ▼                              │
+                     ┌──────────────┐                       │
                      │ discontinued │ ──────────────────────┘
                      └──────┬───────┘
-                            │ decommission (with reason)
+                            │ retire(reason)
                             ▼
                   ┌─────────────────────┐
-                  │   decommissioned    │ — terminal
-                  └─────────────────────┘    (only `lost` is recoverable)
+                  │   decommissioned    │ — terminal (with reason)
+                  └─────────────────────┘
+                            ▲
+                            │ retire(reason: lost | broken)
+                            │ reachable from any non-terminal state
 ```
 
 ### States
@@ -864,7 +870,7 @@ V1's single "Care Staff" role is the union of `caregiver` +
 | `ready_to_provision` | In inventory pool. Either fresh from manufacturer (no owner yet) or returned post-recycle (owner preserved). Available to be claimed/assigned. | Manufacturer bulk creation (no owner); OR cloud-side auto-recycle on firmware wipe-ack from `discontinued`; OR admin `recover` from `decommissioned (lost)` | Provision to a patient → `provisioned` |
 | `provisioned` | Assigned to a patient; cloud has issued an activation command and is waiting for the device's first message. | `provision` API call from `ready_to_provision` | First device heartbeat → `active_monitoring`; OR `end-assignment` → `discontinued`; OR `decommission` → `decommissioned` |
 | `active_monitoring` | Assigned + cloud has received ≥1 message. The steady-state — this is what most devices look like most of the time. | First device heartbeat after provisioning | `end-assignment` → `discontinued`; OR `decommission` (with reason) → `decommissioned` |
-| `discontinued` | Patient assignment ended; cloud has fired a `wipe` cmd on `gs/{serial}/cmd` and is awaiting firmware ack (Shadow `reported.wipe_complete` or heartbeat `last_cmd_id` echo within the 24 h ack window). Staff physically retrieves the cap; no charger interaction required. | `end-assignment` from `provisioned` or `active_monitoring`; OR auto-cascade when a patient is discharged (§7 #5) | Cloud auto-recycle on firmware wipe-ack + `battery_pct ≥ 0.10` sanity check → `ready_to_provision` (~10 s steady-state latency); OR `decommission` → `decommissioned`; OR admin `force-reset` if the wipe ack never lands → `ready_to_provision` |
+| `discontinued` | Patient assignment ended; cloud has issued a `wipe` cmd on `gs/{serial}/cmd` and is awaiting firmware ack. The `outstandingWipeCmds.<cmd_id>` map entry is the idempotency anchor (mirrors the activation-ack pattern from coord §C19). Staff do not need to physically intervene — recycle is software-orchestrated. | `end-assignment` from `provisioned` or `active_monitoring`; OR auto-cascade when a patient is discharged (§7 #5) | Cloud auto-transitions on wipe-ack: Shadow `reported.wipe_complete = <wipe_id>` AND heartbeat `last_cmd_id = <wipe_id>` echo, with the acking heartbeat reporting `battery_pct ≥ 0.10` → `ready_to_provision`. OR `decommission` (with reason) → `decommissioned`. OR admin `force-reset` (bypasses the wipe predicate; only path when the wipe ack never lands — e.g., firmware bug, device permanently offline) → `ready_to_provision`. |
 | `decommissioned` | Terminal. Always paired with a `decommissionReason`. Will never be used again — except `lost`, which is recoverable. | `decommission` API call from any non-terminal state | Only `decommissioned (lost)` can be `recover`ed → `ready_to_provision`. All other reasons are permanent. |
 
 ### Decommission reasons
@@ -890,37 +896,62 @@ These hold across V1, V2, and beyond.
   **only** — never the ownership. To move a device between facilities
   you need `client_admin`; to move it between Clients you need
   `internal_admin`.
-- **Patient discharge auto-ends device assignments and fires the same
-  wipe-cmd path.** Per §7 #5, the discharge cascade transitions any
-  assigned devices to `discontinued`; cloud immediately publishes a
-  `wipe` cmd and the device auto-recycles to `ready_to_provision` once
-  the firmware ack lands. Staff still physically retrieves the cap,
-  but no charger interaction is required.
-- **No portal "reset" button.** The `discontinued → ready_to_provision`
-  transition is **cloud-orchestrated**: `POST /end-assignment` publishes
-  `{"cmd":"wipe", ...}` to `gs/{serial}/cmd`; firmware wipes local data
-  (gated by a firmware-side `battery_pct ≥ 0.10` floor); firmware acks
-  via Shadow `reported.wipe_complete` AND/OR heartbeat `last_cmd_id`
-  echo within a 24 h window; cloud applies a sanity-floor check and
-  auto-recycles. The closest portal action is `force-reset`, which is
-  admin-only, elevated-audit, and **does NOT guarantee on-device
-  sanitization** — used only when the wipe ack never lands. Runbook in
+- **Wipe-ack-driven recycle (replaces charger-gated reset).** The
+  `discontinued → ready_to_provision` transition is **software-
+  orchestrated, hardware-event-free**: it depends on no
+  charger-attachment, battery-swap, or motion-quiescence signal — only
+  on a cloud command and a firmware ack. This is required because with
+  6–12 month AA battery life, there is no naturally-occurring physical
+  event tied to between-patient handoff. The flow:
+  1. `POST /end-assignment` transitions Device Registry to `discontinued`
+     and fires a `wipe` downlink cmd on `gs/{serial}/cmd`
+  2. Firmware wipes local data (firmware refuses below `battery_pct = 0.10`
+     and retries on next wake)
+  3. Firmware acks via Shadow `reported.wipe_complete = <wipe_id>` **and**
+     echoes `last_cmd_id = <wipe_id>` in the next heartbeat
+  4. Cloud auto-transitions on ack-match within the 24 h window, gated
+     by `battery_pct ≥ 0.10` in the acking heartbeat (sanity floor —
+     rejects recycle if the wipe completed mid-brownout)
+- **Patient discharge auto-cascades through the same wipe path.** Per
+  §7 #5 and the discharge-cascade Lambda, marking a patient
+  `discharged` transitions all assigned devices to `discontinued`,
+  which fires `wipe` cmds; firmware acks; cloud auto-recycles. Staff
+  do not need to physically intervene. Per-device audit chain:
+  `device.assignment_ended (reason: patient_discharged)` → `device.wipe_requested` →
+  `device.wipe_complete` + `device.recycled`.
+- **No portal "reset" button.** End-assignment fires the wipe cmd
+  immediately — there is no separate "prepare for next patient"
+  affordance. The closest manual lever is `force_reset`
+  (facility_admin+, heavily audited), which **bypasses the wipe
+  predicate**. Used only when the wipe ack never lands (firmware bug,
+  permanently offline device). Force-reset does **not** guarantee
+  on-device sanitization — admins use it knowingly. Runbook:
   `docs/runbooks/force-reset-device.md`.
 - **Wipe-cmd reliability is anchored by the `connection-coordinator`
-  Lambda.** It subscribes to AWS IoT lifecycle events and re-publishes
-  any outstanding wipe / activation cmds on each firmware connect —
-  closes the AWS IoT MQTT 3.1.1 persistent-session 1 h timer gap that
-  would otherwise drop downlink cmds between hourly heartbeats. End-to-
-  end latency from `POST /end-assignment` to auto-recycle is ~10 s in
-  steady state.
+  Lambda** (coord §C23/§C24). It subscribes to AWS IoT lifecycle
+  events on `$aws/events/presence/connected/+` and re-publishes any
+  outstanding `outstandingWipeCmds` / `outstandingActivationCmds` on
+  each firmware connect — absorbs the AWS IoT MQTT 3.1.1 persistent-
+  session 1 h timer gap that would otherwise drop downlink cmds
+  between hourly heartbeats. End-to-end latency from
+  `POST /end-assignment` to auto-recycle is ~10 s in steady state
+  (down from ~57 min in the race-publish bench primitive).
 - **Every state transition writes an audit event** (§5 Auditability).
-  Event types include: `device.claimed`, `device.assigned`,
-  `device.activation_sent`, `device.activated`, `device.first_heartbeat`,
-  `device.assignment_ended`, `device.wipe_sent`, `device.wipe_complete`
-  (replaces deprecated `device.reset_complete`),
-  `device.decommissioned`, `device.recovered`, `device.force_reset`,
-  `device.ownership_moved`. Internal-tier actions carry an
-  `internal_access: true` tag at elevated severity.
+  Recycle-path events: `device.assignment_ended` →
+  `device.wipe_requested` → `device.wipe_complete` →
+  `device.recycled` (cloud auto-transitioned `discontinued →
+  ready_to_provision`). Failure paths: `device.wipe_failed` (firmware
+  reported a flash error mid-wipe; warning severity) and
+  `device.force_reset` (admin override, elevated audit). Other
+  lifecycle events: `device.created`, `device.claimed`,
+  `device.assigned`, `device.activation_sent`, `device.activated`,
+  `device.first_heartbeat`, `device.preactivation_heartbeat` (sampled
+  1/hr/serial), `device.battery_swapped` (mid-deployment cold boot
+  forensics), `device.decommissioned`, `device.recovered`,
+  `device.ownership_moved`. The legacy `device.reset_complete` event
+  is **deprecated** as of 2026-05-17 (charger-gated reset removed) and
+  retained in the catalog only for backwards-compat. Internal-tier
+  actions carry an `internal_access: true` tag at elevated severity.
 
 ### How V1 maps onto the lifecycle
 
