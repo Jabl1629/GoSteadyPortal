@@ -33,7 +33,9 @@ charting work for nurses.
   same permissions in V1: read everything, acknowledge notifications,
   pause notifications, add/edit/discharge residents, replace/discontinue
   devices. The Admin vs. Care Staff split is reserved for V2 once we
-  see whether real customers want role-gating.
+  see whether real customers want role-gating. The full forward-looking
+  RBAC model — six customer roles + two internal — lives in
+  **Appendix B**.
 
 ### Subject of monitoring (not a portal user)
 
@@ -395,6 +397,11 @@ the resident name) so that I don't hunt for them across screens.
 
 ### 4.6 Device Management
 
+> See **Appendix C** for the device's five-state lifecycle
+> (`ready_to_provision` → `provisioned` → `active_monitoring` →
+> `discontinued` → `decommissioned`) and how the user-facing actions
+> below map onto state transitions.
+
 **US-35.** As Care Staff, I can **replace a resident's device**
 with a new one and a reason (damaged / battery worn / upgraded model /
 lost or misplaced / other) so that I can continue to monitor their
@@ -574,7 +581,10 @@ V2 planning when relevant.
    and can perform every action: read, acknowledge, pause
    notifications, add / edit / discharge residents, replace /
    discontinue devices. Role gating (Admin vs. Care Staff) is reserved
-   for V2 once real customer feedback justifies the split.
+   for V2 once real customer feedback justifies the split. **See
+   Appendix B** for the full forward-looking role model (six customer
+   roles + two internal) and a capability matrix mapping each action
+   to the role(s) that will be permitted.
 
 2. **Discharge data retention — 7 years default in V1.** Matches the
    SNF compliance window. V2 adds facility-configurable retention,
@@ -598,8 +608,9 @@ V2 planning when relevant.
 5. **Discharge vs. Discontinue — Discharge auto-releases the device.**
    No two-step destructive flow. Discharging a resident with an
    assigned device automatically releases the device to the unassigned
-   pool. Discontinue Device remains as a separate action for "keep
-   resident, retire the walker."
+   pool (transitions to `discontinued` per Appendix C). Discontinue
+   Device remains as a separate action for "keep resident, retire the
+   walker."
 
 6. **Notification delivery channels.**
    - **V1**: in-app only (current demo behavior)
@@ -709,3 +720,202 @@ V2 planning when relevant.
 | US-42 | Desktop responsive |
 | US-43 | Identity in header |
 | US-44 | Care Note on resident detail |
+
+---
+
+## Appendix B — User Roles & Access (forward-looking model)
+
+> **V1 reminder.** In V1, all signed-in facility users share the same
+> permissions (see §7 #1) — effectively the union of `caregiver` +
+> `facility_admin` capabilities scoped to one client. The model below
+> is the full RBAC defined in
+> [`specs/ARCHITECTURE.md`](specs/ARCHITECTURE.md) §4 and
+> [`specs/phase-0a-revision.md`](specs/phase-0a-revision.md), which V2
+> will layer in. V1 architectural decisions (see §5 Forward
+> Compatibility) keep this expansion cheap.
+
+Access is modeled in two tiers:
+
+- **Customer tier** — anyone tied to a Client (a facility chain or a
+  D2C household). All access scoped to that Client.
+- **Internal tier** — GoSteady staff. Operate outside any customer
+  tenancy, in the reserved `_internal` Client. Always MFA-required;
+  every action is elevated-audit.
+
+### Customer roles
+
+| Role | Typical persona | Scope of access | Write? | MFA | Self-signup |
+|------|------------------|-----------------|--------|-----|-------------|
+| `patient` | Walker user with their own login (rare in MVP) | Own activity only | Self-only edits (e.g., own care notes) | Optional | Yes (then needs household setup) |
+| `family_viewer` | Grandson, daughter, family caregiver | Specific patient(s) listed in `linkedPatientIds` | None — read-only | Optional | No — invited by `household_owner` |
+| `household_owner` | D2C primary signer (often a family member setting up for a relative; sometimes the patient themselves) | Full admin within their synthetic household client | Full | **Optional** (softer than enterprise — reduces D2C signup friction) | Yes (D2C path) |
+| `caregiver` | CNA, aide, floor nurse | One or more **censuses** within one **facility** | Full within scope | Optional | No — admin-created |
+| `facility_admin` | Director of Nursing, ED | All censuses in one **facility** + facility-wide admin actions | Full within facility | **Required** | No — admin-created |
+| `client_admin` | Regional director, COO | All facilities in their **Client** + cross-facility moves | Full across client | **Required** | No — admin-created |
+
+### Internal roles (GoSteady staff)
+
+| Role | Persona | Scope | Write? | MFA | Tenancy |
+|------|---------|-------|--------|-----|---------|
+| `internal_support` | Support, sales, account management | Read-only across all clients | None | **Required** | `_internal` (reserved) |
+| `internal_admin` | Ops, on-call engineering | Full across all clients (including cross-client device moves) | Full + elevated audit | **Required** | `_internal` (reserved) |
+
+Notes on the model:
+
+- **One role per user** (architecture invariant — no "staff also family"
+  cases). User belongs to exactly one client.
+- **MFA is TOTP only** (Authenticator app). No SMS. See
+  `phase-0a-revision.md` D5.
+- **Token lifetimes differ by tier**: Customer client = 15-min idle /
+  30-day refresh. Internal client = 30-min idle / 4-hr absolute cap.
+- **Tenancy boundary is enforced at JWT layer** via custom claims
+  (`clientId`, `role`, `facilities`, `censuses`) injected by the
+  Pre-Token-Generation Lambda.
+
+### Capability matrix — who can do what
+
+Read this as: in V2+, which role(s) can perform each action.
+Greyed-out entries (—) indicate "not permitted."
+
+| Action | `family_viewer` | `caregiver` | `household_owner` | `facility_admin` | `client_admin` | `internal_admin` |
+|--------|:---:|:---:|:---:|:---:|:---:|:---:|
+| View Census dashboard | own patients | scoped censuses | own household | full facility | full client | any client |
+| Acknowledge Notification | — | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Edit Care Note (US-44) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
+| Pause Notifications (US-31) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
+| Add Resident (US-28) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
+| Edit Resident Info (US-29) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
+| Discharge Resident (US-32) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
+| Provision Device (assign serial) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
+| Replace Device (US-35) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
+| End-Assignment / Discontinue (US-36) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
+| Mark Device Lost / Broken | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
+| Mark Device Retired / End-of-Life | — | — | ✓ | ✓ | ✓ | ✓ |
+| Recover Lost Device | — | — | ✓ | ✓ | ✓ | ✓ |
+| Force-Reset Stuck Device | — | — | — | ✓ | ✓ | ✓ |
+| Cross-Facility Device Move | — | — | — | — | ✓ | ✓ |
+| Cross-Client Device Move | — | — | — | — | — | ✓ (only) |
+| Manufacturer bulk device creation | — | — | — | — | — | ✓ (only) |
+| View Audit Log (V2+ UI) | — | — | own household | own facility | own client | any client |
+
+`internal_support` reads everything in this table; writes nothing.
+
+### How V1 maps onto this model
+
+V1's single "Care Staff" role is the union of `caregiver` +
+`facility_admin` for one Client/Facility:
+
+- Scope: all residents in the facility (no census-level sub-scoping yet)
+- All write actions in the matrix above are open to V1 users **except**
+  cross-facility moves, cross-client moves, and bulk device creation —
+  those land with the role split in V2.
+- MFA is not yet enforced (would only apply to `facility_admin` role,
+  which doesn't formally exist in V1).
+- Internal-tier actions (manufacturer bulk creation, cross-client
+  move) aren't reachable from V1 portal — they require the separate
+  internal admin tool.
+
+---
+
+## Appendix C — Device Lifecycle States
+
+> Devices (GoSteady walker caps) move through a **five-state
+> machine** defined in
+> [`specs/ARCHITECTURE.md`](specs/ARCHITECTURE.md) §4 and detailed in
+> [`specs/phase-2a-device-lifecycle.md`](specs/phase-2a-device-lifecycle.md).
+> All device serial numbers follow `GS` + 10 digits (e.g.,
+> `GS0000000123`).
+
+### State machine
+
+```
+                  ┌──────────────────────┐
+                  │  ready_to_provision  │ ◄──── reset (firmware-driven on
+                  └──────────┬───────────┘        charger when discontinued)
+                             │ assign
+                             ▼
+                     ┌──────────────┐
+                     │ provisioned  │
+                     └──────┬───────┘
+                            │ first message from device
+                            ▼
+                  ┌─────────────────────┐
+                  │ active_monitoring   │
+                  └──────────┬──────────┘
+                             │ end assignment
+                             ▼                                ┌──── reset
+                     ┌──────────────┐                         │
+                     │ discontinued │ ────────────────────────┘
+                     └──────┬───────┘
+                            │ decommission (with reason)
+                            ▼
+                  ┌─────────────────────┐
+                  │   decommissioned    │ — terminal
+                  └─────────────────────┘    (only `lost` is recoverable)
+```
+
+### States
+
+| State | What it means | How you enter | How you leave |
+|-------|---------------|---------------|---------------|
+| `ready_to_provision` | In inventory pool. Either fresh from manufacturer (no owner yet) or returned post-reset (owner preserved). Available to be claimed/assigned. | Manufacturer bulk creation (no owner); OR firmware reset-complete on charger from `discontinued`; OR admin `recover` from `decommissioned (lost)` | Provision to a patient → `provisioned` |
+| `provisioned` | Assigned to a patient; cloud has issued an activation command and is waiting for the device's first message. | `provision` API call from `ready_to_provision` | First device heartbeat → `active_monitoring`; OR `end-assignment` → `discontinued`; OR `decommission` → `decommissioned` |
+| `active_monitoring` | Assigned + cloud has received ≥1 message. The steady-state — this is what most devices look like most of the time. | First device heartbeat after provisioning | `end-assignment` → `discontinued`; OR `decommission` (with reason) → `decommissioned` |
+| `discontinued` | Patient assignment ended; physical device awaits retrieval and reset by staff. | `end-assignment` from `provisioned` or `active_monitoring`; OR auto-cascade when a patient is discharged (§7 #5) | Firmware reset-complete on charger → `ready_to_provision`; OR `decommission` → `decommissioned`; OR admin `force-reset` if stuck → `ready_to_provision` |
+| `decommissioned` | Terminal. Always paired with a `decommissionReason`. Will never be used again — except `lost`, which is recoverable. | `decommission` API call from any non-terminal state | Only `decommissioned (lost)` can be `recover`ed → `ready_to_provision`. All other reasons are permanent. |
+
+### Decommission reasons
+
+| Reason | Recoverable? | Who can set it | Use case |
+|--------|--------------|----------------|----------|
+| `lost` | **Yes** — admin can `recover` to `ready_to_provision` (audited) | `caregiver`+ | Cap missing from the facility; might turn up |
+| `broken` | No — terminal | `caregiver`+ | Physically damaged beyond use |
+| `retired` | No — terminal | `facility_admin`+ | Asset retired (fleet consolidation, etc.) |
+| `end_of_life` | No — terminal | `facility_admin`+ | Beyond expected service life |
+
+### Key invariants
+
+These hold across V1, V2, and beyond.
+
+- **Ownership is claimed at first provisioning.** A fresh
+  manufacturer-side device record has `owningClientId` and
+  `owningFacilityId` both NULL. The first provision call snaps
+  ownership to the provisioning user's scope. Subsequent provisions
+  re-use the existing owner.
+- **Ownership persists through reset.** Reset clears the on-device
+  patient cache and the cloud-side patient assignment **only** —
+  never the ownership. To move a device between facilities you need
+  `client_admin`; to move it between Clients you need `internal_admin`.
+- **Patient discharge auto-ends device assignments.** Per §7 #5, the
+  discharge cascade transitions any assigned devices to
+  `discontinued`. Staff still physically retrieves and resets the cap.
+- **No portal "reset" button.** The `discontinued → ready_to_provision`
+  transition is firmware-driven, gated by the device being on its
+  charger (the natural sanitization checkpoint). The closest portal
+  action is `force-reset`, which is `facility_admin`+ only and
+  elevated-audit; runbook in `docs/runbooks/force-reset-device.md`.
+- **Every state transition writes an audit event** (§5 Auditability).
+  Event types include: `device.claimed`, `device.assigned`,
+  `device.activation_sent`, `device.activated`, `device.first_heartbeat`,
+  `device.assignment_ended`, `device.decommissioned`, `device.recovered`,
+  `device.reset_complete`, `device.force_reset`,
+  `device.ownership_moved`. Internal-tier actions carry an
+  `internal_access: true` tag at elevated severity.
+
+### How V1 maps onto the lifecycle
+
+V1's user-facing concepts collapse onto this model:
+
+- **Add Resident → provision a device.** The Add Resident form's
+  Device ID maps to a `provision` call: a `ready_to_provision` device
+  is assigned to the new resident. (The demo is cosmetic; no actual
+  device-registry call yet.)
+- **Replace Device** = `end-assignment` on the old device + `provision`
+  the new one. Activity history follows the resident, not the device
+  (§7 #4 — continuous personal baseline).
+- **Discontinue Device** = `end-assignment` (resident kept). Device
+  goes to `discontinued`; staff physically retrieves it and the
+  charger-driven reset cycles it back to `ready_to_provision`.
+- **Discharge Resident** auto-cascades: any assigned device → `end-assignment` → `discontinued`. No two-step required (§7 #5).
+- "Mark Lost / Broken / Retired / End-of-Life" surfaces as the
+  **Decommission Device** action — not yet in V1 demo; planned for V2.
