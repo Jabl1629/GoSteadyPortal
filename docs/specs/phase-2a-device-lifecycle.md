@@ -31,7 +31,7 @@ companion specs and share the same API Gateway and authorizer infrastructure.
 | L3 | Ownership claimed at first-provision, not at manufacture or shipping | Architecture DL3 | No pre-allocation overhead; physical possession is sufficient MVP security |
 | L4 | Ownership persists through reset | Architecture DL4 | Prevents inadvertent device "theft" by reset-and-reclaim |
 | L5 | No facility inventory pool / no pre-allocation UI | Architecture DL5 | Provisioning is by typing serial; pool is an unnecessary abstraction |
-| L6 | Reset is firmware-driven on charger; no portal "reset" button | Architecture DL6 | Charger-presence is the natural sanitization checkpoint |
+| L6 | Recycle is cloud-orchestrated via a `wipe` cmd + firmware ack (Shadow `reported.wipe_complete` or heartbeat `last_cmd_id` echo within 24 h) + battery-floor sanity (`battery_pct ≥ 0.10`); no portal "reset" button | Architecture DL6 (rewritten 2026-05-17 per AA-battery-recycle memo) | Shipping hardware uses AA cells with no charger contact, invalidating the original charger-gated assumption. The wipe-ack contract is the production replacement; bench-validated end-to-end 2026-05-18 (coord §C22) |
 | L7 | `force_reset` admin-only with elevated audit | Architecture DL7 | Bypass for stuck firmware; rare; audit-worthy |
 | L8 | Patient discharge auto-ends device assignments → `discontinued` | Architecture DL8 | Prevents zombie assignments; staff still physically handles device |
 | L9 | Cross-facility = client_admin; cross-client = internal_admin | Architecture DL9 | Inventory/financial action; tighter authz than daily ops |
@@ -46,12 +46,12 @@ companion specs and share the same API Gateway and authorizer infrastructure.
 | # | Assumption | Risk if Wrong | Validation Plan |
 |---|-----------|---------------|-----------------|
 | A1 | Caregivers can reliably read and type a 12-character serial (`GS` + 10 digits) without scan | Provisioning friction; typos lead to errors | Field test in pilot facility; add QR support in Phase 2B if error rate >5% |
-| A2 | Charging-gated reset is a firmware capability that ships with the cap | If firmware can't detect charger or reliably wipe + report, the entire `discontinued → ready_to_provision` transition is broken | Firmware spec confirms this in Phase 5A; until then, force-reset is the only path |
+| A2 | Wipe-cmd reliability is anchored by the connection-coordinator Lambda + 24 h ack window, which absorb the AWS IoT MQTT 3.1.1 persistent-session 1 h timer gap | If a wipe-cmd is lost AND the firmware doesn't reconnect within 24 h, the device stalls in `discontinued`; `force_reset` is the fallback. | Bench-validated end-to-end 2026-05-18 (coord §C22–§C24). 7-day-cellular-outage tolerance still wants a real soak. |
 | A3 | Patient discharge is a single signal we can hook (status field on Patients table) | If discharge is split across multiple events, cascade may fire on wrong one | Discharge is a single state transition in the Patients data model (Phase 0B revision) |
 | A4 | "First heartbeat" is reliably distinguishable from subsequent heartbeats (no replay confusion) | First-heartbeat audit event misfires on replay | Heartbeat handler uses `if_not_exists` condition on a `firstHeartbeatAt` field |
 | A5 | Facility/Census IDs in caregiver JWT scope claims accurately reflect their current assignments | Caregiver retains stale scope after reassignment | RoleAssignments table is the source of truth; JWT refreshes pull fresh scope (15-min idle) |
 | A6 | Cross-client moves are vanishingly rare (chain acquisition migrations only) | If common, internal-admin-only is too restrictive | Confirm with sales/ops; widen to client_admin if needed |
-| A7 | Firmware will not emit a `device.reset_complete` message before patient cache is actually wiped | Cloud transitions to `ready_to_provision` while old patient data is still on device | Phase 5A firmware contract: reset_complete is the LAST step after wipe |
+| A7 | Firmware will not emit `wipe_complete` (Shadow `reported.wipe_complete` or heartbeat `last_cmd_id` echo) until after `/lfs/activation.bin`, `/lfs/sessions/*.dat`, and `/snippets/*` are actually wiped | Cloud transitions to `ready_to_provision` while old patient data is still on device | AA-battery-recycle memo invariant W3 enforces wipe-before-ack ordering in firmware. Bench-validated 2026-05-18 on `GS9999999998` (coord §C22). |
 
 ## Scope
 
@@ -86,13 +86,28 @@ Failure modes:
 - Iterates active DeviceAssignments for that patient
 - Calls `end-assignment` for each → produces `device.assignment_ended` audit events with `reason: patient_discharged`
 
-#### Firmware-driven reset handler
-- IoT topic / Shadow update from device firmware indicating reset complete
-- Validates: device is in `discontinued` state (or `provisioned` for unactivated devices being reset)
-- Transitions Device Registry status → `ready_to_provision`
-- Clears the active DeviceAssignment row's `validUntil` if not already set
-- Emits `device.reset_complete` audit event
-- Does NOT clear `owningClientId` / `owningFacilityId`
+#### Wipe-cmd publisher + ack handler
+
+**End-assignment → wipe cmd publish (in `device-api` Lambda):**
+- On successful `end-assignment` transition (`provisioned`/`active_monitoring` → `discontinued`), synchronously publish `{"cmd":"wipe","cmd_id":"wipe_<uuid>","ts":"..."}` to `gs/{serial}/cmd`
+- Write `Shadow.desired.outstandingWipeCmds[cmd_id] = {ts, ...}` so the connection-coordinator Lambda can re-publish on next firmware connect if needed
+- Emit `device.wipe_sent` audit event
+- Idempotent: re-publishing on retry is safe (firmware echoes only the most recent `cmd_id`; cloud matches against any cmd in the 24 h ack window)
+
+**Wipe-ack handler (in `device-shadow-handler` Lambda):**
+- Subscribed to `$aws/things/+/shadow/update/documents`
+- On `reported.wipe_complete = <cmd_id>` for a device in `discontinued` (or `provisioned` for unactivated devices being recycled):
+  - Validate `cmd_id` matches a cmd within the 24 h ack window
+  - Validate current `battery_pct ≥ 0.10` (cloud-side sanity floor — rejects auto-recycle if the post-wipe heartbeat shows the device dropped below the floor mid-wipe)
+  - Transition Device Registry status → `ready_to_provision`
+  - Clear the active DeviceAssignment row's `validUntil` if not already set
+  - Pop the `cmd_id` from `Shadow.desired.outstandingWipeCmds`
+  - Emit `device.wipe_complete` audit event
+  - Does NOT clear `owningClientId` / `owningFacilityId`
+
+**Redundant ack path (in heartbeat handler):**
+- If firmware ack via Shadow fails (e.g., timing issue with Shadow update arrival), heartbeat `last_cmd_id` matching a recent wipe-cmd triggers the same recycle path
+- Both ack paths are idempotent — first one to land wins, second is a no-op
 
 #### Portal UI
 
@@ -103,7 +118,7 @@ Failure modes:
 - Decommissioned device detail page: shows reason; "recover" button visible only for `lost` reason and admin-tier roles
 
 **facility_admin / client_admin admin views:**
-- Force-reset button (with required reason text field; warns "use only for stuck devices that won't reset on charger")
+- Force-reset button (with required reason text field; warns "use only when a wipe-cmd has been issued and the device has not acked within the 24 h window — force-reset does not guarantee on-device sanitization")
 - "Mark retired" / "Mark end-of-life" actions
 - Cross-facility move (client_admin only): facility picker + reason
 
@@ -128,7 +143,7 @@ Failure modes:
 - **Real-time device status push** to portal (live signal/battery view) — Phase 2B (Phase 2A polls)
 - **Cert-bound ownership** (firmware enforces "device cert must match claimed client") — Phase 5A firmware
 - **Device-level inventory cost tracking / depreciation** — out of product scope
-- **Force-wipe IoT command** (cloud → device "wipe yourself even if not on charger") — Phase 5A firmware
+- ~~**Force-wipe IoT command** (cloud → device "wipe yourself even if not on charger") — Phase 5A firmware~~ **Now in scope and shipped.** The `wipe` cmd on `gs/{serial}/cmd` replaces the original charger-gated reset (DL6 rewrite). Design memo: `docs/specs/2026-05-17-aa-battery-recycle.md`; firmware `0.11.0-wipe-cmd+`; cloud B-series + connection-coordinator Lambda deployed 2026-05-17/18.
 
 ## Architecture
 
@@ -152,9 +167,15 @@ Failure modes:
 - For each open DeviceAssignment for that patient: invoke end-assignment internally
 - Same Lambda runtime as device-api
 
-#### New Lambda: `gosteady-{env}-device-shadow-handler` (extension)
-- Subscribes to IoT Device Shadow delta events
-- When `reset_complete` appears in reported state on a `discontinued` device, transitions Device Registry status
+#### New Lambda: `gosteady-{env}-device-shadow-handler`
+- Subscribes to `$aws/things/+/shadow/update/documents` IoT Topic Rule
+- Filters for `reported.wipe_complete` (AA-recycle path) and `reported.activated_at` (activation ack path)
+- On `wipe_complete` ack matching a `cmd_id` in the 24 h window for a `discontinued` device, validates current `battery_pct ≥ 0.10` and transitions Device Registry status to `ready_to_provision`
+
+#### New Lambda: `gosteady-{env}-connection-coordinator`
+- Subscribes to `$aws/events/presence/connected/+` (AWS IoT lifecycle events)
+- On each firmware connect, re-publishes any `outstandingWipeCmds` / `outstandingActivationCmds` for that serial that remain within the 24 h ack window; opportunistically sweeps stale entries past it
+- Closes the AWS IoT MQTT 3.1.1 persistent-session 1 h timer gap (coord §C22 Finding 2). Production primitive for downlink cmd reliability across hourly heartbeats.
 
 ### Data Flow
 
@@ -169,11 +190,13 @@ API Gateway HTTP API (with WAF, Cognito JWT authorizer)
        ▼
 device-api Lambda
        │
-       ├──► Device Registry  (read status; update status + ownership)
-       ├──► DeviceAssignments (insert / close)
-       ├──► Patients         (validate patient exists in client/scope)
-       ├──► RoleAssignments  (validate caregiver scope at runtime if needed)
-       └──► Audit Log        (emit device.* event)
+       ├──► Device Registry    (read status; update status + ownership)
+       ├──► DeviceAssignments  (insert / close)
+       ├──► Patients           (validate patient exists in client/scope)
+       ├──► RoleAssignments    (validate caregiver scope at runtime if needed)
+       ├──► IoT publish        (on end-assignment: wipe cmd → gs/{serial}/cmd)
+       ├──► Shadow update      (desired.outstandingWipeCmds[cmd_id] = …)
+       └──► Audit Log          (emit device.* event)
 
 [Patients table update: status=discharged]
        │
@@ -181,17 +204,33 @@ device-api Lambda
 DDB Stream → discharge-cascade Lambda
        │
        └──► For each open DeviceAssignment, invoke end-assignment
+            (which fires the wipe-cmd path above)
 
-[Device firmware: reset_complete on charger]
+[Device firmware: receives wipe cmd → wipes /lfs → writes Shadow
+ reported.wipe_complete + echoes cmd_id in next heartbeat]
        │
        ▼
-IoT Device Shadow update
-       │
-       ▼
-device-shadow-handler Lambda
-       │
+[Primary ack path]                  [Redundant ack path]
+IoT Shadow update                    Heartbeat handler
+       │                                  │
+       ▼                                  │
+device-shadow-handler Lambda              │
+       │                                  │
+       ├── match cmd_id in 24 h window ◄──┤
+       ├── validate battery_pct ≥ 0.10    │
+       │                                  │
        └──► Device Registry (discontinued → ready_to_provision)
-       └──► Audit Log       (device.reset_complete)
+            DeviceAssignments  (clear validUntil if unset)
+            Shadow             (pop outstandingWipeCmds[cmd_id])
+            Audit Log          (device.wipe_complete)
+
+[Firmware re-connect]
+       │
+       ▼
+IoT $aws/events/presence/connected/+ → connection-coordinator Lambda
+       │
+       └──► Re-publish any outstanding wipe/activation cmds within
+            the 24 h ack window
 ```
 
 ### Interfaces
@@ -274,7 +313,8 @@ Response 200:
 | `infra/lambda/device-api/authz.py` | New | Per-action authorization + scope checks |
 | `infra/lambda/device-api/audit.py` | New | Audit event emitter (Powertools middleware) |
 | `infra/lambda/discharge-cascade/handler.py` | New | DDB Stream consumer for Patients.status changes |
-| `infra/lambda/device-shadow-handler/handler.py` | New (or extends Phase 1B revision Threshold Detector) | Subscribes to Shadow delta for reset_complete |
+| `infra/lambda/device-shadow-handler/handler.py` | New | Subscribes to Shadow delta for `wipe_complete` (AA-recycle) + `activated_at` (activation ack) |
+| `infra/lambda/connection-coordinator/handler.py` | New | Subscribes to AWS IoT lifecycle events; re-publishes outstanding cmds on firmware connect |
 | `infra/lib/constructs/device-api-routes.ts` | New | API Gateway route definitions |
 | `lib/services/device_service.dart` | New (Flutter) | API client for device endpoints |
 | `lib/screens/assign_device_screen.dart` | New (Flutter) | Provisioning UI |
@@ -291,7 +331,8 @@ Response 200:
 - **Phase 1.5 Security** — IdentityKey CMK for identity-table reads
 - **Phase 1.6 Observability** — Powertools layer for structured logging + tracing
 - **Phase 1.7 Audit Logging** — Audit log infrastructure (CloudWatch group + S3 destination)
-- **Phase 1B revision** — Device Shadow integration (for `reset_complete` event handling)
+- **Phase 1B revision** — Device Shadow integration (for `wipe_complete` event handling, AA-recycle path)
+- **AA-battery-recycle (2026-05-17)** — `docs/specs/2026-05-17-aa-battery-recycle.md`: full design memo for the wipe-ack cmd contract that replaces DL6 charger-gated reset. Invariants W1–W5 govern firmware behavior; coord §C20–§C24 captures bench validation.
 
 ### Configuration
 
@@ -324,8 +365,11 @@ Response 200:
 | T12 | Force-reset by facility_admin | API call | 200; status=ready_to_provision; audit event `device.force_reset` at elevated severity | Pending |
 | T13 | Caregiver attempts force-reset | API call | 403 `INSUFFICIENT_PERMISSIONS` | Pending |
 | T14 | Patient discharge cascade | Update Patients.status = discharged | discharge-cascade Lambda invokes end-assignment for each device; audit events with reason=patient_discharged | Pending |
-| T15 | Firmware reports reset_complete on charger | IoT Shadow update | device-shadow-handler transitions discontinued → ready_to_provision; ownership preserved | Pending |
-| T16 | Firmware reports reset_complete on device NOT in discontinued state | IoT Shadow update | Reject; log warning; no state change | Pending |
+| T15 | Firmware acks wipe via Shadow `reported.wipe_complete=<cmd_id>` matching an issued cmd within 24 h, on a `discontinued` device with `battery_pct ≥ 0.10` | IoT Shadow update | device-shadow-handler transitions discontinued → ready_to_provision; ownership preserved; `device.wipe_complete` audit event | ✅ Passed bench (coord §C22, 2026-05-18) |
+| T15b | Firmware acks wipe via heartbeat `last_cmd_id` echo only (Shadow path failed) | Heartbeat | Same recycle outcome as T15 via redundant ack path | ✅ Passed bench (coord §C22 Finding 4 absorbed) |
+| T15c | Wipe ack arrives while `battery_pct < 0.10` | Shadow update | Cloud-side sanity floor rejects auto-recycle; logs warning; admin must force-reset | Pending |
+| T15d | Wipe cmd lost in flight; firmware reconnects within 24 h | IoT lifecycle event | connection-coordinator Lambda re-publishes outstanding cmd; firmware acks normally | ✅ Passed live (coord §C24, 2026-05-18) |
+| T16 | Firmware emits `wipe_complete` on device NOT in discontinued state | IoT Shadow update | Reject; log warning; no state change | Pending |
 | T17 | client_admin moves device between facilities (same client) | API call | 200; owningFacilityId updated; audit event `device.ownership_moved` | Pending |
 | T18 | facility_admin attempts cross-facility move | API call | 403 `INSUFFICIENT_PERMISSIONS` | Pending |
 | T19 | internal_admin moves device cross-client | API call | 200; ownership change; elevated audit | Pending |
