@@ -1,5 +1,5 @@
 import '../models/notification.dart';
-import 'facility_mock_data.dart';
+import '../../data/facility_repository.dart';
 
 /// Snapshot of a patient's data shape used to evaluate notification rules.
 /// Built once per patient by FacilityMockData; passed into NotificationEngine.
@@ -77,7 +77,7 @@ class NotificationEngine {
 
 /// Convenience that wires FacilityMockData into the engine for a patient.
 List<PatientNotification> notificationsForPatient(
-  FacilityMockData data,
+  FacilityRepository data,
   String patientId,
 ) {
   final ctx = data.notificationContextFor(patientId);

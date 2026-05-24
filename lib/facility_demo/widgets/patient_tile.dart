@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../theme/app_theme.dart';
-import '../data/facility_mock_data.dart';
+import '../../data/facility_repository.dart';
 import '../models/notification.dart';
 import '../models/patient.dart';
 
@@ -242,6 +242,6 @@ typedef PatientTileData = PatientSummary;
 
 // Helper: lookup unit display name by id, used by callers that have
 // the patient summary but not yet the unit string.
-String unitDisplayFor(FacilityMockData data, String unitId) {
+String unitDisplayFor(FacilityRepository data, String unitId) {
   return data.allUnits().firstWhere((u) => u.id == unitId).displayName;
 }

@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../../screens/device_screen.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/patient_dashboard.dart';
-import '../data/facility_mock_data.dart';
+import '../../data/facility_repository.dart';
 import '../data/notification_engine.dart';
 import '../models/patient.dart';
 import '../state/facility_selection.dart';
@@ -23,7 +23,7 @@ class PatientDetailView extends StatelessWidget {
     this.showBackButton = false,
   });
 
-  final FacilityMockData data;
+  final FacilityRepository data;
   final FacilitySelection selection;
   final NotificationState notifications;
   final bool showBackButton;
@@ -59,7 +59,7 @@ class _PatientView extends StatelessWidget {
     required this.onBack,
   });
 
-  final FacilityMockData data;
+  final FacilityRepository data;
   final Patient patient;
   final NotificationState notifications;
   final bool showBackButton;

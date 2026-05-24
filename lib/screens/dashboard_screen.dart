@@ -4,7 +4,7 @@ import 'package:intl/intl.dart';
 import '../data/mock_data.dart';
 import '../models/activity.dart';
 import '../models/device.dart';
-import '../services/auth_service.dart';
+import '../auth/auth_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/patient_dashboard.dart';
 import 'device_screen.dart';

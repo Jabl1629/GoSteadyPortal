@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-import '../data/facility_mock_data.dart';
+import '../../data/facility_repository.dart';
 import '../models/unit.dart';
 
 enum FacilityCheckState { all, none, partial }
@@ -68,7 +68,7 @@ class FacilitySelection extends ChangeNotifier {
     _selectedUnitIds = _data.allUnits().map((u) => u.id).toSet();
   }
 
-  final FacilityMockData _data;
+  final FacilityRepository _data;
 
   Set<String> _selectedUnitIds;
   String? _selectedPatientId;

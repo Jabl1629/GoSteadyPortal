@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../../auth/mock_auth_service.dart';
+import '../../data/facility_repository.dart';
+import '../../models/user.dart';
 import '../../theme/app_theme.dart';
-import '../data/facility_mock_data.dart';
-import '../services/mock_facility_auth.dart';
 import '../state/facility_selection.dart';
 import 'facility_selector_dropdown.dart';
 
@@ -17,7 +18,7 @@ class FacilityTopBar extends StatelessWidget {
     required this.selection,
   });
 
-  final FacilityMockData data;
+  final FacilityRepository data;
   final FacilitySelection selection;
 
   @override
@@ -54,9 +55,9 @@ class FacilityTopBar extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               ListenableBuilder(
-                listenable: FacilityMockAuthService.instance,
+                listenable: MockAuthService.instance,
                 builder: (context, _) => _UserChip(
-                  user: FacilityMockAuthService.instance.currentUser,
+                  user: MockAuthService.instance.currentUser,
                   collapsed: isCompact,
                 ),
               ),
@@ -109,7 +110,7 @@ class _BrandMark extends StatelessWidget {
 
 class _UserChip extends StatelessWidget {
   const _UserChip({required this.user, required this.collapsed});
-  final FacilityUser? user;
+  final GoSteadyUser? user;
   final bool collapsed;
 
   @override
@@ -118,7 +119,7 @@ class _UserChip extends StatelessWidget {
     if (collapsed) {
       // Avatar only — name + title are dropped on phone-sized layouts.
       return Tooltip(
-        message: '${user!.displayName} · ${user!.title}',
+        message: '${user!.displayName} · ${user!.role.label}',
         child: Container(
           width: 32,
           height: 32,
@@ -186,7 +187,7 @@ class _UserChip extends StatelessWidget {
                 ),
               ),
               Text(
-                user!.title,
+                user!.role.label,
                 style: const TextStyle(
                   color: AppTheme.textSoft,
                   fontSize: 11,
@@ -208,7 +209,7 @@ class _SignOutButton extends StatelessWidget {
     return IconButton(
       tooltip: 'Sign out',
       icon: const Icon(Icons.logout_rounded, size: 18),
-      onPressed: () => FacilityMockAuthService.instance.signOut(),
+      onPressed: () => MockAuthService.instance.signOut(),
       style: IconButton.styleFrom(
         foregroundColor: AppTheme.textSoft,
       ),

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
-import '../data/facility_mock_data.dart';
+import '../../data/facility_repository.dart';
 import '../models/facility.dart';
 import '../models/unit.dart';
 import '../state/facility_selection.dart';
@@ -16,7 +16,7 @@ class FacilitySelectorDropdown extends StatefulWidget {
     required this.selection,
   });
 
-  final FacilityMockData data;
+  final FacilityRepository data;
   final FacilitySelection selection;
 
   @override
@@ -146,7 +146,7 @@ class _TriggerState extends State<_Trigger> {
 class _Panel extends StatelessWidget {
   const _Panel({required this.data, required this.selection});
 
-  final FacilityMockData data;
+  final FacilityRepository data;
   final FacilitySelection selection;
 
   @override
@@ -259,7 +259,7 @@ class _FacilityBlock extends StatelessWidget {
 
   final Facility facility;
   final List<Unit> units;
-  final FacilityMockData data;
+  final FacilityRepository data;
   final FacilitySelection selection;
 
   @override
