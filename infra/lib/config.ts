@@ -187,6 +187,18 @@ export interface GoSteadyEnvConfig {
    * alert-actions Lambda timeout (Phase 2A-AA).
    */
   readonly alertActionsTimeoutSeconds: number;
+  /**
+   * patient-mgmt Lambda memory (Phase 2A-UM-P). Atomic-provision path
+   * does 3 DDB writes + 1 IoT publish + 1 Shadow update; 256 MB is enough.
+   */
+  readonly patientMgmtMemoryMb: number;
+  /**
+   * patient-mgmt Lambda timeout (Phase 2A-UM-P). Higher than 2A-RD's
+   * 10s because atomic-provision chain has multiple AWS-API hops (~1-3s
+   * in practice; 15s gives slack for transient IoT publish slowness
+   * without timing out before the rollback path runs).
+   */
+  readonly patientMgmtTimeoutSeconds: number;
 }
 
 /**
@@ -244,6 +256,9 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     // Phase 2A-AA (2026-05-23) — alert-actions defaults.
     alertActionsMemoryMb: 256,
     alertActionsTimeoutSeconds: 10,
+    // Phase 2A-UM-P (2026-05-24) — patient-mgmt defaults.
+    patientMgmtMemoryMb: 256,
+    patientMgmtTimeoutSeconds: 15,
   },
   prod: {
     envName: 'Production',
@@ -300,5 +315,8 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     // Phase 2A-AA (2026-05-23) — same in dev + prod (single-row paths).
     alertActionsMemoryMb: 256,
     alertActionsTimeoutSeconds: 10,
+    // Phase 2A-UM-P (2026-05-24) — same in dev + prod.
+    patientMgmtMemoryMb: 256,
+    patientMgmtTimeoutSeconds: 15,
   },
 };

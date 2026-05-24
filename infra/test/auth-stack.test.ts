@@ -52,6 +52,8 @@ describe('AuthStack', () => {
       patientApiTimeoutSeconds: 10,
       alertActionsMemoryMb: 256,
       alertActionsTimeoutSeconds: 10,
+      patientMgmtMemoryMb: 256,
+      patientMgmtTimeoutSeconds: 15,
   };
 
   const security = new SecurityStack(app, 'TestSecurity', { config });

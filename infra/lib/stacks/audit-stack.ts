@@ -176,6 +176,13 @@ export class AuditStack extends cdk.Stack {
       // patient.thresholds.read + patient.thresholds.update. Bundled
       // with the 2A-AA deploy (Migration Pattern 18.8).
       `gosteady-${env}-alert-actions`,
+      // Phase 2A-UM-P (2026-05-24): patient-mgmt emits patient.created
+      // (+ patient.create_rollback on atomic-provision failure),
+      // patient.update, patient.discharge, patient.notifications.pause
+      // / resume_manual / resume_auto / suppressed_paused, and
+      // patient.care_note.update. Bundled with the 2A-UM-P deploy
+      // (Migration Pattern 18.8).
+      `gosteady-${env}-patient-mgmt`,
     ];
 
     const forwarderDestination = new logsDestinations.LambdaDestination(forwarder.function);
