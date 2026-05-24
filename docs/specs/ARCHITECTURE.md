@@ -1,6 +1,6 @@
 # GoSteady Portal — Master Architecture & Phase Plan
 
-> **Last updated:** 2026-05-18 | **Branch:** `feature/infra-scaffold`
+> **Last updated:** 2026-05-24 | **Branch:** `feature/infra-scaffold`
 > **Repository:** [GoSteadyPortal](https://github.com/Jabl1629/GoSteadyPortal)
 
 ---
@@ -1350,14 +1350,22 @@ Phase 2A is the broad Portal API surface. Split 2026-05-17 into six subsets that
 - Tenant enforcement: every handler validates path/body `clientId` matches token's `custom:clientId` via 2A-0's `enforce_tenancy()` helper; internal roles bypass
 - Per-walker threshold overrides hook into Threshold Detector (Phase 2A-AA)
 
-#### Phase 2B — Portal Integration 🔲
+#### Phase 2B — Portal Integration 🔲 (split into subsets)
 
-- Cognito sign-in / sign-up / token refresh in Flutter
-- API client service with retry logic, auth header injection
-- Replace mock data with real API calls
-- Loading states, error handling, offline detection
-- Multi-tenant aware UI (role-driven navigation)
-- **Full loop test:** synthetic MQTT → DynamoDB → API → portal renders real data
+Phase 2B replaces the Flutter portal's mock data with live AWS-backed reads + writes. Umbrella spec: [`phase-2b-portal-integration.md`](phase-2b-portal-integration.md). Split into six subsets that ship independently on a shared foundation:
+
+| Subset | Status | What it ships |
+|---|---|---|
+| **2B-0** Foundation | 🔲 Planned ([`phase-2b-0-foundation.md`](phase-2b-0-foundation.md)) | `ApiClient` + extended `AuthService` (MFA, forgot-password, full claim extraction) + `FacilityRepository` abstraction + `GoRouter` URL state + dual-build (`BUILD_MODE=demo\|live`) + smoke screen on `GET /api/v1/me`. **Plus minimum-viable hosting** — `GoSteady-Dev-PortalHosting` CDK stack (S3 + CloudFront + OAC + ACM + baseline WAF) so live builds deploy to `dev.portal.gosteady.co` from day one (real-domain testing per commit). **Approach-C decision (2026-05-24):** evolve the existing facility demo in place — single screen tree, two thin entry points, two build artifacts. Demo continues at `facilitydemo.gosteady.co` on Netlify (subdomain migrated from `gosteady.co/facilitydemo`); dev portal at `dev.portal.gosteady.co` on S3+CF; production portal at `portal.gosteady.co` lands in Phase 3A |
+| **2B-FAC-R** Facility Reads | 🔲 Planned | Wires `LiveFacilityRepository` to 2A-RD endpoints — Census, Patient Detail, Device Detail, Notification badges. Per-screen swap from `FacilityMockData` (no demo regression) |
+| **2B-FAC-W** Facility Writes | 🔲 Planned | Acknowledge notification (2A-AA) + Replace/Discontinue Device (2A-DL) + Add/Edit Resident, Discharge, Pause Notifications, Care Note (**all gated on 2A-UM**) |
+| **2B-D2C** Household Path | 🔲 Planned | Refit legacy D2C single-walker dashboard to consume `LiveFacilityRepository` (different screens, same `FacilityRepository` abstraction) |
+| **2B-INT** Internal-tier UI | 🔲 Planned (low priority) | Role-conditional UI for `internal_*` roles inside the unified portal (cross-tenant search, audit-reader nav). Gated on 2A-INT |
+| **2B-POL** Polish | 🔲 Planned | Responsive QA, WCAG AA, keyboard nav, screen-reader labels, column-header tooltips (US-11) |
+
+**Ship order:** 2B-0 first (everything depends on it). 2B-FAC-R + 2B-D2C parallelizable after 2B-0. 2B-FAC-W blocked on 2A-UM landing. 2B-INT after 2A-INT. 2B-POL folds in as subsets ship.
+
+**Full loop test (umbrella exit):** synthetic MQTT → DynamoDB → API → portal renders real data on a caregiver's screen.
 
 #### Phase 2C — Notifications 🔲
 
@@ -1374,18 +1382,19 @@ Phase 2A is the broad Portal API surface. Split 2026-05-17 into six subsets that
 
 ### Phase 3: Hosting & CI/CD
 
-#### Phase 3A — Portal Hosting 🔲
+#### Phase 3A — Portal Hosting (production tier) 🔲
 
-- S3 bucket for Flutter web build artifacts (private, OAC-only access)
-- CloudFront distribution with:
-  - Origin Access Control (OAC) for S3 (replaces deprecated OAI)
-  - WAF web ACL (rate limit + managed rule sets)
-  - Security headers policy (HSTS, CSP, X-Frame-Options, X-Content-Type-Options)
-  - SPA error-page redirect (index.html for all 404s)
-  - Cache invalidation on deploy
-- ACM certificate for `portal.gosteady.co`
-- Route53 alias record
-- CloudFront price class: PriceClass_100 (US/CA/EU only) for cost
+> **Scope narrowed 2026-05-24:** dev-tier portal hosting (S3 + CloudFront + OAC + ACM + baseline WAF at `dev.portal.gosteady.co`) is now part of Phase 2B-0 (see [`phase-2b-0-foundation.md`](phase-2b-0-foundation.md) §Hosting). Phase 3A retains the production polish:
+
+- Second CDK stack (`GoSteady-Prod-PortalHosting`) — sibling of the dev stack, but with prod-tier config:
+  - ACM certificate for `portal.gosteady.co` (production hostname)
+  - CNAME at Squarespace DNS panel: `portal → <prod-cf-distribution>.cloudfront.net`
+  - Add `https://portal.gosteady.co` to `apiCorsAllowedOrigins.prod`
+- **Tightened WAF**: add `AWSManagedRulesAmazonIpReputationList` (deferred from 2B-0 baseline); tune rate limit to production volume
+- **Tightened security headers policy** — HSTS (long max-age + preload), CSP (no `unsafe-inline`, allow-list specific origins), X-Frame-Options: DENY, X-Content-Type-Options: nosniff
+- **CloudFront access logging enabled** + observability dashboards (per-distribution request rate, 4xx/5xx rates, cache hit ratio, origin latency)
+- **Multi-region considerations** — replication strategy if business need emerges
+- **DNS migration to Route53** — optional; revisit if Squarespace DNS proves limiting for any prod-tier requirement (so far: not limiting)
 
 #### Phase 3B — CI/CD Pipeline 🔲
 
