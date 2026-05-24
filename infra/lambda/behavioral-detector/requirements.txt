@@ -1,0 +1,2 @@
+# Phase 1C-slim behavioral-detector Lambda — Powertools from layer
+# (Phase 1.6); boto3 from Lambda runtime. Intentionally empty.
