@@ -28,6 +28,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from _shared.api_authz import (
+    enforce_internal_session_age,
     enforce_patient_access,
     extract_claims,
     is_internal,
@@ -397,6 +398,11 @@ def handler(api_event: dict[str, Any], context: Any) -> dict[str, Any]:
     claims = extract_claims(api_event)
     try:
         require_authenticated(claims)
+        # Phase 2A-0 Q8 (amended 2026-05-24): app-layer 4-hr absolute cap
+        # for internal_* sessions. No-op for customer roles. alert-actions
+        # uses explicit emit_audit calls (not @audit_middleware), so the
+        # middleware-wired call never reaches this handler.
+        enforce_internal_session_age(claims)
         action, params = _route(api_event)
 
         if action == "ack_alert":

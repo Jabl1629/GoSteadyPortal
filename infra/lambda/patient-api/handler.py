@@ -29,6 +29,7 @@ from typing import Any
 import boto3
 
 from _shared.api_authz import (
+    enforce_internal_session_age,
     enforce_scope,
     enforce_patient_access,
     extract_claims,
@@ -611,6 +612,12 @@ def handler(api_event: dict[str, Any], context: Any) -> dict[str, Any]:
     claims = extract_claims(api_event)
     try:
         require_authenticated(claims)
+        # Phase 2A-0 Q8 (amended 2026-05-24): app-layer 4-hr absolute cap
+        # for internal_* sessions. No-op for customer roles. patient-api
+        # uses its own dispatcher pattern (not @audit_middleware), so the
+        # middleware-wired call never reaches this handler. Mirror in
+        # device-api / alert-actions / patient-mgmt.
+        enforce_internal_session_age(claims)
         action, params = _route(api_event)
 
         if action == "get_patient":
