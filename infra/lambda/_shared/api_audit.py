@@ -36,7 +36,7 @@ from __future__ import annotations
 import functools
 from typing import Any, Callable
 
-from .api_authz import extract_claims, is_internal
+from .api_authz import enforce_internal_session_age, extract_claims, is_internal
 from .api_error import ApiError, error_response
 from .audit_catalog import AUDIT_HANDLER_ERROR, KNOWN_AUDIT_EVENTS
 from .observability import emit_audit, get_logger
@@ -104,6 +104,11 @@ def audit_middleware(
             action = _derive_action(api_event)
 
             try:
+                # Internal-tier session absolute-cap (2A-0 Q8): for
+                # internal_* roles, reject if the token's iat claim is
+                # > 4 h old. No-op for customer roles. Raises ApiError(401)
+                # which the existing except clause below handles uniformly.
+                enforce_internal_session_age(claims)
                 response = handler(api_event, context, claims)
             except ApiError as exc:
                 # Emit audit on 403 and 500 only; skip 400/404/429.

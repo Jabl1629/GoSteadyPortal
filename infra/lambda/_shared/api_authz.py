@@ -25,6 +25,7 @@ JWT claim sources (per Phase 0A revision Pre-Token Generation Lambda V2):
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .api_error import ApiError
@@ -37,6 +38,13 @@ INTERNAL_ROLE_PREFIX = "internal_"
 MFA_REQUIRED_ROLES = frozenset(
     {"facility_admin", "client_admin", "internal_support", "internal_admin"}
 )
+
+# Absolute-cap for internal_* role sessions. Mirrors the 4-hr cap that
+# the Portal-Internal Cognito client used to enforce before the
+# unified-portal decision (phase-2b-portal-integration.md L1 + 2A-0 Q8).
+# Cognito itself cannot per-user-override the `exp` claim, so we enforce
+# at the application layer via enforce_internal_session_age below.
+INTERNAL_SESSION_MAX_AGE_SECONDS = 4 * 3600
 
 
 def extract_claims(event: dict[str, Any]) -> dict[str, Any]:
@@ -57,6 +65,15 @@ def extract_claims(event: dict[str, Any]) -> dict[str, Any]:
     facilities_raw = claims.get("custom:facilities", "") or ""
     censuses_raw = claims.get("custom:censuses", "") or ""
 
+    # iat (issued-at) is a reserved JWT claim; Cognito always includes it.
+    # Surface as int (epoch seconds); 0 if missing/unparseable so callers
+    # can distinguish "claim absent" from "very old token". Used by
+    # enforce_internal_session_age below for internal_*-role absolute cap.
+    try:
+        iat = int(claims.get("iat", 0) or 0)
+    except (TypeError, ValueError):
+        iat = 0
+
     return {
         "userId": claims.get("sub", ""),
         "email": claims.get("email", ""),
@@ -65,6 +82,7 @@ def extract_claims(event: dict[str, Any]) -> dict[str, Any]:
         "facilities": [f.strip() for f in facilities_raw.split(",") if f.strip()],
         "censuses": [c.strip() for c in censuses_raw.split(",") if c.strip()],
         "mfaEnrolled": claims.get("custom:mfa_enrolled", "false") == "true",
+        "iat": iat,
     }
 
 
@@ -72,6 +90,62 @@ def is_internal(claims: dict[str, Any]) -> bool:
     """True if the actor belongs to the reserved `_internal` client."""
     role = claims.get("role", "") or ""
     return role.startswith(INTERNAL_ROLE_PREFIX)
+
+
+def enforce_internal_session_age(
+    claims: dict[str, Any],
+    *,
+    max_age_seconds: int = INTERNAL_SESSION_MAX_AGE_SECONDS,
+    now_fn=time.time,
+) -> None:
+    """
+    App-layer absolute-cap on internal_* sessions.
+
+    Background: under the unified-portal model (Phase 2B L1 + 2A-0 Q8)
+    every user — including internal staff — signs in via the Portal-Customer
+    Cognito App Client, which configures tokens at 15-min idle / 30-day
+    refresh. The original Portal-Internal client's tighter 30-min idle /
+    4-hr absolute cap is gone. Cognito's Pre-Token Generation Lambda V2
+    cannot per-user override the reserved `exp` claim, so the tighter
+    posture for internal_* roles is enforced here, in code, on every
+    request.
+
+    Behavior:
+      - Customer roles → pass (no-op).
+      - Internal_* role + iat present + age ≤ max → pass.
+      - Internal_* role + iat absent (missing/0) → raise 401.
+      - Internal_* role + age > max → raise 401.
+
+    The 30-min IDLE cap is enforced client-side in the Flutter SPA
+    (per phase-2b-portal-integration.md 2B-0); this helper enforces the
+    4-hr ABSOLUTE cap server-side, which is the harder-to-bypass half.
+
+    Args:
+      claims: extracted JWT claims (with `iat` int field).
+      max_age_seconds: absolute cap; defaults to INTERNAL_SESSION_MAX_AGE_SECONDS.
+      now_fn: callable returning current epoch seconds (injectable for tests).
+    """
+    if not is_internal(claims):
+        return
+    iat = claims.get("iat", 0)
+    if not iat:
+        raise ApiError(
+            code="INTERNAL_SESSION_EXPIRED",
+            message="Internal-tier session has no issued-at claim; re-authenticate.",
+            status=401,
+            details={"missingClaim": "iat"},
+        )
+    age = now_fn() - iat
+    if age > max_age_seconds:
+        raise ApiError(
+            code="INTERNAL_SESSION_EXPIRED",
+            message=(
+                f"Internal-tier session exceeded {max_age_seconds // 3600}-hour absolute cap "
+                f"(age={int(age)}s). Re-authenticate."
+            ),
+            status=401,
+            details={"sessionAgeSeconds": int(age), "maxAgeSeconds": max_age_seconds},
+        )
 
 
 def require_authenticated(claims: dict[str, Any]) -> None:

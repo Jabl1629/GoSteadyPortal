@@ -20,7 +20,7 @@ This is **pure plumbing — no business endpoints**. The single stub endpoint ex
 | L1 | Stack name: existing `GoSteady-{Env}-Api` (stub populated, not new stack) | ARCHITECTURE.md §5 CDK Stack Map | Stub already exists; this phase fills it in |
 | L2 | Path prefix `/api/v1/*` for all portal routes; reserved `/admin/*` for internal-admin routes (Phase 2A-INT) | Architecture §12 Phase 2A bullets | Versioning from day one means breaking changes don't paint us into a corner |
 | L3 | Cognito User Pool JWT authorizer at API Gateway level (not Lambda authorizer) | Phase 0A revision (User Pool live at `us-east-1_ZHbhl19tQ`) | API Gateway HTTP API supports JWT natively; Lambda authorizer would add cold-start and double-billing for the same verification logic |
-| L4 | JWT custom claims accessible to handlers via API Gateway request context: `clientId`, `role`, `facilities`, `censuses` | Phase 0A revision Pre-Token Generation Lambda V2 (deployed 2026-04-26) | Pre-Token Lambda already injects these claims into both ID and Access tokens; handler reads them from `event.requestContext.authorizer.jwt.claims` |
+| L4 | JWT custom claims accessible to handlers via API Gateway request context: `clientId`, `role`, `facilities`, `censuses` | Phase 0A revision Pre-Token Generation Lambda V2 (deployed 2026-04-26) | Pre-Token Lambda already injects these claims into both ID and Access tokens; handler reads them from `event.requestContext.authorizer.jwt.claims`. **Amended 2026-05-23 (Q8):** the JWT authorizer's audience list narrowed from 2 → 1 (Portal-Customer only) under the unified-portal decision in [phase-2b-portal-integration.md](phase-2b-portal-integration.md) L1. Per-route role differentiation (via `custom:role` claim) is unchanged |
 | L5 | Tenant enforcement at handler level: every handler validates path/body `clientId` (where present) matches token's `custom:clientId`; reject 403 `TENANCY_VIOLATION` on mismatch. Internal roles (`internal_*`) bypass this check | ARCHITECTURE.md T2 + §4 Internal Access | The hard security boundary. Cannot live only at API Gateway — paths don't always carry `clientId`, but handlers know which DDB partition they're querying |
 | L6 | Audit emission via Powertools middleware decorator wrapping every handler; uses `_shared/observability.py:emit_audit` | Phase 1.7 (deployed 2026-05-17) | Single emission path. Middleware automatically derives `actor` from JWT claims, `request_id` from API Gateway context, and stamps `internal_access` for internal roles before calling the helper (which forwards to audit-forwarder Lambda → audit log group → S3) |
 | L7 | Shared error envelope shape (per phase-2a-device-lifecycle.md) — `{error: {code, message, details}}` with documented codes catalog | Phase 2A-DL spec §Interfaces | Flutter UI needs structured codes to render specific messages; codes also flow into audit logs for forensics |
@@ -38,7 +38,7 @@ This is **pure plumbing — no business endpoints**. The single stub endpoint ex
 | A2 | Pre-Token Lambda V2's custom claims (deployed 2026-04-26 per Phase 0A revision) appear in `event.requestContext.authorizer.jwt.claims` accessible from the handler | If the claims aren't there, handlers can't enforce tenancy or pick the right scope | Verify with the stub `GET /api/v1/me` endpoint — it returns the full claim set; tested in T3 |
 | A3 | WAF Managed Rules don't false-positive-block legitimate portal traffic at MVP scale | Real users get 403s and complain | AWS Managed Rules baseline rarely false-positives on JSON API traffic; the only common issue is the `SizeRestrictions_BODY` rule rejecting >8KB bodies, which our `POST /devices/{serial}/provision` payload is well under. Document the override pattern if it ever comes up |
 | A4 | API Gateway HTTP API request validation via JSON Schema models is sufficient for body/query/path validation; no per-handler validation library needed | Validation gaps allow malformed input to reach handlers | API Gateway HTTP API request validation handles `required`, `type`, `enum`, `pattern`. Handlers still validate semantic constraints (e.g., "patient belongs to this client") — that's not a request-validation job |
-| A5 | The existing Portal-Customer App Client (`1q9l9ujtsomf3ugq2tnqvdg6d7`) is the right audience for the JWT authorizer; Portal-Internal (`gvc7n839vj4ppgioamknlk21c`) gets a separate authorizer or a different route | Single authorizer with both audiences accepted — could let an internal token hit a customer-only route | API Gateway HTTP API JWT authorizer accepts a list of audiences. We allow both, then the per-route authz logic differentiates based on `custom:role` (internal_* vs customer). Cleaner than two authorizers |
+| A5 | **Amended 2026-05-23 (Q8 / unified portal):** The Portal-Customer App Client (`1q9l9ujtsomf3ugq2tnqvdg6d7`) is the single audience for the JWT authorizer. All web users — including internal staff — sign in via this client. Per-route role differentiation happens in handler code via `custom:role`. Portal-Internal (`gvc7n839vj4ppgioamknlk21c`) is reserved for non-browser tools (CLI / server-side); it's not in the authorizer's audience list | (Original A5: both clients accepted, internal-vs-customer differentiated by role at handler level) | Per [phase-2b-portal-integration.md](phase-2b-portal-integration.md) L1, unified portal at one URL means one Cognito client at the JWT authorizer. Security boundary stays JWT-claim-based via `custom:role` |
 | A6 | A single Lambda function (`gosteady-{env}-api-stub`) is enough for the foundation phase's stub endpoint; subsequent subsets add their own Lambdas | If the stub is too thin, smoke-testing the foundation is unclear | The stub returns 200 with the JWT claims it received. ~30 lines of code. Sufficient |
 | A7 | Existing `GoSteady-{Env}-Api` stub stack can be populated in-place (CFN UPDATE, not destroy+recreate) | Stack-replacement loses any state | Stub only has one CfnOutput (`Status: SCAFFOLD`); no resources to preserve. Trivial UPDATE |
 
@@ -56,7 +56,7 @@ This is **pure plumbing — no business endpoints**. The single stub endpoint ex
 
 - **Cognito JWT authorizer** (`PortalAuthorizer`):
   - Issuer: `https://cognito-idp.us-east-1.amazonaws.com/us-east-1_ZHbhl19tQ`
-  - Audience: both `1q9l9ujtsomf3ugq2tnqvdg6d7` (Portal-Customer) AND `gvc7n839vj4ppgioamknlk21c` (Portal-Internal)
+  - Audience: `1q9l9ujtsomf3ugq2tnqvdg6d7` (Portal-Customer) — **amended 2026-05-23 (Q8), narrowed from 2 → 1.** Portal-Internal client no longer in the audience list; it's reserved for non-browser tools
   - Identity source: `$request.header.Authorization` (Bearer token)
   - Attached to all routes via default authorizer (override per-route if a public path appears — none in v1)
 
@@ -88,6 +88,7 @@ This is **pure plumbing — no business endpoints**. The single stub endpoint ex
 - **Error code catalog** (initial — extended by each subset):
   - `INVALID_REQUEST` (400) — body/query/path validation failure
   - `UNAUTHENTICATED` (401) — missing/invalid token
+  - `INTERNAL_SESSION_EXPIRED` (401) — internal_* role's session exceeded 4-hr absolute cap (added 2026-05-23 with Q8 amendment; app-layer enforcement via `enforce_internal_session_age` in `_shared/api_authz.py`)
   - `MFA_REQUIRED` (403) — role requires MFA per Phase 0A revision but token lacks `custom:mfa_enrolled=true`
   - `INSUFFICIENT_PERMISSIONS` (403) — role not in allowed-list for this route
   - `TENANCY_VIOLATION` (403) — `custom:clientId` doesn't match target resource's `clientId` (and not internal_*)
@@ -376,7 +377,7 @@ If WAF false-positives block legitimate traffic during 2A-DL development, the ea
 | # | Decision | Alternatives Considered | Why This Choice |
 |---|----------|------------------------|-----------------|
 | D1 | API Gateway HTTP API (v2), not REST API (v1) | REST API has more features (request validation models, gateway responses) | HTTP API has built-in JWT authorizer, lower cost (~70% cheaper), lower latency. REST API features we'd want (request validation) exist in HTTP API too as of 2022 |
-| D2 | Single JWT authorizer with both Portal-Customer + Portal-Internal audiences | Two authorizers, one per audience | Single authorizer is simpler; per-route differentiation via `custom:role` in handler code is cleaner than route-level authorizer assignment. Internal-only routes (`/admin/*`) get extra checks in handlers, not via separate authorizer |
+| D2 | **Amended 2026-05-23 (Q8):** Single JWT authorizer with **one** audience (Portal-Customer only). All web users sign in via this client; per-role differentiation via `custom:role` in handler code | Original D2 had both Portal-Customer + Portal-Internal audiences accepted; rejected as inconsistent with [phase-2b-portal-integration.md](phase-2b-portal-integration.md) L1 unified-portal model. Two-audience setup baked in a URL-based security obscurity layer that the rest of the architecture (JWT-claim-based) doesn't rely on | Single authorizer + single audience is simpler. Portal-Internal client repurposed for non-browser tools (CLI / server-side). For token lifetimes on `internal_*` roles, see new Q8 below |
 | D3 | Single stub endpoint `GET /api/v1/me` for foundation smoke | No stub (deploy + verify via CLI only); multiple stubs (`/health`, `/version`, `/me`) | One stub covers the full pipeline including JWT claim extraction. Health check isn't useful (it's the same Lambda; if `/me` works, health works) |
 | D4 | Audit middleware as a decorator using Powertools `middleware_factory` | Manual `emit_audit()` calls in every handler | Decorator means handlers can't forget; consistency is enforced at infrastructure level. Per L5 of 1.7 spec the audit emission must be on every state-changing call — making it automatic prevents drift |
 | D5 | Tenant enforcement in handlers (after authorizer), not at API Gateway | Custom Lambda authorizer that pre-checks tenancy | The tenancy check needs to compare JWT claim to a resource attribute (path or DDB lookup). Pre-resolving in an authorizer adds latency and only catches the path-level case. Handlers must do this regardless; centralize via `enforce_tenancy()` helper |
@@ -452,6 +453,47 @@ If WAF false-positives block legitimate traffic during 2A-DL development, the ea
 
 ---
 
+### Q8. Token lifetimes for `internal_*` roles under the unified-portal model (DECIDED 2026-05-23)
+
+**What's actually being asked:** Under the original dual-client design, internal users authenticated via the Portal-Internal Cognito client which enforced **30-min idle / 4-hr absolute** token lifetimes — tighter than Portal-Customer's **15-min idle / 30-day refresh**. Under the unified-portal decision ([phase-2b-portal-integration.md](phase-2b-portal-integration.md) L1), all web users — including internal — sign in via Portal-Customer. So how do we preserve the tighter security posture for internal roles?
+
+**Initial plan (invalid):** Have the Pre-Token Generation Lambda override the `exp` claim for `internal_*` roles to a shorter window. **This doesn't work** — Cognito's Pre-Token V2 `claimsAndScopeOverrideDetails.claimsToAddOrOverride` cannot override reserved JWT claims (`exp`, `iat`, `iss`, `aud`, `sub`). The token's actual validity is set by Cognito itself from the App Client's `idTokenValidity` / `accessTokenValidity` config and cannot be per-user customized.
+
+**Options:**
+
+| # | Approach | Pros | Cons |
+|---|---|---|---|
+| A | All web users get Portal-Customer's 15-min idle / 30-day refresh. Flutter SPA tracks user-activity timestamp for `internal_*` roles, forces re-auth at 30-min idle. Backend handlers check `iat` claim for `internal_*` and 401 if > 4h since issue (the absolute cap) | Simple; no new infra; no impact on customer-user UX | Idle-cap is client-side enforced (bypassable by a sophisticated attacker who modifies the SPA). Absolute cap is real (server-side) |
+| B | Add a third Cognito App Client (Portal-Internal-Web, no secret, 30-min idle / 4-hr absolute). Authorizer accepts 2 audiences again — both public. Portal tries Portal-Customer first; if resulting role is `internal_*`, signs out and re-auths via Portal-Internal-Web | Cognito-enforced lifetimes (correct) | Double-auth UX is awkward; SPA logic to pivot mid-flow |
+| C | Drop the tighter posture; all roles get 15-min idle / 30-day refresh | Trivially simple | Loosens security for highest-privileged role — likely unacceptable for prod |
+
+**Decision:** ✅ **Option A for MVP** + **Option B (or a server-side idle-tracking mechanism) as a pre-prod hardening item**, mirroring how Phase 1.5 multi-account and 1.7 Object Lock work (dev gets the simpler version; prod adds the rigorous version before first paying customer).
+
+**Implementation surface (lands as a 2A-0 follow-up, ~30 lines total):**
+
+1. **`infra/lib/stacks/api-stack.ts`** — narrow `userPoolClients` array from `[portalCustomerClient, portalInternalClient]` to `[portalCustomerClient]` only. One-line change at line 159
+2. **`infra/lambda/_shared/api_authz.py`** — add:
+   ```python
+   def enforce_internal_session_age(claims: dict, max_age_seconds: int = 4 * 3600) -> None:
+       """For internal_* roles, reject if token issued > max_age_seconds ago.
+       Mirrors the absolute-cap that the Portal-Internal Cognito client
+       used to enforce when internal users had a separate client."""
+       role = claims.get("custom:role", "")
+       if not role.startswith("internal_"):
+           return
+       iat = int(claims.get("iat", 0))
+       if iat == 0 or (time.time() - iat) > max_age_seconds:
+           raise ApiError(401, "INTERNAL_SESSION_EXPIRED",
+                          "Internal-tier session exceeded 4-hour absolute cap. Re-authenticate.")
+   ```
+3. **`infra/lambda/_shared/api_audit.py`** — call `enforce_internal_session_age()` from the `audit_middleware` decorator BEFORE running the wrapped handler (so every endpoint gets the check; no per-handler code)
+4. **`docs/specs/phase-0a-revision.md`** — addendum note: "Portal-Internal client (`gvc7n839vj4ppgioamknlk21c`) is reserved for non-browser tools (CLI / server-side admin scripts) — no longer used by browser portal under Phase 2B-L1 unified-portal decision"
+5. **`docs/specs/ARCHITECTURE.md` §4 Internal Access** — clarify that internal-token lifetime enforcement for browser users now lives in `enforce_internal_session_age` (app layer), not at the Cognito client config
+
+**What's at stake:** Pre-prod gate — Option B should be revisited before the first internal customer-data access in production. Until then, Option A is acceptable in dev where the threat model is "developers + Claude operating in trusted contexts."
+
+---
+
 ### Q7. WAF + API Gateway HTTP API v2 — hard AWS limitation (surfaced at deploy)
 
 **What's actually being asked:** First deploy attempt failed when WAFv2 rejected the API Gateway HTTP API v2 stage ARN with "The ARN isn't valid... parameter: arn:aws:apigateway:us-east-1::/apis/{id}/stages/$default". Investigation showed **WAFv2 does not support association with API Gateway HTTP API v2 stages.** Only REST API v1, CloudFront, ALB, AppSync, Cognito User Pool. This is documented (kind of) but easy to miss when planning.
@@ -475,8 +517,9 @@ The `portal-waf.ts` construct and `apiWafRateLimitPerIp` config field are kept i
 | Q5 | Subscription filter list maintenance | ⏳ Manual add for 2A-0; aspect in 2A-DL/RD |
 | Q6 | `Retry-After` on 429 | ⏳ Defer until portal traffic surfaces it |
 | Q7 | WAF on HTTP API v2 | ✅ Defer to Phase 3A — WAFv2 doesn't support HTTP API v2 association; CloudFront fronts both |
+| Q8 | Token lifetimes for `internal_*` roles under unified-portal | ✅ Option A (app-layer enforcement) for MVP — narrow authorizer audience to 1; add `enforce_internal_session_age` helper in `api_authz.py` called from `audit_middleware`. Option B (third public App Client) revisit pre-prod |
 
-Four of seven decided now. Q4 + Q5 + Q6 require downstream phases or production usage to inform.
+Five of eight decided now. Q4 + Q5 + Q6 require downstream phases or production usage to inform.
 
 ## Changelog
 
@@ -484,3 +527,4 @@ Four of seven decided now. Q4 + Q5 + Q6 require downstream phases or production 
 |------|--------|--------|
 | 2026-05-17 | Jace + Claude (cloud session) | Initial spec drafted as the foundation subset of Phase 2A. Carves out pure-plumbing concerns (API Gateway, WAF, JWT authorizer, audit middleware, error envelope, tenant enforcement) into a subset that ships independently, so device-lifecycle / patient-reads / alert-actions / user-management can each be 2-day sprints rather than week-long rebuilds. Bundles the Audit-stack subscription-filter update for the new api-stub log group (D9) to avoid a between-revisions silent-swallow gap. |
 | 2026-05-17 | Jace + Claude (cloud session, same day) | **Deployed to dev** in 4 deploy attempts. Attempt-time issues: (1) `--exclusively` flag suppressed the Auth dependency; missing cross-stack export `ExportsOutputRefUserPoolPortalInternalClient...` (auto-generated when api-stack started referencing `portalInternalClient`); (2) `--exclusively` also prevented CDK from sequencing Audit-after-Api, leading to "log group doesn't exist" on the new ApiStub subscription filter; (3) WAF couldn't associate with API Gateway HTTP API v2 — hard AWS limitation, deferred to Phase 3A per new Open Question Q7. Final flow: `cdk deploy GoSteady-Dev-Api` (brings Auth as dependency, succeeded in 65.67 s) then `cdk deploy GoSteady-Dev-Audit --exclusively` (subscription filter add, 25.5 s). Smoke validated T3 + T4 + T8 + T16 end-to-end with a synthetic Cognito test user (`2a-smoke@test.local`, caregiver role, dtc_smoke_test client). The full pipeline works: GET /api/v1/me returns claims, 401 on no-auth, audit event lands in `gosteady-dev-audit` log group with all middleware-derived fields (actor, subject, request_id, xray_trace_id, schema_version: 1, auto-stamped internal_access + severity), and propagates to S3 within ~70s. Phase 1.7 Q8 (schema_version backfill) **partially closed** — api-stub emits with schema_version: 1, proving the helper extension works; 1B-rev Lambdas still emit without it (correct per L9 default-to-v1; will populate naturally on next processing-stack touch) |
+| 2026-05-23 | Jace + Claude (portal session) | **Amendment — unified portal decision.** Updated L4, A5, In-Scope/Authorizer config, and D2 to reflect that the JWT authorizer's audience list narrows from 2 (Portal-Customer + Portal-Internal) to 1 (Portal-Customer only) under [phase-2b-portal-integration.md](phase-2b-portal-integration.md) L1. Added Q8 to handle token-lifetimes for `internal_*` roles after the dual-client model goes away — Pre-Token Lambda *cannot* override the `exp` claim (Cognito sets it from App Client config), so internal-user idle / absolute-cap enforcement moves to app layer: `enforce_internal_session_age` helper in `_shared/api_authz.py` called from `audit_middleware`, plus client-side idle detection in the Flutter SPA. Pre-prod hardening item: revisit Option B (third public Cognito App Client for internal-web) before first prod customer. **Implementation effort:** ~30 lines (CDK audience-list narrowing + Python helper + middleware wiring). To deploy: `cdk deploy GoSteady-Dev-Api --context env=dev`. No data migration. |

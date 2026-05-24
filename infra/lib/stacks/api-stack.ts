@@ -148,15 +148,23 @@ export class ApiStack extends cdk.Stack {
       detailedMetricsEnabled: true,
     };
 
-    // ── JWT authorizer (Cognito User Pool, both App Clients) ──────
-    // Single authorizer with both audiences (D2). Per-route logic
-    // differentiates customer vs internal via the custom:role claim
-    // inside handler code (api_authz.is_internal).
+    // ── JWT authorizer (Cognito User Pool, single App Client) ─────
+    // Per phase-2a-foundation.md Q8 + phase-2b-portal-integration.md L1:
+    // unified-portal decision — all web users (customer + internal) sign in
+    // via Portal-Customer. Portal-Internal client is reserved for non-browser
+    // tools (CLI / server-side scripts where the client secret is safe);
+    // it's no longer in the authorizer audience list.
+    //
+    // Internal-tier authority is enforced via the `custom:role` claim at
+    // the handler layer (`api_authz.is_internal`), and the 4-hr absolute
+    // session cap that the Portal-Internal client used to enforce is now
+    // enforced app-side via `_shared/api_authz.enforce_internal_session_age`
+    // called from `audit_middleware`.
     const userPoolAuthorizer = new HttpUserPoolAuthorizer(
       'PortalUserPoolAuthorizer',
       authStack.userPool,
       {
-        userPoolClients: [authStack.portalCustomerClient, authStack.portalInternalClient],
+        userPoolClients: [authStack.portalCustomerClient],
         identitySource: ['$request.header.Authorization'],
       },
     );
