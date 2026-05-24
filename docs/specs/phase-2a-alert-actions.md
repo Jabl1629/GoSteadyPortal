@@ -331,7 +331,7 @@ Shadow update → threshold-detector Lambda
 ### Verification Commands
 
 ```bash
-cd "/Users/jaceblackburn/Library/Mobile Documents/com~apple~CloudDocs/Documents/GoSteady/gosteady-portal"
+cd ~/Documents/gosteady-portal
 # Smoke runner (Python, mirrors smoke-2a-rd.py):
 .test-venv/bin/python3 infra/scripts/smoke-2a-aa.py
 
