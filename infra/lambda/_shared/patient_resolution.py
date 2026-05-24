@@ -39,6 +39,10 @@ class PatientContext:
     censusId: str
     timezone: str
     deviceSerial: str
+    # Phase 2A-AA: per-patient threshold overrides (None when no overrides set).
+    # Threshold Detector merges over defaults from _shared/thresholds.py.
+    # Other consumers (activity-processor, alert-handler) ignore this field.
+    thresholds: dict | None = None
 
 
 def _find_active_assignment(serial: str) -> dict | None:
@@ -78,6 +82,9 @@ def resolve_patient(serial: str) -> PatientContext | None:
     if patient is None:
         return None
 
+    raw_thresholds = patient.get("thresholds")
+    thresholds = dict(raw_thresholds) if isinstance(raw_thresholds, dict) and raw_thresholds else None
+
     return PatientContext(
         patientId=str(patient_id),
         clientId=str(patient.get("clientId") or assignment.get("clientId") or ""),
@@ -85,4 +92,5 @@ def resolve_patient(serial: str) -> PatientContext | None:
         censusId=str(patient.get("censusId") or assignment.get("censusId") or ""),
         timezone=str(patient.get("timezone") or "UTC"),
         deviceSerial=serial,
+        thresholds=thresholds,
     )

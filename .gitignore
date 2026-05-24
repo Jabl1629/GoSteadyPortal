@@ -30,3 +30,17 @@ pubspec.lock
 .env
 .env.local
 *.pem
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.test-venv/
+
+# Claude Code session state
+.claude/
+
+# Node / CDK
+node_modules/
+cdk.out/
+*.tsbuildinfo

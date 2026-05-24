@@ -47,11 +47,14 @@ AUDIT_DEVICE_CMD_SWEPT_STALE = "device.cmd_swept_stale"  # Coordinator Lambda re
 AUDIT_PATIENT_ACTIVITY_CREATE = "patient.activity.create"
 AUDIT_PATIENT_ACTIVITY_READ = "patient.activity.read"
 AUDIT_PATIENT_DETAIL_READ = "patient.detail.read"
+AUDIT_PATIENT_LIST_READ = "patient.list.read"  # Phase 2A-RD: GET /me/patients; count-only subject per spec D8
 AUDIT_ALERT_SYNTHETIC_CREATE = "alert.synthetic.create"
 AUDIT_ALERT_DEVICE_CREATE = "alert.device.create"
 AUDIT_ALERT_READ = "alert.read"
 AUDIT_ALERT_ACK = "alert.ack"
 AUDIT_CENSUS_ROSTER_READ = "census.roster.read"
+AUDIT_PATIENT_THRESHOLDS_READ = "patient.thresholds.read"  # Phase 2A-AA
+AUDIT_PATIENT_THRESHOLDS_UPDATE = "patient.thresholds.update"  # Phase 2A-AA: full before/after per spec L8
 
 # ── Auth (Phase 0A-rev partial; Phase 2A wires up the rest) ───────────
 AUDIT_AUTH_LOGIN = "auth.login"
@@ -99,11 +102,14 @@ KNOWN_AUDIT_EVENTS = frozenset(
         AUDIT_PATIENT_ACTIVITY_CREATE,
         AUDIT_PATIENT_ACTIVITY_READ,
         AUDIT_PATIENT_DETAIL_READ,
+        AUDIT_PATIENT_LIST_READ,
         AUDIT_ALERT_SYNTHETIC_CREATE,
         AUDIT_ALERT_DEVICE_CREATE,
         AUDIT_ALERT_READ,
         AUDIT_ALERT_ACK,
         AUDIT_CENSUS_ROSTER_READ,
+        AUDIT_PATIENT_THRESHOLDS_READ,
+        AUDIT_PATIENT_THRESHOLDS_UPDATE,
         AUDIT_AUTH_LOGIN,
         AUDIT_AUTH_LOGIN_FAILED,
         AUDIT_AUTH_MFA_CHALLENGE,

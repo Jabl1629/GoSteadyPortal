@@ -1,0 +1,1 @@
+# Powertools sourced from Lambda layer (Phase 1.6). boto3 from runtime.

@@ -217,11 +217,13 @@ def handler(event: dict, _context):
         return {"statusCode": 200, "body": "pre-activation; suppressed"}
 
     # Threshold evaluation ---------------------------------------------
+    # Phase 2A-AA: resolve patient FIRST so we can apply per-patient
+    # threshold overrides (patient.thresholds map). Cost: one extra
+    # Patients.GetItem per shadow update (even those that wouldn't
+    # breach defaults). Acceptable at MVP scale; revisit with a cache
+    # if Patients table reads become hot.
     battery_pct = _f(reported.get("battery_pct"))
     rsrp_dbm = _f(reported.get("rsrp_dbm"))
-    breaches = determine_threshold_alerts(battery_pct, rsrp_dbm)
-    if not breaches:
-        return {"statusCode": 200, "body": "no threshold breach"}
 
     patient = resolve_patient(serial)
     if patient is None:
@@ -231,6 +233,12 @@ def handler(event: dict, _context):
         )
         metrics.add_metric(name="unmapped_serial_count", unit=MetricUnit.Count, value=1)
         return {"statusCode": 200, "body": "no active assignment; alerts dropped"}
+
+    breaches = determine_threshold_alerts(
+        battery_pct, rsrp_dbm, overrides=patient.thresholds,
+    )
+    if not breaches:
+        return {"statusCode": 200, "body": "no threshold breach"}
 
     event_ts_raw = reported.get("ts") or reported.get("lastSeen")
     try:

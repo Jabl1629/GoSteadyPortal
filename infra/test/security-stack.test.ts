@@ -41,6 +41,10 @@ describe('SecurityStack (dev profile)', () => {
       apiThrottleRate: 25,
       apiWafRateLimitPerIp: 2000,
       apiLatencyP99AlarmMs: 2000,
+      patientApiMemoryMb: 256,
+      patientApiTimeoutSeconds: 10,
+      alertActionsMemoryMb: 256,
+      alertActionsTimeoutSeconds: 10,
     },
   });
   const template = Template.fromStack(stack);
@@ -153,6 +157,10 @@ describe('SecurityStack (prod profile — Object Lock enabled)', () => {
       apiThrottleRate: 25,
       apiWafRateLimitPerIp: 2000,
       apiLatencyP99AlarmMs: 2000,
+      patientApiMemoryMb: 256,
+      patientApiTimeoutSeconds: 10,
+      alertActionsMemoryMb: 256,
+      alertActionsTimeoutSeconds: 10,
     },
   });
   const template = Template.fromStack(stack);

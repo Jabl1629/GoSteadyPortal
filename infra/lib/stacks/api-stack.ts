@@ -573,6 +573,232 @@ export class ApiStack extends cdk.Stack {
     });
     wipeStuckAlarm.addAlarmAction(snsAction);
 
+    // ════════════════════════════════════════════════════════════════
+    // Phase 2A-RD — Patient Reads
+    // ════════════════════════════════════════════════════════════════
+    //
+    // Single patient-api Lambda + 5 GET routes. Read-only against DDB
+    // (Patients, Activity Series, Alert History, Organizations,
+    // DeviceAssignments, Device Registry, RoleAssignments). No DDB
+    // writes, no IoT publishes, no state machine.
+    //
+    // RoleAssignments lives in the Auth stack (not Data stack) because
+    // it carries the family_viewer linkedPatientIds + role+scope tuples
+    // that the Pre-Token Lambda reads at sign-in. patient-api needs
+    // read access for the family_viewer auth chain.
+    //
+    // Spec: docs/specs/phase-2a-read.md
+    const patientApi = new ProcessingLambda(this, 'PatientApi', {
+      config,
+      functionName: `gosteady-${env}-patient-api`,
+      handlerDir: path.join(__dirname, '..', '..', 'lambda', 'patient-api'),
+      description: 'Phase 2A-RD patient reads — 5 GET endpoints; tenancy + scope; audit emission',
+      memoryMb: config.patientApiMemoryMb,
+      timeoutSeconds: config.patientApiTimeoutSeconds,
+      powertoolsLayer,
+      tracingActive: true,
+      environment: {
+        ENVIRONMENT: env,
+        PATIENTS_TABLE: dataStack.patientsTable.tableName,
+        ACTIVITY_TABLE: dataStack.activityTable.tableName,
+        ALERTS_TABLE: dataStack.alertTable.tableName,
+        ORGANIZATIONS_TABLE: dataStack.organizationsTable.tableName,
+        DEVICE_ASSIGNMENTS_TABLE: dataStack.deviceAssignmentsTable.tableName,
+        DEVICES_TABLE: dataStack.deviceTable.tableName,
+        ROLE_ASSIGNMENTS_TABLE: authStack.roleAssignmentsTable.tableName,
+      },
+    });
+    // Read-only grants on every table the Lambda queries.
+    dataStack.patientsTable.grantReadData(patientApi.function);
+    dataStack.activityTable.grantReadData(patientApi.function);
+    dataStack.alertTable.grantReadData(patientApi.function);
+    dataStack.organizationsTable.grantReadData(patientApi.function);
+    dataStack.deviceAssignmentsTable.grantReadData(patientApi.function);
+    dataStack.deviceTable.grantReadData(patientApi.function);
+    authStack.roleAssignmentsTable.grantReadData(patientApi.function);
+    // IdentityKey CMK for the CMK-encrypted identity tables (Patients,
+    // Organizations, DeviceAssignments, RoleAssignments are all
+    // CMK-encrypted per Phase 0B-rev + 0A-rev).
+    identityKey.grantDecrypt(patientApi.function);
+    // AuditKey: emit_audit writes go to the handler log group, which is
+    // forwarded to the audit log group by the Audit stack's forwarder.
+    // Forwarder + audit log group encrypt with AuditKey; patient-api's
+    // own log group is AWS-managed-encrypted (no AuditKey needed here),
+    // BUT emit_audit may produce audit-shape lines that downstream
+    // KMS-encrypted streams need to decrypt. Grant for symmetry with
+    // device-api (same pattern, same justification — see 2A-DL block).
+    auditKey.grantEncryptDecrypt(patientApi.function);
+
+    // Wire 5 routes to the existing HTTP API + JWT authorizer.
+    const patientApiIntegration = new HttpLambdaIntegration(
+      'PatientApiIntegration',
+      patientApi.function,
+    );
+    const patientRoutes: Array<[apigwv2.HttpMethod, string]> = [
+      [apigwv2.HttpMethod.GET, '/api/v1/patients/{id}'],
+      [apigwv2.HttpMethod.GET, '/api/v1/patients/{id}/activity'],
+      [apigwv2.HttpMethod.GET, '/api/v1/patients/{id}/alerts'],
+      [apigwv2.HttpMethod.GET, '/api/v1/me/patients'],
+      [apigwv2.HttpMethod.GET, '/api/v1/facilities/{facilityId}/censuses/{censusId}/patients'],
+    ];
+    for (const [method, p] of patientRoutes) {
+      this.httpApi.addRoutes({
+        path: p,
+        methods: [method],
+        integration: patientApiIntegration,
+        authorizer: userPoolAuthorizer,
+      });
+    }
+
+    // patient-api alarms (mirrors 1.6 per-handler pattern):
+    //   1. Lambda Errors > 0 in 5 min (uncaught exceptions)
+    //   2. ERROR-pattern log filter (logged-and-swallowed errors;
+    //      Powertools level=ERROR or [ERROR] substring)
+    const patientApiErrorsAlarm = new cloudwatch.Alarm(this, 'PatientApiErrors', {
+      alarmName: `gosteady-${env}-patient-api-errors`,
+      alarmDescription:
+        'patient-api Lambda Errors > 0 in 5 min — uncaught exception in a ' +
+        'read handler. Check /aws/lambda/gosteady-{env}-patient-api.',
+      metric: patientApi.function.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    patientApiErrorsAlarm.addAlarmAction(snsAction);
+
+    const patientApiErrorPatternFilter = patientApi.function.logGroup.addMetricFilter(
+      'PatientApiErrorPattern',
+      {
+        filterPattern: logs.FilterPattern.literal('{ $.level = "ERROR" }'),
+        metricNamespace: `GoSteady/Handlers/${env}`,
+        metricName: 'PatientApiErrorLogLines',
+        metricValue: '1',
+        defaultValue: 0,
+      },
+    );
+    const patientApiErrorPatternAlarm = new cloudwatch.Alarm(this, 'PatientApiErrorPatternAlarm', {
+      alarmName: `gosteady-${env}-patient-api-error-log-pattern`,
+      alarmDescription:
+        'patient-api emitted >0 ERROR-level structured log lines in 5 min ' +
+        '(logged-and-swallowed handler error or Powertools ERROR-level event).',
+      metric: patientApiErrorPatternFilter.metric({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    patientApiErrorPatternAlarm.addAlarmAction(snsAction);
+
+    // ════════════════════════════════════════════════════════════════
+    // Phase 2A-AA — Alert Actions
+    // ════════════════════════════════════════════════════════════════
+    //
+    // Single alert-actions Lambda + 3 routes:
+    //   PATCH /api/v1/alerts/{patientId}/{timestamp}    (ack)
+    //   GET   /api/v1/patients/{id}/thresholds          (read effective)
+    //   PUT   /api/v1/patients/{id}/thresholds          (set override)
+    //
+    // Writes back to Patients table (thresholds map attribute) +
+    // Alert History (ack fields). Threshold Detector amended separately
+    // in Processing stack to consume per-patient overrides on shadow
+    // delta.
+    //
+    // Spec: docs/specs/phase-2a-alert-actions.md
+    const alertActions = new ProcessingLambda(this, 'AlertActions', {
+      config,
+      functionName: `gosteady-${env}-alert-actions`,
+      handlerDir: path.join(__dirname, '..', '..', 'lambda', 'alert-actions'),
+      description: 'Phase 2A-AA — alert ack + per-patient threshold overrides',
+      memoryMb: config.alertActionsMemoryMb,
+      timeoutSeconds: config.alertActionsTimeoutSeconds,
+      powertoolsLayer,
+      tracingActive: true,
+      environment: {
+        ENVIRONMENT: env,
+        PATIENTS_TABLE: dataStack.patientsTable.tableName,
+        ALERTS_TABLE: dataStack.alertTable.tableName,
+        ROLE_ASSIGNMENTS_TABLE: authStack.roleAssignmentsTable.tableName,
+      },
+    });
+    // Patients: read for tenancy + scope; write for thresholds.update
+    dataStack.patientsTable.grantReadWriteData(alertActions.function);
+    // Alert History: read for ack lookup; write for ack fields
+    dataStack.alertTable.grantReadWriteData(alertActions.function);
+    // RoleAssignments: read-only for family_viewer linkedPatientIds
+    authStack.roleAssignmentsTable.grantReadData(alertActions.function);
+    // KMS — identity-bearing tables (Patients + RoleAssignments are
+    // CMK-encrypted per 0A-rev + 0B-rev). Alert History is AWS-managed.
+    identityKey.grantEncryptDecrypt(alertActions.function);
+    auditKey.grantEncryptDecrypt(alertActions.function);
+
+    // 3 routes
+    const alertActionsIntegration = new HttpLambdaIntegration(
+      'AlertActionsIntegration',
+      alertActions.function,
+    );
+    const alertActionsRoutes: Array<[apigwv2.HttpMethod, string]> = [
+      [apigwv2.HttpMethod.PATCH, '/api/v1/alerts/{patientId}/{timestamp}'],
+      [apigwv2.HttpMethod.GET, '/api/v1/patients/{id}/thresholds'],
+      [apigwv2.HttpMethod.PUT, '/api/v1/patients/{id}/thresholds'],
+    ];
+    for (const [method, p] of alertActionsRoutes) {
+      this.httpApi.addRoutes({
+        path: p,
+        methods: [method],
+        integration: alertActionsIntegration,
+        authorizer: userPoolAuthorizer,
+      });
+    }
+
+    // Lambda Errors + ERROR-pattern log filter alarms (mirrors 1.6 + 2A-RD pattern)
+    const alertActionsErrorsAlarm = new cloudwatch.Alarm(this, 'AlertActionsErrors', {
+      alarmName: `gosteady-${env}-alert-actions-errors`,
+      alarmDescription:
+        'alert-actions Lambda Errors > 0 in 5 min — uncaught exception. ' +
+        'Check /aws/lambda/gosteady-{env}-alert-actions.',
+      metric: alertActions.function.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    alertActionsErrorsAlarm.addAlarmAction(snsAction);
+
+    const alertActionsErrorPatternFilter = alertActions.function.logGroup.addMetricFilter(
+      'AlertActionsErrorPattern',
+      {
+        filterPattern: logs.FilterPattern.literal('{ $.level = "ERROR" }'),
+        metricNamespace: `GoSteady/Handlers/${env}`,
+        metricName: 'AlertActionsErrorLogLines',
+        metricValue: '1',
+        defaultValue: 0,
+      },
+    );
+    const alertActionsErrorPatternAlarm = new cloudwatch.Alarm(this, 'AlertActionsErrorPatternAlarm', {
+      alarmName: `gosteady-${env}-alert-actions-error-log-pattern`,
+      alarmDescription:
+        'alert-actions emitted >0 ERROR-level structured log lines in 5 min.',
+      metric: alertActionsErrorPatternFilter.metric({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    alertActionsErrorPatternAlarm.addAlarmAction(snsAction);
+
     // ── 2A-DL outputs ──────────────────────────────────────────────
     new cdk.CfnOutput(this, 'DeviceApiName', {
       value: deviceApi.function.functionName,
@@ -585,6 +811,16 @@ export class ApiStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DeviceShadowHandlerName', {
       value: shadowHandler.function.functionName,
       exportName: `${env}-DeviceShadowHandlerName`,
+    });
+    // ── 2A-RD outputs ──────────────────────────────────────────────
+    new cdk.CfnOutput(this, 'PatientApiName', {
+      value: patientApi.function.functionName,
+      exportName: `${env}-PatientApiName`,
+    });
+    // ── 2A-AA outputs ──────────────────────────────────────────────
+    new cdk.CfnOutput(this, 'AlertActionsName', {
+      value: alertActions.function.functionName,
+      exportName: `${env}-AlertActionsName`,
     });
 
     // ── Outputs (existing 2A-0) ───────────────────────────────────

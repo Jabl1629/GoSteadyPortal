@@ -7482,4 +7482,293 @@ coordinator is the production primitive for downlink cmd reliability
 on this firmware's hourly heartbeat cadence. Two small follow-ups
 filed (§C24 Findings 4 + 6) for future revisions.*
 
+---
+
+# §C25 — Phase 2A-RD (Patient Reads) deployed live (2026-05-23, cloud session)
+
+**Cloud-side only. No firmware action required.**
+
+## C25.1 What shipped
+
+Five read endpoints on a new `patient-api` Lambda, all on the existing
+HTTP API behind the 2A-0 Cognito JWT authorizer:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/v1/patients/{id}` | Single patient detail (+ facility/census names + current device + lastSeen) |
+| GET | `/api/v1/patients/{id}/activity?range=24h\|7d\|30d&cursor=&pageSize=` | Activity sessions, newest-first, cursor-paginated |
+| GET | `/api/v1/patients/{id}/alerts?status=unacknowledged\|acknowledged\|all&cursor=` | Alert history with filter |
+| GET | `/api/v1/me/patients?cursor=&pageSize=&clientId=` (internal-only) | Caller's patient list, role-derived scope |
+| GET | `/api/v1/facilities/{f}/censuses/{c}/patients` | Census roster |
+
+Full spec: [`docs/specs/phase-2a-read.md`](../specs/phase-2a-read.md).
+
+## C25.2 Deploy outcome
+
+- Api stack: 21 resources / 83 s (CFN UPDATE, no destroys, no in-place mods to existing 2A-0/2A-DL resources)
+- Audit stack: 5 resources / 36 s (new subscription filter on `gosteady-dev-patient-api` log group)
+- Auth stack: +2 auto-emitted cross-stack exports (RoleAssignments table, needed for family_viewer linkedPatientIds lookup)
+- Data stack: +6 auto-emitted cross-stack exports (Activity / Alerts / Organizations tables)
+
+## C25.3 Synthetic smoke 23/23 PASS
+
+Covers tenancy, scope, family_viewer 404-leak prevention, pagination
+cursor round-trip, activity range validation, alert filters, /me/patients
+scope-resolution per role (caregiver / facility_admin / client_admin /
+family_viewer), census roster, no-token 401.
+
+Two deploy-time fixes:
+1. test/*.test.ts config blocks needed `patientApiMemoryMb` +
+   `patientApiTimeoutSeconds` fields added (5 files; auto-patched).
+2. seed-script's `admin_update_user_attributes` silently swallowed
+   errors; had to manually flip `custom:mfa_enrolled=true` on the
+   facility_admin + client_admin test users (Phase 0A-rev A7 requires
+   MFA for those roles before the Pre-Token Lambda will issue tokens).
+
+## C25.4 Real-data validation against `pt_bench_98`
+
+Queried the §C18 bench patient directly via Lambda's `queries.py` —
+returned all 8 historical activity sessions correctly (firmware version
+0.10.0-at-timeout, surface=indoor, distance/steps populated). Real data
+and synthetic data follow the same code paths; validates the read shape
+end-to-end.
+
+## C25.5 GS9999999998 status check (resolves "stale activity uploads" question)
+
+User flagged that GS9999999998 hadn't produced activity uploads recently.
+Investigation:
+
+- ✅ Snippets uploading (latest 2026-05-23 14:59 UTC, 84 KB)
+- ✅ Heartbeats arriving (18 in last 48 h, battery 0.364, uptime 7168 s,
+      watchdog_hits=1, fatal=0)
+- ✅ Device Shadow + Device Registry consistent: `ready_to_provision`
+      since §C22 wipe-validation on 2026-05-18
+
+**Conclusion: not a bug.** The device is in `ready_to_provision` state
+(no active patient assignment) since §C22, so firmware is in
+pre-activation gate (blue LED, no session capture per the M10.5 design).
+Heartbeats and snippets fire on timers regardless of activation state,
+which is why those keep flowing. Activity uploads are suppressed by
+design until next provision.
+
+**To resume activity flow:** provision GS9999999998 to a patient via
+`POST /api/v1/devices/GS9999999998/provision` (2A-DL endpoint, already
+deployed). Firmware will receive the `activate` cmd via the §C24
+connection-coordinator, exit pre-activation, and begin session capture
+on next motion.
+
+## C25.6 Phase 1.6/1.7 backfill: schema_version
+
+`patient-api` is the second handler to emit audit events with
+`schema_version: 1` after the §C19 heartbeat-processor redeploy (per
+ARCH §16 follow-up). 48 audit events landed in `gosteady-dev-audit`
+within 30 min, all tagged correctly with `audit: true`,
+`schema_version: 1`, auto-stamped `internal_access` + `severity` by the
+Phase 1.7 audit-forwarder. Three handlers still emitting without the
+field (activity-processor / threshold-detector / alert-handler) — will
+pick it up on next routine touch.
+
+## C25.7 Open follow-ups carried forward
+
+No new findings. Existing §C24 follow-ups (Finding 4 state-aware
+coordinator predicate, Finding 6 explicit LogGroup CDK resource) and
+§C22 firmware follow-ups (Finding 4 + 6 for firmware 0.12.x) unchanged.
+
+## C25.8 Updated cloud-side queue
+
+| Item | Status | Notes |
+|---|---|---|
+| ✅ Phase 2A-RD patient reads | DEPLOYED + validated end-to-end | This entry |
+| 🟡 §C24 Finding 4 (coordinator state-aware) | Still open | Defer to next coordinator revision |
+| 🟡 §C24 Finding 6 (Processing pre-create LogGroup) | Still open | Bundle with next processing-stack touch |
+| 🟡 §C22 Finding 4 + 6 (firmware 0.12.x: Shadow ack reorder + post-wipe activated_at) | Still open — firmware-side | Bundle into next firmware release |
+| 🔲 Phase 2A-AA alert actions | Natural next (alert ack closes the loop on synthetic alerts already in DDB) | |
+| 🔲 Phase 2A-UM user management | Biggest UX surface | |
+| 🔲 Phase 1C-slim offline detector | Pending | |
+
+---
+
+*Entry owner: Claude (autonomous cloud session, 2026-05-23).*
+*Closes Phase 2A-RD spec implementation. Five read endpoints live;
+Flutter dashboard now has the API surface to render real patient data;
+only Phase 2B (Flutter integration) blocks "real data on a caregiver's
+screen."*
+
+---
+
+## §C25.5-update (2026-05-23 later) — CORRECTION + new firmware finding
+
+**My §C25.5 claim that "activity uploads are suppressed by design until
+next provision" was wrong.** User flagged a flapping cloud alarm
+(`gosteady-dev-activity-processor-unmapped-serial`) that I'd missed.
+Re-investigation showed:
+
+**`GS9999999998` IS publishing activity sessions even in
+`ready_to_provision`.** The cloud correctly rejects them as
+`unmapped_serial` (no `DeviceAssignment` row), drops the payload, and
+the EMF metric `unmapped_serial_count` trips the alarm on every motion
+event. 32 unmapped-serial events for this serial from 2026-05-19 →
+2026-05-23 (4 today between 14:39–14:58 UTC). **The activity sessions
+are LOST** — no DDB row written, only warning log lines in
+`/aws/lambda/gosteady-dev-activity-processor`.
+
+### F.2 Firmware-side gap (candidate for 0.12.x)
+
+The pre-activation gate (`/lfs/activation.bin` persistence + blue LED
++ no session capture) is **`CONFIG_GOSTEADY_FIELD_MODE`-only**. Cloud
+builds (`prj_cloud.conf`) don't enforce it, so motion → BMI270
+auto-start → session captured + published regardless of `activated_at`.
+
+This is operationally noisy on bench units sitting unassigned, and
+arguably a soft data-integrity issue (sessions published that have no
+patient binding get silently dropped). **Recommendation:** apply the
+pre-activation gate in cloud-build too, OR add a runtime check on
+`activation_get_at()` before triggering `cloud_publish_activity()`.
+Bundle with §C22 firmware tweaks for 0.12.x.
+
+### Cloud-side: provisioned `GS9999999998` to `pt_bench_98`
+
+To restore activity flow (and stop the alarm noise) the operational fix
+was to provision the device. Done at 2026-05-23T19:18:56Z via direct
+device-api Lambda invoke with internal_admin claims:
+
+- Device Registry: `ready_to_provision → provisioned`
+- DeviceAssignment row: `pt_bench_98` in `dtc_smoke_test` / `fac_smoke_001` / `cen_smoke_001`
+- Activate cmd published: `act_1f578f35-c25a-47e9-acd6-f8bf4c8e925b`
+- Shadow `desired.activated_at = 2026-05-23T19:18:56Z` set (DL14 invariant)
+- `outstandingActivationCmds` map populated
+
+Expected next hour: firmware wakes → MQTT broker delivers queued cmd
+(CLEAN_SESSION=n) OR §C24 coordinator re-publishes on next CONNECTED
+event → firmware acks via `last_cmd_id` in heartbeat → heartbeat-processor
+flips status to `active_monitoring`, sets `activated_at`, emits
+`device.activated` + `device.first_heartbeat` audits → future activity
+sessions resolve to `pt_bench_98` → DDB writes succeed → alarm stops.
+
+### Updated open queue
+
+| Item | Status | Notes |
+|---|---|---|
+| 🆕 §C25.5 firmware F.2 (cloud-build pre-activation gate gap) | New firmware-side candidate for 0.12.x | Operational noise + soft data-loss when bench unit sits unassigned. Bundle with §C22 Finding 4 + 6. |
+| ✅ §C25.5 device provisioned to pt_bench_98 | Operational fix applied | Awaiting firmware ack on next heartbeat cycle |
+| (rest of §C24.8 unchanged) | | |
+
+---
+
+*Correction entry owner: Claude (cloud session, 2026-05-23 later).*
+
+---
+
+# §C26 — Phase 2A-AA (Alert Actions) deployed live (2026-05-23, cloud session)
+
+**Cloud-side only. No firmware action required.** Threshold Detector
+amended to consume per-patient overrides (backward-compatible — no
+override = identical Phase 1B behavior).
+
+## C26.1 What shipped
+
+Three endpoints on a new `alert-actions` Lambda:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| PATCH | `/api/v1/alerts/{patientId}/{timestamp}` | Acknowledge alert (first-write-wins; optional notes ≤500 chars) |
+| GET | `/api/v1/patients/{id}/thresholds` | Read effective thresholds (default ⊕ override) + `source` map showing which fields are overridden |
+| PUT | `/api/v1/patients/{id}/thresholds` | Set per-patient overrides (facility_admin+); explicit `null` clears a field back to default |
+
+Plus: **Threshold Detector code update** — reads `patient.thresholds`
+map, merges over `_shared/thresholds.py` defaults via new
+`merge_thresholds()` helper. Restructured to resolve patient FIRST
+(was: breach check first, resolve only if breach). Adds one extra
+Patients.GetItem per shadow update.
+
+Full spec: [`docs/specs/phase-2a-alert-actions.md`](../specs/phase-2a-alert-actions.md).
+
+## C26.2 Deploy outcome
+
+- Processing stack: 30 s CFN execution / 590 s total (synthesis + bundling all 6 Processing Lambdas via iCloud — slow first-time, fast subsequent)
+- Api stack: 14 new resources / 83 s CFN / 426 s total (synthesis was 343s)
+- Audit stack: 5 resources / 26 s
+- No new CFN destroys; no in-place breaking mods to existing stacks
+
+## C26.3 Synthetic smoke 17/17 PASS
+
+Ack: happy + idempotency + out-of-scope 403 + family_viewer denied 403
++ nonexistent 404 + notes valid + notes-too-long 400 + malformed-SK 400.
+Thresholds: GET default fall-through + PUT facility_admin happy +
+caregiver denied 403 + out-of-range 400 + ordering violation 400 +
+null clears override + GET reflects most recent PUT. Plus no-token 401.
+
+29/29 pure-function unit tests PASS (range validation + ordering
+constraints + Decimal coercion + merge semantics + Phase 1B
+backward-compat).
+
+## C26.4 Audit pipeline validated end-to-end
+
+Sample `alert.ack` event in `gosteady-dev-audit` log group:
+
+    {"audit": true, "schema_version": 1, "event": "alert.ack",
+     "actor": {"userId": "...", "role": "caregiver", "clientId": "client_rd_test"},
+     "subject": {"patientId": "pat_rd_busy", "alertType": "battery_critical",
+                 "severity": "critical", "eventTimestamp": "..."},
+     "action": "update",
+     "extra": {"wasAlreadyAcknowledged": false, "hasNotes": false},
+     "request_id": "...", "xray_trace_id": "...",
+     "internal_access": false, "severity": "info"}
+
+Sample `patient.thresholds.update` event with `before`/`after`:
+
+    {..., "event": "patient.thresholds.update",
+     "before": {},
+     "after": {"batteryCritical": 0.08, "batteryLow": 0.15},
+     "extra": {"updatedFields": ["batteryCritical", "batteryLow"]}}
+
+Per-event before/after maps satisfy the spec L8 compliance-reader
+invariant (any threshold state at any point-in-time T can be
+reconstructed by replaying the audit chain — diff-only would force
+re-derivation).
+
+## C26.5 PII scrub clean
+
+0 matches for any of 4 test-patient `displayName` values
+("Jane D", "John Q", "Bob F", "Mary B") in
+`/aws/lambda/gosteady-dev-alert-actions` operational log group over the
+smoke window. Powertools `ScrubbingFormatter` (Phase 1.6) holds.
+
+## C26.6 Firmware-facing impact
+
+**None.** Alert Actions is portal-side (caregiver UI). The firmware
+contract is unchanged — heartbeats still flow into Threshold Detector
+the same way; the only difference is the detector now reads
+`patient.thresholds` from the existing Patients GetItem and merges
+over defaults. A patient with no overrides set produces identical
+Phase 1B alert behavior.
+
+For `GS9999999998` specifically: the device was provisioned to
+`pt_bench_98` earlier today (per §C25.5-update). Once firmware acks
+the activate cmd on its next heartbeat, activity sessions will resolve
+to that patient and any threshold breach (default 5% battery, etc.)
+will land as a synthetic alert in Alert History — which is now
+ack-able via 2A-AA's PATCH endpoint.
+
+## C26.7 Updated cloud-side queue
+
+| Item | Status | Notes |
+|---|---|---|
+| ✅ Phase 2A-AA alert actions + threshold overrides | DEPLOYED + validated end-to-end | This entry |
+| 🟡 §C24 Finding 4 (coordinator state-aware) | Still open | Defer to next coordinator revision |
+| 🟡 §C24 Finding 6 (Processing pre-create LogGroup) | Still open | Bundle with next processing-stack touch |
+| 🟡 §C25.5 firmware F.2 (cloud-build pre-activation gate gap) | Still open — firmware-side | Operational noise on unassigned bench units |
+| 🟡 §C22 Finding 4 + 6 (firmware 0.12.x: Shadow ack reorder + post-wipe activated_at) | Still open — firmware-side | Bundle with F.2 above |
+| 🔲 Phase 2B Portal Integration | Natural next | Flutter UI now has read (2A-RD) + write (2A-AA) APIs to call |
+| 🔲 Phase 2A-UM user management | Bigger UX surface | Needs product clarity on household onboarding |
+| 🔲 Phase 1C-slim offline detector | Pending | Coord §C11.7 sketch |
+
+---
+
+*Entry owner: Claude (autonomous cloud session, 2026-05-23 late).*
+*Closes Phase 2A-AA spec implementation. Read (2A-RD) + write (2A-AA)
+loops are now both closed on the alert + threshold surfaces. Phase 2B
+(Flutter portal integration) is the natural next step — the cloud-side
+API surface is sufficient to render a functional caregiver dashboard
+with ack-action capability.*
 

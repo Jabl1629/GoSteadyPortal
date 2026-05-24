@@ -167,6 +167,26 @@ export interface GoSteadyEnvConfig {
    * API Gateway p99 latency alarm threshold (ms) — Phase 2A-0.
    */
   readonly apiLatencyP99AlarmMs: number;
+  /**
+   * patient-api Lambda memory (Phase 2A-RD).
+   * Higher than device-api in prod due to BatchGetItem fan-out latency
+   * sensitivity (Organizations name resolution).
+   */
+  readonly patientApiMemoryMb: number;
+  /**
+   * patient-api Lambda timeout (Phase 2A-RD). Same in dev/prod;
+   * pagination keeps per-call work bounded.
+   */
+  readonly patientApiTimeoutSeconds: number;
+  /**
+   * alert-actions Lambda memory (Phase 2A-AA). Single-row UpdateItem
+   * paths; 256 MB sufficient.
+   */
+  readonly alertActionsMemoryMb: number;
+  /**
+   * alert-actions Lambda timeout (Phase 2A-AA).
+   */
+  readonly alertActionsTimeoutSeconds: number;
 }
 
 /**
@@ -218,6 +238,12 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     apiThrottleRate: 25,
     apiWafRateLimitPerIp: 2000,
     apiLatencyP99AlarmMs: 2000,
+    // Phase 2A-RD (2026-05-23) — patient-api defaults.
+    patientApiMemoryMb: 256,
+    patientApiTimeoutSeconds: 10,
+    // Phase 2A-AA (2026-05-23) — alert-actions defaults.
+    alertActionsMemoryMb: 256,
+    alertActionsTimeoutSeconds: 10,
   },
   prod: {
     envName: 'Production',
@@ -267,5 +293,12 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     apiThrottleRate: 100,
     apiWafRateLimitPerIp: 2000,
     apiLatencyP99AlarmMs: 1000,
+    // Phase 2A-RD (2026-05-23) — patient-api memory higher in prod for
+    // Organizations BatchGetItem fan-out latency.
+    patientApiMemoryMb: 512,
+    patientApiTimeoutSeconds: 10,
+    // Phase 2A-AA (2026-05-23) — same in dev + prod (single-row paths).
+    alertActionsMemoryMb: 256,
+    alertActionsTimeoutSeconds: 10,
   },
 };

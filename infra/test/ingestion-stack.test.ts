@@ -52,6 +52,10 @@ describe('IngestionStack — Phase 1A revision', () => {
       apiThrottleRate: 25,
       apiWafRateLimitPerIp: 2000,
       apiLatencyP99AlarmMs: 2000,
+      patientApiMemoryMb: 256,
+      patientApiTimeoutSeconds: 10,
+      alertActionsMemoryMb: 256,
+      alertActionsTimeoutSeconds: 10,
   };
 
   const security = new SecurityStack(app, 'TestSecurityForIngestion', { config });

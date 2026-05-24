@@ -167,6 +167,15 @@ export class AuditStack extends cdk.Stack {
       // device.cmd_republished + device.cmd_swept_stale audits on
       // firmware connect.
       `gosteady-${env}-connection-coordinator`,
+      // Phase 2A-RD (2026-05-23): patient-api emits patient.detail.read,
+      // patient.activity.read, alert.read, patient.list.read, and
+      // census.roster.read on every successful read. Same gap-avoidance
+      // discipline as 2A-DL — bundled with the 2A-RD deploy (spec D9).
+      `gosteady-${env}-patient-api`,
+      // Phase 2A-AA (2026-05-23): alert-actions emits alert.ack +
+      // patient.thresholds.read + patient.thresholds.update. Bundled
+      // with the 2A-AA deploy (Migration Pattern 18.8).
+      `gosteady-${env}-alert-actions`,
     ];
 
     const forwarderDestination = new logsDestinations.LambdaDestination(forwarder.function);
