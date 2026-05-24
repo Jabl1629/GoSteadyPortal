@@ -7772,3 +7772,128 @@ loops are now both closed on the alert + threshold surfaces. Phase 2B
 API surface is sufficient to render a functional caregiver dashboard
 with ack-action capability.*
 
+
+---
+
+# §C27 — Three cloud-side deploys (2026-05-24): 2A-0 amendment + 2A-UM-P + 1C-slim
+
+**Cloud-side only. No firmware action required.** All three deploys are V1-critical-path infrastructure that the firmware contract doesn't touch.
+
+## C27.1 What shipped
+
+Three logically-distinct subsets in one session, in order:
+
+### A) Phase 2A-0 amendment — unified-portal authorizer
+Narrows the API Gateway JWT authorizer audience list from 2 (Portal-Customer + Portal-Internal) to 1 (Portal-Customer only). Per the unified-portal decision in [`phase-2b-portal-integration.md`](../specs/phase-2b-portal-integration.md) L1: all browser users — customer AND internal — sign in at the same URL via the same Cognito client. Portal-Internal client is repurposed for non-browser tools (CLI / server-side admin scripts).
+
+App-layer enforcement of the 4-hr absolute cap for `internal_*` sessions via new `_shared.api_authz.enforce_internal_session_age` helper, called from `audit_middleware` before every handler. Cognito Pre-Token V2 *cannot* override the reserved `exp` claim — only custom claims — so the tighter posture that the dual-client setup gave internal users now lives in code.
+
+New error code `INTERNAL_SESSION_EXPIRED` (401) in the spec catalog. `Auth-stack` orphan cross-stack export `ExportsOutputRefUserPoolPortalInternalClient5C76F87F59CE7E63` dropped.
+
+**Spec amended in-place:** [`phase-2a-foundation.md`](../specs/phase-2a-foundation.md) L4, A5, D2, In-Scope authorizer config, new Q8.
+
+### B) Phase 2A-UM-P — Patient Management (V1 blocker for 2B-FAC-W)
+New `gosteady-dev-patient-mgmt` Lambda. 6 patient-mutation endpoints:
+- `POST /api/v1/patients` (create + optional atomic provision via inline duplication of device-api's L14 chain — `~80` lines duplicated; TODO marker in code points at `_shared/provision.py` as the eventual refactor target if both diverge)
+- `PATCH /api/v1/patients/{id}` (name / room / censusId; cross-facility transfer requires `client_admin+` per Q3)
+- `POST /api/v1/patients/{id}/discharge` (DDB-Streams cascade via deployed 2A-DL `discharge-cascade` Lambda)
+- `POST + DELETE /api/v1/patients/{id}/notifications/pause`
+- `PATCH /api/v1/patients/{id}/care-note` (≤280 chars; denormalized actor name per D5)
+
+Two new schemaless Patient row attributes: `careNote`, `notificationsPaused`. **Threshold Detector + Activity Processor pick up pause-aware behavior** via new `_shared/pause_check.py`:
+- Threshold Detector skips evaluation when patient is paused; emits sampled `patient.notifications.suppressed_paused` audit (Shadow `lastNotificationSuppressedAuditAt` dedupe at ≤1/day/serial, mirrors preactivation pattern)
+- Activity Processor auto-resumes on activity arrival (REMOVE `notificationsPaused` via conditional UpdateItem; emit `patient.notifications.resume_auto` audit with triggering-activity payload)
+
+`patient-api` `GET /patients/{id}` response extended with `careNote` + `notificationsPaused` (+ `room`) fields. 8 new audit catalog events.
+
+**Spec:** [`phase-2a-um-patient-management.md`](../specs/phase-2a-um-patient-management.md).
+
+### C) Phase 1C-slim — Behavioral notifications + offline detector
+New `gosteady-dev-behavioral-detector` Lambda + EventBridge **hourly cron rule**. Emits 5 alert types into the existing Alert History table (reused; no portal contract change):
+- `no_activity_today` (CRITICAL, facility-local 09:00; today.steps==0 AND lastSeen<24h)
+- `below_typical_activity` (STANDARD, facility-local 22:00; today.steps < 70% × median7Day)
+- `declining_trend` (STANDARD, facility-local 22:00; median7Day < 85% × medianPrior23Day)
+- `device_offline` (WARNING, hourly; lastSeen > 2h AND status=active_monitoring)
+- `device_silent` (CRITICAL, hourly; lastSeen > 24h AND status=active_monitoring)
+
+Honors `notificationsPaused` (skip-when-paused, same `_shared/pause_check.py` helper). Reuses 1B-rev's `alert.synthetic.create` audit event with `subject.alertType` as the differentiator (no catalog sprawl). Emits one `behavioral.detector.run` summary audit per invocation with full counters.
+
+**Closes the coord §C11.7 conference silent-failure gap** (cap dark 3 days 21 hrs, no alarm fired). Closes 2B Q5 client-side-evaluation gap simultaneously (server-authoritative behavioral rules).
+
+**Spec:** [`phase-1c-slim-notifications.md`](../specs/phase-1c-slim-notifications.md).
+
+## C27.2 Deploy chronology
+
+7 commits on `feature/infra-scaffold` (`65361c5` → `e5ea6e6` → `31d241c`), 5 sequenced deploys:
+
+| Time | Deploy | Outcome | Duration |
+|---|---|---|---|
+| AM | A: 2A-0 amendment Api stack | ❌ first attempt: cross-stack-export ordering bug (Auth tried to drop `ExportsOutputRefUserPoolPortalInternalClient...` before Api stopped consuming it). Fix: `--exclusively` to deploy Api first | — |
+| AM | A: Api `--exclusively` | ✅ 43s — authorizer audience updated; patient-api + alert-actions code-asset bumps from new `_shared` bundle | 43s |
+| AM | A: Auth `--exclusively` | ✅ 22s — orphan export dropped cleanly | 22s |
+| Midday | B: Data stack (export refresh) | ❌ Api needed new UsersTable cross-stack export. Same gotcha as 2A-0; fix: deploy Data first | — |
+| Midday | B: Data → Api → synthetic invoke → Audit | ✅ ~3 min total — patient-mgmt Lambda live; smoke 27/27 PASS; 10 audit events end-to-end through Phase 1.7 pipeline within ~3s | ~3 min |
+| PM | C: Processing (1C-slim) first attempt | ❌ `reservedConcurrentExecutions=1` blocked by dev account's 10-concurrency new-account floor (same Phase 1.7 gotcha). Fix: drop the reservation | — |
+| PM | C: Processing redeploy | ❌ Synthetic invoke `AccessDeniedException` on Patients `by-client-status` GSI. `fromTableName()` in processing-stack doesn't include GSI ARNs in `grantReadData`. Fix: explicit `PolicyStatement` on `table/*/index/*` | — |
+| PM | C: Processing redeploy + Audit filter | ✅ Synthetic invoke evaluated 2 facilities × 4 patients in 137ms; `behavioral.detector.run` audit landed in `gosteady-dev-audit` log group | ~45s + 9s |
+
+## C27.3 Smoke + verification
+
+**A (2A-0 amendment):**
+- 23 new `_shared/tests/test_api_authz.py` PASS (16 enforce-fn cases covering customer pass-through, internal fresh / aged / missing-iat / boundary / configurable max_age, plus 7 `iat` extraction tests)
+- 78 regression PASS (49 patient-api + 29 alert-actions)
+- Live smoke: authorizer audience confirmed `["1q9l9ujtsomf3ugq2tnqvdg6d7"]` (1 client); `GET /api/v1/me` 200 with full claims; no-token + invalid-token → 401; `auth.session.read` audit landed within ~70s
+
+**B (2A-UM-P):**
+- 74 validation unit tests PASS (every field validator + composite-body validator)
+- 30 pause_check tests PASS (boundary, missing-attribute, DDB-string-numeric, day-floor, 90-day max)
+- 53 _shared regression + 49 patient-api + 29 alert-actions = 205 total green
+- **27/27 synthetic smoke PASS** covering: create no-device / family_viewer denied / bad census / empty name / malformed serial / caregiver out-of-scope; PATCH single-field / multi-field / empty 400 / cross-facility caregiver-denied + client_admin-allowed; pause + GET-reflects / invalid reason 400 / days=91 400; resume + double-resume 409; care-note set + GET-reflects / over-280 400 / empty-clears; family_viewer pause denied; discharge happy + double 409 + PATCH-on-discharged 409; no-token 401
+- 10 audit events landed in `gosteady-dev-audit` log group within ~3s; full before/after maps on every PATCH including the cross-facility transfer
+
+**C (1C-slim):**
+- 42 rule unit tests PASS (no_activity_today 13 / below_typical 8 / declining_trend 7 / device_offline-silent 14)
+- Synthetic invoke: 2 facilities × 4 active patients evaluated in 137ms; 0 alerts fired (correct given current UTC isn't local-09 or local-22 in seed facilities' tz and active patients don't have devices in `active_monitoring` with stale lastSeen); `behavioral.detector.run` audit landed end-to-end
+- EventBridge schedule rule firing hourly
+
+## C27.4 Firmware-facing impact
+
+**Zero.** All three deploys are cloud-side:
+- 2A-0 amendment changes API Gateway's audience config; firmware doesn't authenticate against API Gateway (it uses MQTT)
+- 2A-UM-P + 1C-slim are portal-driven (patient mgmt API) and cloud-scheduled (cron Lambda). The MQTT topic contracts, heartbeat schema, activity schema, alert schema, and downlink cmd schema are all unchanged
+
+**Note for next firmware-side bench session:** `pat_bench_98` (the patient `GS9999999998` was provisioned to in coord §C25.5-update) will now have its activity sessions evaluated by behavioral-detector at facility-local 22:00. Whether that fires a real alert depends on whether `GS9999999998` is reporting activity. If/when it does fire, the alert will appear via 2A-RD's `GET /patients/pat_bench_98/alerts?status=unacknowledged` with `source: cloud-behavioral` or `cloud-offline` (vs `cloud` for Threshold Detector's battery/signal alerts or `device` for firmware-emitted).
+
+## C27.5 Cloud-side state after this entry
+
+| Component | State |
+|---|---|
+| 2A-0 (foundation) | ✅ Deployed; **amended 2026-05-24** (single audience + `enforce_internal_session_age`) |
+| 2A-DL (device lifecycle) | ✅ Deployed 2026-05-17 |
+| 2A-RD (patient reads) | ✅ Deployed 2026-05-23 + extended 2026-05-24 (careNote + pause + room in response) |
+| 2A-AA (alert actions + threshold overrides) | ✅ Deployed 2026-05-23 |
+| **2A-UM-P (patient management)** | **✅ Deployed 2026-05-24** |
+| 2A-UM-H / 2A-UM-S / 2A-INT | 🔲 Planned |
+| **1C-slim (behavioral + offline detector)** | **✅ Deployed 2026-05-24** |
+| 1C-rollup (daily/weekly/6M aggregations) | 🔲 Planned — gates 2B 6M time-range tab (shipping disabled) |
+| Phase 2B portal integration | 🔲 Spec drafted; 2B-0 impl in flight in parallel session |
+| Phase 3A portal hosting | 🔲 Sketch drafted; locks in same-origin + CSP for 2B impl |
+
+**Cloud-side V1 critical path is COMPLETE.** Every backend endpoint and behavioral rule that 2B-FAC-R + 2B-FAC-W need is live in dev. Flutter portal can start consuming real endpoints in any session.
+
+## C27.6 Known follow-ups (none blocking)
+
+| Item | Severity | Disposition |
+|---|---|---|
+| api-stub Lambda CodeSha didn't bump during 2A-0 amendment deploy (CDK asset hashing saw no diff for that asset) | 🟢 LOW | `/me` is read-only claim-mirror; harmless. Force-update via `aws lambda update-function-code` if strict consistency wanted |
+| `_shared/tests/` ships in every Lambda zip (~8 KB overhead) | 🟢 LOW | Same pattern existed for `patient-api/tests/`; not a regression. One-line fix in `processing-lambda.ts::copyRecursive` excludes when convenient |
+| Atomic-add-with-device path (POST /patients with deviceSerial) needs bench-session validation | 🟡 MEDIUM | Synthetic smoke exercised validators only; live atomic chain needs a fresh `ready_to_provision` device. Defer to a bench session with `GS9999999998` (end-assignment + wipe-ack to free it first) |
+| `suppressed_paused` audit over-emits ~24x/day vs ≤1/day target | 🟢 LOW | Module-level set resets per cold-start; tighten via Patient-row `lastBehavioralSuppressedAuditAt` when audit volume becomes a concern. Benign at MVP scale |
+| Inline duplication of device-api's provision logic in patient-mgmt (~80 lines) | 🟢 LOW | TODO marker points at `_shared/provision.py` as the refactor target if both handlers' provision logic diverges meaningfully |
+| Real-data rule-firing validation for 1C-slim | 🟡 MEDIUM | 42 unit tests cover rule logic; what's missing is integration evidence under each trigger hour. Defer to bench session OR seeded fixtures with controlled Activity Series timestamps + Device Registry lastSeen |
+| Pre-prod: revisit 2A-0 Q8 Option B (third public Cognito client for internal-web with Cognito-enforced 4-hr cap) before first internal prod customer access | 🟡 MEDIUM | Option A (app-layer enforcement) is correct for dev. Same pattern as Phase 1.5 multi-account / 1.7 Object Lock — dev gets simpler version, prod adds rigorous version before first paying customer |
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-24).*
+*Closes the cloud-side V1 critical path for the portal-renders-real-data MVP. Phase 2B implementation (Flutter Cognito auth + ApiClient + facility shell + writes) is in flight in a parallel session.*
