@@ -91,6 +91,33 @@ device health, and time-critical events through a Flutter web dashboard.
 | **Observability** | Lambda Powertools, X-Ray, CloudWatch dashboards/alarms |
 | **Audit** | Dedicated CloudWatch Log Group + S3 (Object Lock) for immutable application audit trail |
 
+### Local Development Environment
+
+| | |
+|---|---|
+| **Portal repo path** | `~/Documents/gosteady-portal/` |
+| **Firmware repo path** | `~/Documents/gosteady-firmware/` |
+| **GitHub remote (portal)** | `https://github.com/Jabl1629/GoSteadyPortal.git` |
+| **GitHub remote (firmware)** | `https://github.com/Jabl1629/gosteady-firmware.git` |
+| **Active dev branch** | `feature/infra-scaffold` |
+
+**iCloud → local migration (2026-05-23):** the portal repo was previously
+hosted under `~/Library/Mobile Documents/com~apple~CloudDocs/Documents/GoSteady/gosteady-portal/`
+(iCloud Drive sync). iCloud Drive's lazy-fetch + on-demand
+materialization made `npm install` and `tsc` builds intermittently
+hang for minutes — typically 5–15 min for a fresh `tsc -p tsconfig.json`
+on a cold node cache, vs **2 seconds** on local APFS. Migration via
+fresh `git clone` into `~/Documents/` (avoids the file-state risks of
+copying iCloud-evicted placeholders). Performance delta confirmed on
+2026-05-23: `npm install` 7.3 s, `tsc` 2.0 s, `cdk diff` (3 stacks)
+47 s. Spec for the migration risk analysis + recovery procedure lives
+in the session transcript chapter "iCloud → local migration".
+
+> **For future contributors:** if you clone elsewhere (e.g., a CI runner
+> or another developer machine), avoid iCloud Drive / OneDrive / Dropbox
+> for the working tree. node_modules + the TypeScript compile path are
+> sensitive to FS sync daemons. Local APFS only.
+
 ---
 
 ## 3. Architecture Overview
