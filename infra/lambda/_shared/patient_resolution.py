@@ -43,6 +43,13 @@ class PatientContext:
     # Threshold Detector merges over defaults from _shared/thresholds.py.
     # Other consumers (activity-processor, alert-handler) ignore this field.
     thresholds: dict | None = None
+    # Phase 2A-UM-P: Patient.notificationsPaused map populated by
+    # patient-mgmt POST /pause. Consumers check via _shared.pause_check.
+    # is_currently_paused({"notificationsPaused": ctx.notificationsPaused}).
+    # Threshold detector + behavioral detector skip evaluation if paused;
+    # activity-processor auto-resumes by removing this attribute when
+    # fresh activity arrives.
+    notificationsPaused: dict | None = None
 
 
 def _find_active_assignment(serial: str) -> dict | None:
@@ -85,6 +92,9 @@ def resolve_patient(serial: str) -> PatientContext | None:
     raw_thresholds = patient.get("thresholds")
     thresholds = dict(raw_thresholds) if isinstance(raw_thresholds, dict) and raw_thresholds else None
 
+    raw_pause = patient.get("notificationsPaused")
+    pause = dict(raw_pause) if isinstance(raw_pause, dict) and raw_pause else None
+
     return PatientContext(
         patientId=str(patient_id),
         clientId=str(patient.get("clientId") or assignment.get("clientId") or ""),
@@ -93,4 +103,5 @@ def resolve_patient(serial: str) -> PatientContext | None:
         timezone=str(patient.get("timezone") or "UTC"),
         deviceSerial=serial,
         thresholds=thresholds,
+        notificationsPaused=pause,
     )
