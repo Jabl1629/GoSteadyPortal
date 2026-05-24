@@ -1,0 +1,2 @@
+# Phase 2A-UM-P patient-mgmt Lambda — Powertools from layer (Phase 1.6);
+# boto3 from Lambda runtime. Intentionally empty.

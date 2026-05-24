@@ -56,6 +56,17 @@ AUDIT_CENSUS_ROSTER_READ = "census.roster.read"
 AUDIT_PATIENT_THRESHOLDS_READ = "patient.thresholds.read"  # Phase 2A-AA
 AUDIT_PATIENT_THRESHOLDS_UPDATE = "patient.thresholds.update"  # Phase 2A-AA: full before/after per spec L8
 
+# ── Patient management (Phase 2A-UM-P) ────────────────────────────────
+AUDIT_PATIENT_CREATED = "patient.created"  # POST /patients (atomic create + optional provision)
+AUDIT_PATIENT_CREATE_ROLLBACK = "patient.create_rollback"  # Patient row deleted after downstream provision failed
+AUDIT_PATIENT_UPDATE = "patient.update"  # PATCH /patients/{id} — name / room / cross-facility transfer
+AUDIT_PATIENT_DISCHARGE = "patient.discharge"  # POST /patients/{id}/discharge — cascades to device end-assignment via 2A-DL Lambda
+AUDIT_PATIENT_NOTIFICATIONS_PAUSE = "patient.notifications.pause"
+AUDIT_PATIENT_NOTIFICATIONS_RESUME_MANUAL = "patient.notifications.resume_manual"  # DELETE /pause
+AUDIT_PATIENT_NOTIFICATIONS_RESUME_AUTO = "patient.notifications.resume_auto"  # Activity Processor saw activity during pause window
+AUDIT_PATIENT_NOTIFICATIONS_SUPPRESSED_PAUSED = "patient.notifications.suppressed_paused"  # Detector skipped a paused patient (sampled ≤1/day/patient per spec L9)
+AUDIT_PATIENT_CARE_NOTE_UPDATE = "patient.care_note.update"  # PATCH /care-note (set/clear); full before/after per spec L14
+
 # ── Auth (Phase 0A-rev partial; Phase 2A wires up the rest) ───────────
 AUDIT_AUTH_LOGIN = "auth.login"
 AUDIT_AUTH_LOGIN_FAILED = "auth.login_failed"
@@ -110,6 +121,16 @@ KNOWN_AUDIT_EVENTS = frozenset(
         AUDIT_CENSUS_ROSTER_READ,
         AUDIT_PATIENT_THRESHOLDS_READ,
         AUDIT_PATIENT_THRESHOLDS_UPDATE,
+        # Phase 2A-UM-P:
+        AUDIT_PATIENT_CREATED,
+        AUDIT_PATIENT_CREATE_ROLLBACK,
+        AUDIT_PATIENT_UPDATE,
+        AUDIT_PATIENT_DISCHARGE,
+        AUDIT_PATIENT_NOTIFICATIONS_PAUSE,
+        AUDIT_PATIENT_NOTIFICATIONS_RESUME_MANUAL,
+        AUDIT_PATIENT_NOTIFICATIONS_RESUME_AUTO,
+        AUDIT_PATIENT_NOTIFICATIONS_SUPPRESSED_PAUSED,
+        AUDIT_PATIENT_CARE_NOTE_UPDATE,
         AUDIT_AUTH_LOGIN,
         AUDIT_AUTH_LOGIN_FAILED,
         AUDIT_AUTH_MFA_CHALLENGE,
