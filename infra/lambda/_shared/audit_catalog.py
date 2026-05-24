@@ -67,6 +67,9 @@ AUDIT_PATIENT_NOTIFICATIONS_RESUME_AUTO = "patient.notifications.resume_auto"  #
 AUDIT_PATIENT_NOTIFICATIONS_SUPPRESSED_PAUSED = "patient.notifications.suppressed_paused"  # Detector skipped a paused patient (sampled ≤1/day/patient per spec L9)
 AUDIT_PATIENT_CARE_NOTE_UPDATE = "patient.care_note.update"  # PATCH /care-note (set/clear); full before/after per spec L14
 
+# ── Behavioral detector (Phase 1C-slim) ──────────────────────────────
+AUDIT_BEHAVIORAL_DETECTOR_RUN = "behavioral.detector.run"  # One per cron invocation; summarizes counts (facilitiesEvaluated, patientsEvaluated, alertsWritten, ...)
+
 # ── Auth (Phase 0A-rev partial; Phase 2A wires up the rest) ───────────
 AUDIT_AUTH_LOGIN = "auth.login"
 AUDIT_AUTH_LOGIN_FAILED = "auth.login_failed"
@@ -131,6 +134,8 @@ KNOWN_AUDIT_EVENTS = frozenset(
         AUDIT_PATIENT_NOTIFICATIONS_RESUME_AUTO,
         AUDIT_PATIENT_NOTIFICATIONS_SUPPRESSED_PAUSED,
         AUDIT_PATIENT_CARE_NOTE_UPDATE,
+        # Phase 1C-slim:
+        AUDIT_BEHAVIORAL_DETECTOR_RUN,
         AUDIT_AUTH_LOGIN,
         AUDIT_AUTH_LOGIN_FAILED,
         AUDIT_AUTH_MFA_CHALLENGE,

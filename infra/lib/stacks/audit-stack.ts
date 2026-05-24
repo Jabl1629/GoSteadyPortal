@@ -183,6 +183,11 @@ export class AuditStack extends cdk.Stack {
       // patient.care_note.update. Bundled with the 2A-UM-P deploy
       // (Migration Pattern 18.8).
       `gosteady-${env}-patient-mgmt`,
+      // Phase 1C-slim (2026-05-24): behavioral-detector emits
+      // alert.synthetic.create (5 rule types) +
+      // patient.notifications.suppressed_paused +
+      // behavioral.detector.run (1 per cron invocation summary).
+      `gosteady-${env}-behavioral-detector`,
     ];
 
     const forwarderDestination = new logsDestinations.LambdaDestination(forwarder.function);
