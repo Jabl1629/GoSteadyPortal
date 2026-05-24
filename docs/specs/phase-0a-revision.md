@@ -35,7 +35,7 @@ Tracking what changes from the original [`phase-0a-auth.md`](phase-0a-auth.md):
 | A2: One user = one role | **Kept** (confirmed by product owner: no staff-also-family case) |
 | D2: Relationships table for caregiver↔walker links | **Replaced** | RoleAssignments table (PK: userId, single row per user with scoped IDs) |
 | D3: `linked_devices` on JWT for fast device list | **Replaced** | Scope-list approach (`facilities` / `censuses` claims) plus DDB lookup for family-viewer patient lists |
-| Token validity: 1h access, 30d refresh | **Replaced** | Customer client: 15-min idle / 30-day refresh. Internal client: 30-min idle / 4-hr absolute. |
+| Token validity: 1h access, 30d refresh | **Replaced** | Customer client: 15-min idle / 30-day refresh. Internal client: 30-min idle / 4-hr absolute. **Amended 2026-05-23** — under the unified-portal decision ([phase-2b-portal-integration.md](phase-2b-portal-integration.md) L1 + [phase-2a-foundation.md](phase-2a-foundation.md) Q8), browser-based internal users now sign in via Portal-Customer (15-min idle / 30-day refresh) with a 4-hr absolute cap enforced app-layer via `_shared/api_authz.enforce_internal_session_age`. Portal-Internal client retained for non-browser tools only. |
 
 ## Locked-In Requirements
 
@@ -48,7 +48,7 @@ Tracking what changes from the original [`phase-0a-auth.md`](phase-0a-auth.md):
 | L5 | One Client per customer user (hard rule); internal users belong to reserved `_internal` client | Architecture A5, T2, T6 | Tenancy boundary enforced at JWT layer |
 | L6 | Custom JWT claims: `clientId`, `role`, `facilities`, `censuses` | Architecture A4 | Authorizer fast path with no DDB lookup for common cases |
 | L7 | MFA **required** for `facility_admin`, `client_admin`, `internal_*` roles; **optional** for `household_owner`, `caregiver`, `family_viewer`, `patient` | Architecture A7 | Cross-patient or cross-tenant authority requires it; D2C household primaries get softer friction since blast radius is one household |
-| L8 | Two App Clients (Customer + Internal) with distinct token lifetimes (15-min idle vs 30-min idle / 4-hr absolute) | Architecture A6 | Internal access blast radius cap |
+| L8 | Two App Clients (Customer + Internal) with distinct token lifetimes (15-min idle vs 30-min idle / 4-hr absolute). **Amended 2026-05-23** (Q8 of [phase-2a-foundation.md](phase-2a-foundation.md)): the JWT authorizer's audience list narrowed to Portal-Customer only; browser-based internal users sign in via Portal-Customer with a 4-hr absolute cap enforced app-layer (`_shared/api_authz.enforce_internal_session_age` called from `audit_middleware`). Portal-Internal client retained for non-browser tools (CLI / server-side admin) where the client secret can be handled safely. | Architecture A6 + 2A-0 Q8 | Internal access blast radius cap — original two-client model assumed all internal access was non-browser; unified-portal model accepted that single-URL UX trumps the marginal blast-radius reduction from a separate browser client, and the app-layer cap recovers the absolute-time discipline |
 | L9 | RoleAssignments table replaces Relationships; one row per user | Architecture §6 | Per-user scope record matches the one-role-per-user invariant |
 | L10 | RoleAssignments table encrypted with IdentityKey CMK | Phase 1.5 | Identity-bearing data |
 | L11 | Internal users created via admin-create-user only (no self-signup) | Architecture §4 Internal Access | Provisioning is intentional, audited |
@@ -180,7 +180,7 @@ Tracking what changes from the original [`phase-0a-auth.md`](phase-0a-auth.md):
 |----------|--------|
 | `gosteady-{env}-users` Cognito User Pool | Modified: add custom attributes (`clientId`, `facilities`, `censuses`); add 6 groups; configure MFA `OPTIONAL` with TOTP enabled; attach Pre-Token Generation Lambda trigger |
 | `Portal-Customer` App Client (existing ID retained) | Modified: rename, change token validity to 15 min |
-| `Portal-Internal` App Client | New: 30-min idle / 4-hr absolute, with client secret |
+| `Portal-Internal` App Client | New: 30-min idle / 4-hr absolute, with client secret. **Amended 2026-05-23** — no longer in the API Gateway JWT authorizer's audience list per 2A-0 Q8. Reserved for non-browser tools (CLI / server-side admin scripts). Browser-based internal users sign in via Portal-Customer per the unified-portal decision |
 | `gosteady-{env}-cognito-pre-token` Lambda | New: Python 3.12 ARM64, IAM grants for RoleAssignments + IdentityKey CMK |
 | `gosteady-{env}-role-assignments` DynamoDB table | New: see schema above; CMK-encrypted |
 | `gosteady-{env}-relationships` DynamoDB table | Removed |
@@ -282,7 +282,7 @@ Tracking what changes from the original [`phase-0a-auth.md`](phase-0a-auth.md):
 | T5 | Customer `client_admin` signs in WITHOUT MFA enrolled | SRP auth | Pre-Token Lambda denies with `MFA_REQUIRED` | Pending |
 | T6 | Customer `client_admin` enrolls TOTP, signs in WITH MFA | SRP + MFA challenge | Tokens returned with admin claims | Pending |
 | T7 | Internal admin user provisioned via `admin-create-user` (no self-signup) | CLI | User exists in `internal_admin` group, RoleAssignment with `clientId=_internal` | Pending |
-| T8 | Internal admin signs in via Portal-Internal client with MFA | SRP + MFA | Tokens returned, ID-token has `custom:clientId=_internal`, `custom:role=internal_admin` | Pending |
+| T8 | Internal admin signs in via Portal-Internal client with MFA | SRP + MFA | Tokens returned, ID-token has `custom:clientId=_internal`, `custom:role=internal_admin`. **Amended 2026-05-23** (2A-0 Q8): for **browser** flows, this test now exercises sign-in via Portal-Customer with `internal_admin` user (same claim shape; ID token is accepted by the unified JWT authorizer). Portal-Internal client testing is reserved for non-browser flows | Pending |
 | T9 | Internal admin token absolute expiry after 4 hr | Wait, refresh repeatedly for 4 hr | Refresh rejected after absolute window | Pending |
 | T10 | User with no RoleAssignment record signs in | SRP auth | Pre-Token Lambda denies with `NO_ROLE_ASSIGNED` | Pending |
 | T11 | Internal role user with `clientId != _internal` in their RoleAssignment | (set up edge case in DDB) | Pre-Token Lambda denies with `TENANCY_VIOLATION` | Pending |
