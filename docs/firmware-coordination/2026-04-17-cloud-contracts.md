@@ -7897,3 +7897,77 @@ Honors `notificationsPaused` (skip-when-paused, same `_shared/pause_check.py` he
 
 *Entry owner: Claude (portal session, 2026-05-24).*
 *Closes the cloud-side V1 critical path for the portal-renders-real-data MVP. Phase 2B implementation (Flutter Cognito auth + ApiClient + facility shell + writes) is in flight in a parallel session.*
+
+---
+
+# §C28 — Cloud-side fixes from 2B-FAC-R real-data smoke (2026-05-25)
+
+Entry owner: Claude (portal session) | Trigger: bench-testing 2B-FAC-R Patient Detail against GS9999999998 live data.
+
+The first end-to-end smoke against real device data surfaced two cloud-side issues. CR-1 is a real bug with a fix landed in this commit. CR-2 turned out to be stale-data, no code change.
+
+## C28.1 — CR-1: `currentDevice.lastSeen` stuck at `firstHeartbeatAt`
+
+**Symptom:** Patient Detail showed "Last seen: 8d ago" for `pt_bench_98` despite obvious recent activity from GS9999999998 (hourly heartbeats + 12 walking sessions today).
+
+**Root cause:** `Device Registry.lastSeen` was `null` for the device. The patient-api fallback (`device.get("lastSeen") or device.get("firstHeartbeatAt")`) cascaded to `firstHeartbeatAt = 2026-05-18T00:26:14Z` — the original provisioning timestamp, never updated since.
+
+`heartbeat-processor` writes `lastSeen` to **Shadow.reported.lastSeen** only (line 97); the Device Registry row was never written. So the registry's `lastSeen` field stayed null forever for live devices — making the patient-api fallback chain misleading.
+
+**Fix:** `heartbeat-processor/handler.py` line ~592 — after Shadow update succeeds, also write `lastSeen` to the Device Registry row via `_device_tbl.update_item`. Best-effort (non-fatal on failure); Shadow remains the authoritative live-state source.
+
+```python
+try:
+    _device_tbl.update_item(
+        Key={"serialNumber": serial},
+        UpdateExpression="SET lastSeen = :ls",
+        ExpressionAttributeValues={":ls": event["ts"]},
+    )
+except ClientError as e:
+    logger.warning("device_lastseen_update_failed", extra=...)
+```
+
+**No IAM change needed** — heartbeat-processor already has `dynamodb:UpdateItem` on Device Registry (used by activation-ack + wipe-ack paths). No reader changes — patient-api's existing fallback chain becomes correct (`firstHeartbeatAt` only fires for devices that have never heartbeated, which is the correct semantic).
+
+**Deploy + backfill:**
+- Deploy heartbeat-processor: `cdk deploy GoSteady-Dev-Processing --context env=dev`
+- After the next GS9999999998 heartbeat (≤1 hour), Device Registry.lastSeen populates. Patient Detail "Last seen" becomes correct.
+- **Optional one-off backfill** (for immediate fix before the next heartbeat): direct DDB UpdateItem to set `lastSeen` = latest sessionEnd from Activity Series for any device whose lastSeen is null. Not strictly required.
+
+**Portal-side workaround status:** the `LiveFacilityRepository.deviceFor` derives lastSeen from `max(sessionEnd)` of the cached 24h activity. We're keeping this as defensive belt-and-suspenders — it correctly handles the case where Shadow is fresh but the next heartbeat hasn't landed yet to update Device Registry. Could downgrade to a "only if dev.lastSeen is older than the latest sessionEnd" check in a future tighten-up commit, but the current behavior is fine.
+
+## C28.2 — CR-2: activity `date` field appeared UTC, not facility-local (analysis: no code bug)
+
+**Symptom:** `GET /api/v1/patients/pt_bench_98/activity?range=24h` returned sessions with `date: "2026-05-26"` (UTC) and `timezone: "UTC"` despite the patient configured with `timezone: "America/Denver"`.
+
+**Investigation:**
+- `activity-processor/handler.py` line 239: `"date": _local_date(ss, patient.timezone)` — correct
+- `activity-processor/handler.py` line 240: `"timezone": patient.timezone` — correct
+- `patient_resolution.py` line 103: `timezone=str(patient.get("timezone") or "UTC")` — defaults to UTC if Patient row has no timezone field
+- `patient-mgmt/handler.py` line 327: POST /patients inherits timezone from facility — correct for new patients
+
+**Conclusion:** Cloud code is correct. The issue was data lag — pt_bench_98's existing activity sessions were processed BEFORE the seed-dev-pilot script set `timezone = "America/Denver"` on the patient row. PatientContext.timezone resolved to "UTC" for those invocations.
+
+**Resolution:** No cloud code change needed. New activity sessions (processed after seed-dev-pilot ran) will correctly use America/Denver. Existing activity rows have stale UTC dates but the portal's SessionAdapter (which ignores the server's `date` field and buckets by local hour of `sessionStart`) handles this correctly.
+
+**Soft improvement (deferred):** resolve_patient could fall back to Facility.timezone via Organizations lookup if Patient.timezone is unset, with per-Lambda-warm-instance caching. Marginal value at MVP — only helps legacy patients without timezone, and patient-mgmt already handles new patients correctly. File as a future hardening commit if any legacy data surfaces problems.
+
+**Portal-side workaround status:** keeping SessionAdapter's local-hour bucketing in place. Defensive against any future timezone-misconfigured patients + cleanly handles the existing legacy data.
+
+## C28.3 — Operational state after this entry
+
+| Item | Status |
+|---|---|
+| heartbeat-processor lastSeen-mirror code | ✅ Written + committed; deploy pending user availability |
+| pt_bench_98 timezone | ✅ Set to America/Denver via seed-dev-pilot 2026-05-25 |
+| Patient Detail "Last seen" accuracy on live portal | 🟡 Shows portal-fallback value (latest sessionEnd) until heartbeat-processor deploys + GS9999999998 next heartbeat lands |
+| Activity session date accuracy for pt_bench_98 | 🟡 New sessions correct; pre-2026-05-25-evening sessions stale-UTC. Portal workaround handles both |
+| Portal-side workarounds for CR-1 + CR-2 | ✅ Keep as defensive belt-and-suspenders (no removal scheduled) |
+
+## C28.4 — Coord doc for next sync
+
+Both items closed as far as this entry tracks. CR-1 deployment is a follow-up — owner: whoever next deploys to dev (no urgency; portal fallback handles the gap). CR-2 closed as no-action-needed.
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-25). No firmware impact; cloud-side state-correctness improvement only.*

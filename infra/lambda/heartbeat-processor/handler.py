@@ -590,6 +590,28 @@ def handler(event: dict, _context):
         metrics.add_metric(name="shadow_update_error_count", unit=MetricUnit.Count, value=1)
         raise
 
+    # Mirror lastSeen into Device Registry — 2A-RD /patients/{id}
+    # surfaces this in currentDevice.lastSeen. Without this write, the
+    # registry row's lastSeen stayed null forever (Shadow was the only
+    # writer), and patient-api's `lastSeen or firstHeartbeatAt` fallback
+    # returned the stale firstHeartbeatAt value, showing "8d ago" on
+    # actively-heartbeating devices (CR-1, see coord doc).
+    #
+    # Best-effort: Shadow remains the authoritative live-state source;
+    # a failed Device Registry write is non-fatal so we don't lose the
+    # heartbeat itself.
+    try:
+        _device_tbl.update_item(
+            Key={"serialNumber": serial},
+            UpdateExpression="SET lastSeen = :ls",
+            ExpressionAttributeValues={":ls": event["ts"]},
+        )
+    except ClientError as e:
+        logger.warning(
+            "device_lastseen_update_failed",
+            extra={"serial": serial, "error": str(e)},
+        )
+
     metrics.add_metric(name="heartbeat_count", unit=MetricUnit.Count, value=1)
 
     _emit_device_telemetry_metrics(serial, event)

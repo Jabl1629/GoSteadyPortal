@@ -574,6 +574,8 @@ If 2A-RD ships a query bug that produces wrong results (e.g., wrong-tenant leak)
 
 **Decision:** ⏳ **Defer to a v1.1 inside the same phase if the dashboard needs it.** Initial pass: return `currentDevice.lastSeen` from Device Registry (already there). If the dashboard explicitly wants live battery/signal on the patient detail (vs. on a separate "device health" view), add the Shadow call. Smallest workable surface first.
 
+**Amendment 2026-05-25 (coord §C28):** "already there" was aspirational — `Device Registry.lastSeen` was actually never written by any Lambda (`heartbeat-processor` only wrote to Shadow.reported.lastSeen). The patient-api fallback (`device.get("lastSeen") or device.get("firstHeartbeatAt")`) cascaded to firstHeartbeatAt for every live device, showing stale provisioning timestamps. Fixed in heartbeat-processor: every heartbeat now also writes `lastSeen` to Device Registry. patient-api code unchanged — its fallback chain is now correct (firstHeartbeatAt only fires for never-heartbeated devices). Shadow-state expansion (battery + signal on the patient response) still deferred. See coord §C28.1 for the full investigation.
+
 ---
 
 ### Q4. Alert filter — what's the default? (DECIDED)
