@@ -42,23 +42,29 @@ class SessionAdapter {
     }).toList(growable: false);
   }
 
-  /// Aggregate sessions into a single [DailyActivity] for "today" —
-  /// any session whose `date` matches the current facility date is
-  /// folded in. If `sessions` is empty or no sessions match, returns
-  /// a zero-activity DailyActivity for the current date.
+  /// Aggregate ALL sessions in the response into a single
+  /// [DailyActivity] for "today." The server already filtered to the
+  /// 24h window — we trust that scoping and sum every session.
+  ///
+  /// Sessions can span two UTC date buckets (e.g., evening in Mountain
+  /// Time = early morning UTC the next day). Picking just one date
+  /// would lose the other half. Caller wants the total — give them
+  /// the total.
+  ///
+  /// Hour buckets use the LOCAL hour-of-day of `sessionStart` (after
+  /// `.toLocal()`). The local-tz "today" is approximate — until the
+  /// cloud-side activity-processor emits sessions with facility-local
+  /// timestamps, this is the closest the client can get.
   static DailyActivity toToday(
     List<ActivitySession> sessions, {
     DateTime? referenceDate,
   }) {
-    final ref = referenceDate ?? DateTime.now();
+    final ref = (referenceDate ?? DateTime.now()).toLocal();
     if (sessions.isEmpty) {
       return DailyActivity(date: ref, hours: const []);
     }
-    // Prefer the most-recent date present in the sessions (server-side
-    // "today" boundary may differ from client clock — trust the data).
-    final daily = toDailyList(sessions);
-    if (daily.isEmpty) return DailyActivity(date: ref, hours: const []);
-    return daily.last;
+    final hours = _bucketByLocalHour(sessions, ref);
+    return DailyActivity(date: ref, hours: hours);
   }
 
   /// Aggregate the daily list into per-week buckets (used by the demo's
@@ -94,6 +100,64 @@ class SessionAdapter {
   }
 
   // ── Helpers ─────────────────────────────────────────────────────
+
+  /// Bucket sessions into 24 hourly slots by **local hour-of-day** —
+  /// ignores the date entirely. Used by [toToday] which gets all
+  /// sessions from the server's 24h-windowed response.
+  ///
+  /// Each session's hours are derived from `sessionStart.toLocal().hour`
+  /// (after Dart converts the UTC timestamp to system tz). Sessions
+  /// spanning multiple local hours contribute proportionally by minute.
+  static List<HourlyActivity> _bucketByLocalHour(
+    List<ActivitySession> sessions,
+    DateTime referenceDay,
+  ) {
+    final hoursSteps = List<double>.filled(24, 0);
+    final hoursDist = List<double>.filled(24, 0);
+    final hoursMin = List<double>.filled(24, 0);
+
+    for (final s in sessions) {
+      final start = s.sessionStart.toLocal();
+      final end = s.sessionEnd.toLocal();
+      final totalMs = end.difference(start).inMilliseconds;
+      if (totalMs <= 0) continue;
+
+      var cursor = start;
+      while (cursor.isBefore(end)) {
+        final h = cursor.hour;
+        final nextBoundary = DateTime(
+          cursor.year,
+          cursor.month,
+          cursor.day,
+          cursor.hour + 1,
+        );
+        final sliceEnd = nextBoundary.isBefore(end) ? nextBoundary : end;
+        final sliceMs = sliceEnd.difference(cursor).inMilliseconds;
+        final frac = sliceMs / totalMs;
+
+        hoursSteps[h] += s.steps * frac;
+        hoursDist[h] += s.distanceFt * frac;
+        hoursMin[h] += s.activeMinutes * frac;
+
+        cursor = sliceEnd;
+      }
+    }
+
+    final dayMidnight = DateTime(
+      referenceDay.year,
+      referenceDay.month,
+      referenceDay.day,
+    );
+
+    return List<HourlyActivity>.generate(24, (h) {
+      return HourlyActivity(
+        hour: dayMidnight.add(Duration(hours: h)),
+        steps: hoursSteps[h].round(),
+        distanceFt: hoursDist[h],
+        timeInMotionMinutes: hoursMin[h].round(),
+      );
+    });
+  }
 
   /// Bucket sessions into 24 hourly slots for [dayStart]'s day.
   ///

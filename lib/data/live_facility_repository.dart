@@ -194,13 +194,31 @@ class LiveFacilityRepository implements FacilityRepository {
     // endpoint ships.
     final full = await _fetchPatientDetail(patientId);
     final dev = full.currentDevice;
+
+    // Cloud-side 2A-RD bug: `currentDevice.lastSeen` returns the value
+    // of `Device Registry.firstHeartbeatAt` instead of the actual most-
+    // recent payload timestamp. Workaround: also pull the 24h activity
+    // (cached or fresh) and use the latest sessionEnd if it's more
+    // recent. File: 2A-RD-follow-up to fix the response field. Until
+    // then this client-side fallback keeps "last seen" accurate.
+    final sessions = await _fetchActivity(patientId, ActivityRange.h24);
+    DateTime? bestLastSeen = dev?.lastSeen;
+    if (sessions.isNotEmpty) {
+      final latest = sessions
+          .map((s) => s.sessionEnd)
+          .reduce((a, b) => a.isAfter(b) ? a : b);
+      if (bestLastSeen == null || latest.isAfter(bestLastSeen)) {
+        bestLastSeen = latest;
+      }
+    }
+
     return DeviceHealth(
       serialNumber: dev?.serialNumber ?? 'unassigned',
       firmwareVersion: '—',
       sensorModel: 'BMI270',
       batteryMv: 3600, // stub: shows full until a real value arrives
       signalDbm: -80, // stub: shows ~70% bar
-      lastDataReceived: dev?.lastSeen ?? DateTime.now(),
+      lastDataReceived: bestLastSeen ?? DateTime.now(),
       heartbeatIntervalHours: 1,
     );
   }
