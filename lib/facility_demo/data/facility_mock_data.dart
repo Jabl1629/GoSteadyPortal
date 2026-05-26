@@ -4,6 +4,7 @@ import '../../data/facility_repository.dart';
 import '../../models/activity.dart';
 import '../../models/device.dart';
 import '../models/facility.dart';
+import '../models/notification.dart';
 import '../models/patient.dart';
 import '../models/unit.dart';
 import 'facility_seed.dart';
@@ -130,6 +131,16 @@ class FacilityMockData implements FacilityRepository {
       medianPrior23Day: medPrior,
       lastDataAgo: DateTime.now().difference(gen.device.lastDataReceived),
     );
+  }
+
+  /// Demo notifications come from the local [NotificationEngine] —
+  /// three rules evaluated against [notificationContextFor]. Per
+  /// phase-2b-fac-r L6, this engine is bypassed entirely in the live
+  /// build, where notifications come from the server's Alert History.
+  @override
+  Future<List<PatientNotification>> notificationsFor(String patientId) async {
+    final ctx = await notificationContextFor(patientId);
+    return const NotificationEngine().evaluate(patientId, ctx);
   }
 
   /// All stats the list-view table needs for one patient, derived from

@@ -350,6 +350,7 @@ class _DataRowState extends State<_DataRow> {
                 child: _NeedsReviewCell(
                   count: r.activeNotifications.length,
                   severity: r.highestSeverity,
+                  headlineLabel: _headlineLabel(r.activeNotifications),
                 ),
               ),
               _cell(
@@ -449,6 +450,19 @@ Color _stepsColor(int steps) {
   return AppTheme.textDark;
 }
 
+/// Picks the rule-name label for the most-prominent notification —
+/// prefers a critical-severity entry, falling back to the first entry.
+/// Per phase-2b-fac-r L6, the Census badge shows the rule name (not
+/// just a count); if multiple alerts are open, this picks the highest-
+/// severity headline and the cell appends "· N".
+String? _headlineLabel(List<PatientNotification> notifications) {
+  if (notifications.isEmpty) return null;
+  for (final n in notifications) {
+    if (n.severity == NotificationSeverity.critical) return n.type.label;
+  }
+  return notifications.first.type.label;
+}
+
 // ── Cell widgets ───────────────────────────────────────────────────────
 
 class _ResidentCell extends StatelessWidget {
@@ -493,9 +507,20 @@ class _ResidentCell extends StatelessWidget {
 }
 
 class _NeedsReviewCell extends StatelessWidget {
-  const _NeedsReviewCell({required this.count, this.severity});
+  const _NeedsReviewCell({
+    required this.count,
+    this.severity,
+    this.headlineLabel,
+  });
   final int count;
   final NotificationSeverity? severity;
+
+  /// Most-prominent unacked notification's display label
+  /// (e.g. "Battery critical"). Per phase-2b-fac-r L6, the badge text
+  /// is the rule name, not just a count. Null falls back to count-only
+  /// rendering for backwards compatibility (e.g. legacy demo tiles
+  /// without a label resolver).
+  final String? headlineLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -512,6 +537,9 @@ class _NeedsReviewCell extends StatelessWidget {
     final color = severity == NotificationSeverity.critical
         ? AppTheme.statusAlert
         : AppTheme.statusWarn;
+    final label = headlineLabel == null
+        ? count.toString()
+        : (count > 1 ? '${headlineLabel!} · $count' : headlineLabel!);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
       decoration: BoxDecoration(
@@ -519,7 +547,9 @@ class _NeedsReviewCell extends StatelessWidget {
         borderRadius: BorderRadius.circular(100),
       ),
       child: Text(
-        count.toString(),
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
         style: TextStyle(
           color: color,
           fontSize: 13,

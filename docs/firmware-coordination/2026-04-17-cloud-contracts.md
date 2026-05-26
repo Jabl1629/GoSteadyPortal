@@ -8086,3 +8086,42 @@ Next portal-side work item TBD per user direction. Cloud-side V1 critical path r
 ---
 
 *Entry owner: Claude (portal session, 2026-05-26). No firmware impact; portal-only polling primitive.*
+
+# §C30 — 2B-FAC-R notification engine swap to server alertType (2026-05-26)
+
+Entry owner: Claude (portal session) | Trigger: 2B-FAC-R umbrella L6 — render server-authoritative notification rule-names in place of the client-side three-rule engine. Closes the umbrella's A3 worry. **Zero firmware-facing impact** — portal renders existing Alert History entries; no MQTT contract or cloud-Lambda change.
+
+## C30.1 — What landed
+
+- New `Future<List<PatientNotification>> notificationsFor(String patientId)` method on `FacilityRepository`. Demo impl delegates to the existing `NotificationEngine` (unchanged three-rule behavior); live impl reads cached `/alerts?status=unacknowledged` and maps each `alertType` to a `NotificationType` enum value per the L6 spec table.
+- `lib/facility_demo/models/notification.dart` — extended `NotificationType` from 3 enum cases to 10: original three (`noActivityToday`, `belowTypical`, `decliningTrend`), 1C-slim offline pair (`deviceOffline`, `deviceSilent`), 1B-rev Threshold Detector quad (`batteryCritical`, `batteryLow`, `signalLost`, `signalWeak`), plus `other` catch-all. Each carries a display label (e.g. "Battery critical") via `type.label`.
+- `lib/data/live_facility_repository.dart` — top-level `_mapAlertType` + `_mapSeverity` helpers mirror the spec's L6 mapping table. `_formatDetail` builds a relative-time string ("Triggered 38 min ago") so the notification cards have a useful sub-line.
+- `lib/facility_demo/widgets/patient_list_view.dart` — Census `_NeedsReviewCell` now takes an optional `headlineLabel` and renders "Battery critical · 45" instead of just "45". File-scope `_headlineLabel(notifications)` picks the most-prominent rule name (prefers critical-severity, falls back to first). The tile view's caption was already rule-name-based so no change needed there.
+- `lib/facility_demo/data/notification_engine.dart` — `notificationsForPatient(data, id)` global helper now one-line-delegates to `data.notificationsFor(id)`. Retained so existing call sites in `patient_census_view.dart` + `patient_detail_view.dart` + `notification_review_panel.dart` don't need to chase the rename.
+
+## C30.2 — Live validation against pt_bench_98
+
+The bench unit's firmware reports `battery_pct=0` on every hourly heartbeat (no SoC fuel gauge on AAs), so threshold-detector creates a `battery_critical` alert each hour. 45 unack alerts in Alert History at the time of validation.
+
+- **Census Notifications cell:** renders "Battery critical · 45" (red badge color, ellipsized at narrow column widths to "Battery..."), plus the red severity dot beside the patient name in the Resident column.
+- **Patient Detail Notification Review panel:** header reads "NOTIFICATIONS · 45 AWAITING REVIEW"; each alert row shows "Battery critical" title with "Triggered 38 min ago / 1h ago / 2h ago" subtitle. Ack button is mock-bound for now (live wiring is 2B-FAC-W).
+
+Demo build smoke (`flutter build web -t lib/facility_demo/main_demo.dart --dart-define=BUILD_MODE=demo`) compiled cleanly + the marketing demo continues to use the engine — verified by inspection (no engine code paths touched).
+
+## C30.3 — Subset status after this entry
+
+| 2B-FAC-R follow-up | Status |
+|---|---|
+| Initial impl slice | ✅ deployed (2026-05-25, validated 2026-05-26) |
+| L3 + L11 PollingController + lifecycle pause | ✅ deployed (2026-05-26, coord §C29) |
+| **L6 notification engine swap to alertType** | ✅ **deployed (2026-05-26) — this entry** |
+| L5 lazy-per-row activity throttle | 🔲 mostly invisible at single-patient bench scale |
+| L12 30s TTL caching + in-flight-future dedupe | 🔲 would collapse duplicate `?range=30d` fan-out fetches on each detail tick |
+
+## C30.4 — Coord doc for next sync
+
+V1 critical-path notification rendering is now server-authoritative end-to-end. Future server-side alert types (added to 1C or threshold-detector) need either an extended L6 mapping in `_mapAlertType` or fall through to `NotificationType.other` ("Alert" generic label) — gracefully degraded.
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-26). No firmware impact; portal-only rendering swap.*

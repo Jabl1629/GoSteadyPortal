@@ -1,6 +1,7 @@
 import '../facility_demo/data/facility_mock_data.dart' show PatientRowStats;
 import '../facility_demo/data/notification_engine.dart';
 import '../facility_demo/models/facility.dart';
+import '../facility_demo/models/notification.dart';
 import '../facility_demo/models/patient.dart';
 import '../facility_demo/models/unit.dart';
 import '../models/activity.dart';
@@ -82,6 +83,18 @@ abstract class FacilityRepository {
   /// renders alertType-mapped badges directly, bypassing this engine
   /// at the screen level; this method is retained for compatibility).
   Future<NotificationContext> notificationContextFor(String patientId);
+
+  /// Active (unacknowledged) notifications for the patient.
+  ///
+  /// - **Demo impl:** evaluates the three local rules in
+  ///   [NotificationEngine] against [notificationContextFor].
+  /// - **Live impl:** reads the cached `/alerts?status=unacknowledged`
+  ///   response and maps each `alertType` to a [NotificationType] via
+  ///   the spec's L6 mapping table. The live build bypasses
+  ///   [NotificationEngine] entirely — server is the source of truth.
+  ///
+  /// Per phase-2b-fac-r-facility-reads.md L6.
+  Future<List<PatientNotification>> notificationsFor(String patientId);
 
   /// All stats the list-view table needs for one patient.
   Future<PatientRowStats> rowStatsFor(String patientId);

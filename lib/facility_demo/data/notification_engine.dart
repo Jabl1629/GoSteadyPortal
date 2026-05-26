@@ -75,13 +75,16 @@ class NotificationEngine {
   }
 }
 
-/// Convenience that wires FacilityRepository into the engine for a
-/// patient. Async per phase-2b-fac-r L2 — the live impl needs to fetch
-/// the alerts response to derive the context.
+/// Convenience that delegates to the repository's polymorphic
+/// notifications method. Demo impl returns engine-evaluated rules;
+/// live impl returns alertType-mapped notifications per
+/// phase-2b-fac-r L6.
+///
+/// Retained as a free function so existing call sites
+/// (`patient_census_view.dart`, `patient_detail_view.dart`,
+/// `notification_review_panel.dart`) don't need to chase the rename.
 Future<List<PatientNotification>> notificationsForPatient(
   FacilityRepository data,
   String patientId,
-) async {
-  final ctx = await data.notificationContextFor(patientId);
-  return const NotificationEngine().evaluate(patientId, ctx);
-}
+) =>
+    data.notificationsFor(patientId);

@@ -1,8 +1,30 @@
-/// One of the three notification rules from the demo spec.
+/// Notification rule types rendered in the Census + Patient Detail badges.
+///
+/// The original demo spec named three (`noActivityToday`, `belowTypical`,
+/// `decliningTrend`); 1C-slim + 1B-rev Threshold Detector added six more
+/// alert types into the Alert History table. The live build maps each
+/// server-side `alertType` value to one of these enum cases per
+/// phase-2b-fac-r-facility-reads.md §Notification badge mapping (L6).
+/// Demo mode keeps emitting just the original three via
+/// [NotificationEngine].
 enum NotificationType {
+  // 1C-slim behavioral rules (deployed 2026-05-24)
   noActivityToday,
   belowTypical,
-  decliningTrend;
+  decliningTrend,
+
+  // 1C-slim offline rules
+  deviceOffline,
+  deviceSilent,
+
+  // 1B-rev Threshold Detector rules (deployed 2026-04-27)
+  batteryCritical,
+  batteryLow,
+  signalLost,
+  signalWeak,
+
+  // Catch-all for unknown alertType values (forward as generic "Alert").
+  other;
 
   String get label {
     switch (this) {
@@ -12,6 +34,20 @@ enum NotificationType {
         return 'Below typical activity';
       case NotificationType.decliningTrend:
         return 'Declining trend';
+      case NotificationType.deviceOffline:
+        return 'Device offline';
+      case NotificationType.deviceSilent:
+        return 'Device silent';
+      case NotificationType.batteryCritical:
+        return 'Battery critical';
+      case NotificationType.batteryLow:
+        return 'Battery low';
+      case NotificationType.signalLost:
+        return 'Signal lost';
+      case NotificationType.signalWeak:
+        return 'Signal weak';
+      case NotificationType.other:
+        return 'Alert';
     }
   }
 }

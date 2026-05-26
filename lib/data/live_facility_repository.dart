@@ -4,6 +4,7 @@ import '../api/session_adapter.dart';
 import '../facility_demo/data/facility_mock_data.dart' show PatientRowStats, Trend;
 import '../facility_demo/data/notification_engine.dart';
 import '../facility_demo/models/facility.dart';
+import '../facility_demo/models/notification.dart';
 import '../facility_demo/models/patient.dart';
 import '../facility_demo/models/unit.dart';
 import '../models/activity.dart';
@@ -223,6 +224,28 @@ class LiveFacilityRepository implements FacilityRepository {
     );
   }
 
+  /// Live notifications come from the server's Alert History — one
+  /// [PatientNotification] per unacknowledged alert, with the rule-name
+  /// label resolved from the `alertType` field per the L6 mapping. The
+  /// demo's [NotificationEngine] is bypassed entirely; the portal is a
+  /// thin renderer of server-authoritative state.
+  ///
+  /// Per phase-2b-fac-r-facility-reads.md L6.
+  @override
+  Future<List<PatientNotification>> notificationsFor(String patientId) async {
+    final alerts = await _fetchAlerts(patientId, AlertStatus.unacknowledged);
+    final now = DateTime.now();
+    return [
+      for (final a in alerts)
+        PatientNotification(
+          patientId: patientId,
+          type: _mapAlertType(a.alertType),
+          severity: _mapSeverity(a.alertType, a.severity),
+          detail: _formatDetail(a, now),
+        ),
+    ];
+  }
+
   @override
   Future<NotificationContext> notificationContextFor(String patientId) async {
     // Per phase-2b-fac-r L6: in live mode, screens bypass the demo's
@@ -371,4 +394,82 @@ class LiveFacilityRepository implements FacilityRepository {
     _alertsCache[patientId] = resp.alerts;
     return resp.alerts;
   }
+}
+
+/// Maps a server-side `alertType` string to the portal's
+/// [NotificationType] enum per phase-2b-fac-r-facility-reads.md L6
+/// (§Notification badge mapping). Unknown values land on
+/// [NotificationType.other] — the badge still renders, labeled
+/// "Alert", so a new server-side rule never silently disappears.
+NotificationType _mapAlertType(String alertType) {
+  switch (alertType) {
+    // 1C-slim behavioral rules (deployed 2026-05-24)
+    case 'no_activity_today':
+      return NotificationType.noActivityToday;
+    case 'below_typical_activity':
+      return NotificationType.belowTypical;
+    case 'declining_trend':
+      return NotificationType.decliningTrend;
+    // 1C-slim offline rules
+    case 'device_offline':
+      return NotificationType.deviceOffline;
+    case 'device_silent':
+      return NotificationType.deviceSilent;
+    // 1B-rev Threshold Detector
+    case 'battery_critical':
+      return NotificationType.batteryCritical;
+    case 'battery_low':
+      return NotificationType.batteryLow;
+    case 'signal_lost':
+      return NotificationType.signalLost;
+    case 'signal_weak':
+      return NotificationType.signalWeak;
+    default:
+      return NotificationType.other;
+  }
+}
+
+/// Resolves severity for live alerts. Prefers the L6 mapping (some
+/// 1C-slim alert types are inherently critical regardless of the
+/// server's tagged severity); falls back to the server's `severity`
+/// string for everything else. The portal's two-tone severity model
+/// (`critical` / `warning`) collapses the server's `standard` and
+/// `info` levels into `warning`.
+NotificationSeverity _mapSeverity(String alertType, String serverSeverity) {
+  switch (alertType) {
+    case 'no_activity_today':
+    case 'device_silent':
+    case 'battery_critical':
+      return NotificationSeverity.critical;
+    case 'below_typical_activity':
+    case 'declining_trend':
+    case 'device_offline':
+    case 'battery_low':
+    case 'signal_lost':
+    case 'signal_weak':
+      return NotificationSeverity.warning;
+  }
+  return serverSeverity.toLowerCase() == 'critical'
+      ? NotificationSeverity.critical
+      : NotificationSeverity.warning;
+}
+
+/// One-line context line ("Triggered 12 min ago") for the alert row.
+/// Mirrors the demo engine's `detail` string shape so the Notification
+/// Review panel renders consistently across modes.
+String _formatDetail(AlertRow alert, DateTime now) {
+  final d = now.difference(alert.eventTimestamp);
+  final String age;
+  if (d.inMinutes < 1) {
+    age = 'just now';
+  } else if (d.inMinutes < 60) {
+    age = '${d.inMinutes} min ago';
+  } else if (d.inHours < 24) {
+    age = '${d.inHours}h ago';
+  } else if (d.inDays == 1) {
+    age = 'yesterday';
+  } else {
+    age = '${d.inDays}d ago';
+  }
+  return 'Triggered $age';
 }
