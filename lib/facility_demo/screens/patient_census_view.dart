@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
-import '../data/facility_mock_data.dart';
+import '../../data/facility_repository.dart';
 import '../data/notification_engine.dart';
 import '../models/notification.dart';
 import '../models/patient.dart';
@@ -24,7 +24,7 @@ class PatientCensusView extends StatelessWidget {
     required this.notifications,
   });
 
-  final FacilityMockData data;
+  final FacilityRepository data;
   final FacilitySelection selection;
   final NotificationState notifications;
 
@@ -274,7 +274,7 @@ class _Grid extends StatelessWidget {
   });
 
   final List<_CensusRow> rows;
-  final FacilityMockData data;
+  final FacilityRepository data;
   final FacilitySelection selection;
 
   @override

@@ -112,7 +112,12 @@ export class ApiStack extends cdk.Stack {
         allowOrigins:
           env === 'prod'
             ? ['https://portal.gosteady.co']
-            : ['http://localhost:8080', 'http://localhost:8090'],
+            : [
+                'http://localhost:8080',
+                'http://localhost:8090',
+                // Phase 2B-0 — minimum-viable hosting at dev.portal.gosteady.co
+                'https://dev.portal.gosteady.co',
+              ],
         allowMethods: [
           apigwv2.CorsHttpMethod.GET,
           apigwv2.CorsHttpMethod.POST,

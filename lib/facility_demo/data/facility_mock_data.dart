@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import '../../data/facility_repository.dart';
 import '../../models/activity.dart';
 import '../../models/device.dart';
 import '../models/facility.dart';
@@ -8,15 +9,18 @@ import '../models/unit.dart';
 import 'facility_seed.dart';
 import 'notification_engine.dart';
 
-/// Mock data source for the facility demo. Surface mirrors the eventual
-/// `ApiClient` (patient-centric methods, hierarchy snapshot at query time)
-/// per spec §6.2 so swapping for the real API in Phase 2B is a constructor
-/// change.
+/// Mock data source for the facility demo. Implements [FacilityRepository]
+/// so the live build's [LiveFacilityRepository] (added in 2B-0; wired in
+/// 2B-FAC-R) is a drop-in alternative — screens depend only on the
+/// abstraction.
+///
+/// Surface mirrors the eventual `ApiClient` (patient-centric methods,
+/// hierarchy snapshot at query time) per facility-demo.md §6.2.
 ///
 /// Determinism: each patient's data is seeded from `patientId.hashCode`, so
 /// reloading the page or moving between dev machines produces identical
 /// numbers — important for the conference where we want predictable demos.
-class FacilityMockData {
+class FacilityMockData implements FacilityRepository {
   FacilityMockData();
 
   // Cached generated data per patient. Lazy: filled on first access.

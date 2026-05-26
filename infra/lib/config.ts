@@ -213,6 +213,7 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     region: 'us-east-1',
     pitrEnabled: false,
     dynamoBillingMode: 'PAY_PER_REQUEST',
+    portalDomain: 'dev.portal.gosteady.co', // Phase 2B-0 — minimum-viable hosting at dev.portal
     alarmsEnabled: false,
     kmsCmkEnabled: true,
     cloudTrailEnabled: true,

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../theme/app_theme.dart';
-import '../data/facility_mock_data.dart';
+import '../../data/facility_repository.dart';
 import '../models/patient.dart';
 import '../models/unit.dart';
 import 'form_fields.dart';
@@ -22,12 +22,12 @@ class ResidentSettingsDialog extends StatefulWidget {
   });
 
   final Patient patient;
-  final FacilityMockData data;
+  final FacilityRepository data;
 
   static Future<void> show(
     BuildContext context, {
     required Patient patient,
-    required FacilityMockData data,
+    required FacilityRepository data,
   }) =>
       showDialog<void>(
         context: context,
@@ -812,7 +812,7 @@ class _EditInfoForm extends StatefulWidget {
   });
 
   final Patient patient;
-  final FacilityMockData data;
+  final FacilityRepository data;
   final VoidCallback onBack;
   final VoidCallback onClose;
   final ValueChanged<String> onSubmit;

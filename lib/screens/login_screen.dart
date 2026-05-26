@@ -1,43 +1,54 @@
 import 'package:flutter/material.dart';
 
+import '../auth/auth_service.dart';
+import '../auth/auth_service_interface.dart';
 import '../models/user.dart';
-import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
 
-/// Login / sign-up screen. Matches GoSteady branding with sage green
-/// accent and warm whites. Handles sign-in, sign-up, and email confirmation.
+/// GoSteady portal sign-in. Handles four modes:
+///   - signIn: email + password
+///   - mfaVerify: 6-digit TOTP code after Cognito returns an MFA challenge
+///   - forgotEmail: enter email to request reset code
+///   - forgotConfirm: enter code + new password to complete reset
+///
+/// Per phase-2b-0-foundation.md §Files Changed > lib/screens/login_screen.dart.
+/// Sign-up was removed from the portal — D2C onboarding lives on the
+/// marketing site; facility users are admin-created.
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key, required this.onSignedIn});
 
-  /// Called after successful sign-in with the authenticated user.
+  /// Called after successful sign-in. GoRouter's `refreshListenable`
+  /// also picks up the auth change automatically; this callback exists
+  /// for callers that want imperative knowledge of the event.
   final ValueChanged<GoSteadyUser> onSignedIn;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-enum _Mode { signIn, signUp, confirm }
+enum _Mode { signIn, mfaVerify, forgotEmail, forgotConfirm }
 
 class _LoginScreenState extends State<LoginScreen> {
   final _auth = AuthService.instance;
 
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
-  final _nameCtrl = TextEditingController();
   final _codeCtrl = TextEditingController();
+  final _newPasswordCtrl = TextEditingController();
 
   _Mode _mode = _Mode.signIn;
-  UserRole _selectedRole = UserRole.walker;
   bool _loading = false;
   String? _error;
+  String? _info;
   bool _obscurePassword = true;
+  bool _obscureNewPassword = true;
 
   @override
   void dispose() {
     _emailCtrl.dispose();
     _passwordCtrl.dispose();
-    _nameCtrl.dispose();
     _codeCtrl.dispose();
+    _newPasswordCtrl.dispose();
     super.dispose();
   }
 
@@ -46,10 +57,10 @@ class _LoginScreenState extends State<LoginScreen> {
       setState(() => _error = 'Please enter your email and password.');
       return;
     }
-
     setState(() {
       _loading = true;
       _error = null;
+      _info = null;
     });
 
     try {
@@ -58,6 +69,11 @@ class _LoginScreenState extends State<LoginScreen> {
         _passwordCtrl.text,
       );
       widget.onSignedIn(user);
+    } on MfaChallengeRequired {
+      setState(() {
+        _mode = _Mode.mfaVerify;
+        _info = 'Enter the 6-digit code from your authenticator app.';
+      });
     } on AuthException catch (e) {
       setState(() => _error = e.message);
     } finally {
@@ -65,37 +81,19 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<void> _handleSignUp() async {
-    if (_nameCtrl.text.trim().isEmpty ||
-        _emailCtrl.text.trim().isEmpty ||
-        _passwordCtrl.text.isEmpty) {
-      setState(() => _error = 'Please fill in all fields.');
+  Future<void> _handleMfaVerify() async {
+    if (_codeCtrl.text.trim().length < 6) {
+      setState(() => _error = 'Enter the 6-digit code.');
       return;
     }
-
     setState(() {
       _loading = true;
       _error = null;
     });
 
     try {
-      final needsConfirmation = await _auth.signUp(
-        email: _emailCtrl.text.trim(),
-        password: _passwordCtrl.text,
-        fullName: _nameCtrl.text.trim(),
-        role: _selectedRole,
-      );
-
-      if (needsConfirmation) {
-        setState(() => _mode = _Mode.confirm);
-      } else {
-        // Auto-confirmed — sign in directly
-        final user = await _auth.signIn(
-          _emailCtrl.text.trim(),
-          _passwordCtrl.text,
-        );
-        widget.onSignedIn(user);
-      }
+      final user = await _auth.completeMfaChallenge(_codeCtrl.text.trim());
+      widget.onSignedIn(user);
     } on AuthException catch (e) {
       setState(() => _error = e.message);
     } finally {
@@ -103,32 +101,99 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<void> _handleConfirm() async {
-    if (_codeCtrl.text.trim().isEmpty) {
-      setState(() => _error = 'Please enter the verification code.');
+  Future<void> _handleForgotEmail() async {
+    if (_emailCtrl.text.trim().isEmpty) {
+      setState(() => _error = 'Enter your email to receive a reset code.');
       return;
     }
-
     setState(() {
       _loading = true;
       _error = null;
     });
 
     try {
-      await _auth.confirmSignUp(
+      await _auth.forgotPassword(_emailCtrl.text.trim());
+      setState(() {
+        _mode = _Mode.forgotConfirm;
+        _info = 'We sent a reset code to ${_emailCtrl.text.trim()}.';
+      });
+    } on AuthException catch (e) {
+      setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _handleForgotConfirm() async {
+    if (_codeCtrl.text.trim().isEmpty || _newPasswordCtrl.text.isEmpty) {
+      setState(() => _error = 'Enter the code and your new password.');
+      return;
+    }
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      await _auth.confirmForgotPassword(
         _emailCtrl.text.trim(),
         _codeCtrl.text.trim(),
+        _newPasswordCtrl.text,
       );
-      // Confirmed — now sign in
+      // Sign in directly with the new password.
       final user = await _auth.signIn(
         _emailCtrl.text.trim(),
-        _passwordCtrl.text,
+        _newPasswordCtrl.text,
       );
       widget.onSignedIn(user);
+    } on MfaChallengeRequired {
+      setState(() {
+        _mode = _Mode.mfaVerify;
+        _info = 'Password reset. Enter the 6-digit code from your authenticator app.';
+      });
     } on AuthException catch (e) {
       setState(() => _error = e.message);
     } finally {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  VoidCallback get _handleSubmit {
+    switch (_mode) {
+      case _Mode.signIn:
+        return _handleSignIn;
+      case _Mode.mfaVerify:
+        return _handleMfaVerify;
+      case _Mode.forgotEmail:
+        return _handleForgotEmail;
+      case _Mode.forgotConfirm:
+        return _handleForgotConfirm;
+    }
+  }
+
+  String get _submitLabel {
+    switch (_mode) {
+      case _Mode.signIn:
+        return 'Sign In';
+      case _Mode.mfaVerify:
+        return 'Verify';
+      case _Mode.forgotEmail:
+        return 'Send Reset Code';
+      case _Mode.forgotConfirm:
+        return 'Reset Password';
+    }
+  }
+
+  String get _heading {
+    switch (_mode) {
+      case _Mode.signIn:
+        return 'Sign in to your portal';
+      case _Mode.mfaVerify:
+        return 'Two-factor verification';
+      case _Mode.forgotEmail:
+        return 'Reset your password';
+      case _Mode.forgotConfirm:
+        return 'Enter reset code';
     }
   }
 
@@ -145,7 +210,6 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // ── Logo + brand ─────────────────────────────
                   Container(
                     width: 64,
                     height: 64,
@@ -176,19 +240,13 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    _mode == _Mode.signIn
-                        ? 'Sign in to your portal'
-                        : _mode == _Mode.signUp
-                            ? 'Create your account'
-                            : 'Verify your email',
+                    _heading,
                     style: const TextStyle(
                       color: AppTheme.textSoft,
                       fontSize: 15,
                     ),
                   ),
                   const SizedBox(height: 36),
-
-                  // ── Form card ────────────────────────────────
                   Container(
                     padding: const EdgeInsets.all(28),
                     decoration: BoxDecoration(
@@ -202,94 +260,21 @@ class _LoginScreenState extends State<LoginScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        if (_mode == _Mode.confirm) ...[
-                          const Text(
-                            'We sent a verification code to your email. Enter it below to complete sign-up.',
-                            style: TextStyle(
+                        if (_info != null) ...[
+                          Text(
+                            _info!,
+                            style: const TextStyle(
                               color: AppTheme.textSoft,
                               fontSize: 13,
                               height: 1.5,
                             ),
                           ),
                           const SizedBox(height: 20),
-                          _buildField(
-                            controller: _codeCtrl,
-                            label: 'Verification code',
-                            hint: '123456',
-                            icon: Icons.pin_rounded,
-                            keyboardType: TextInputType.number,
-                          ),
-                        ] else ...[
-                          if (_mode == _Mode.signUp) ...[
-                            _buildField(
-                              controller: _nameCtrl,
-                              label: 'Full name',
-                              hint: 'Jane Smith',
-                              icon: Icons.person_outline_rounded,
-                            ),
-                            const SizedBox(height: 16),
-                          ],
-                          _buildField(
-                            controller: _emailCtrl,
-                            label: 'Email',
-                            hint: 'you@example.com',
-                            icon: Icons.email_outlined,
-                            keyboardType: TextInputType.emailAddress,
-                          ),
-                          const SizedBox(height: 16),
-                          _buildField(
-                            controller: _passwordCtrl,
-                            label: 'Password',
-                            hint: 'Enter your password',
-                            icon: Icons.lock_outline_rounded,
-                            obscure: _obscurePassword,
-                            suffix: IconButton(
-                              icon: Icon(
-                                _obscurePassword
-                                    ? Icons.visibility_off_outlined
-                                    : Icons.visibility_outlined,
-                                size: 18,
-                                color: AppTheme.textSoft,
-                              ),
-                              onPressed: () => setState(
-                                  () => _obscurePassword = !_obscurePassword),
-                            ),
-                          ),
-                          if (_mode == _Mode.signUp) ...[
-                            const SizedBox(height: 20),
-                            _buildRoleSelector(),
-                          ],
                         ],
+                        ..._buildFormFields(),
                         if (_error != null) ...[
                           const SizedBox(height: 16),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 14, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: AppTheme.statusAlert.withOpacity(0.08),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                color: AppTheme.statusAlert.withOpacity(0.2),
-                              ),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.error_outline_rounded,
-                                    color: AppTheme.statusAlert, size: 18),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    _error!,
-                                    style: const TextStyle(
-                                      color: AppTheme.statusAlert,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
+                          _ErrorBanner(_error!),
                         ],
                         const SizedBox(height: 24),
                         SizedBox(
@@ -306,11 +291,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                     ),
                                   )
                                 : Text(
-                                    _mode == _Mode.signIn
-                                        ? 'Sign In'
-                                        : _mode == _Mode.signUp
-                                            ? 'Create Account'
-                                            : 'Verify',
+                                    _submitLabel,
                                     style: const TextStyle(
                                       fontSize: 15,
                                       fontWeight: FontWeight.w600,
@@ -321,41 +302,42 @@ class _LoginScreenState extends State<LoginScreen> {
                       ],
                     ),
                   ),
-
                   const SizedBox(height: 20),
-
-                  // ── Toggle sign-in / sign-up ─────────────────
-                  if (_mode != _Mode.confirm)
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          _mode == _Mode.signIn
-                              ? "Don't have an account?"
-                              : 'Already have an account?',
-                          style: const TextStyle(
-                            color: AppTheme.textSoft,
-                            fontSize: 13,
-                          ),
+                  if (_mode == _Mode.signIn) ...[
+                    TextButton(
+                      onPressed: () => setState(() {
+                        _mode = _Mode.forgotEmail;
+                        _error = null;
+                        _info = null;
+                      }),
+                      child: const Text(
+                        'Forgot password?',
+                        style: TextStyle(
+                          color: AppTheme.sage,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
                         ),
-                        TextButton(
-                          onPressed: () => setState(() {
-                            _error = null;
-                            _mode = _mode == _Mode.signIn
-                                ? _Mode.signUp
-                                : _Mode.signIn;
-                          }),
-                          child: Text(
-                            _mode == _Mode.signIn ? 'Sign Up' : 'Sign In',
-                            style: const TextStyle(
-                              color: AppTheme.sage,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
+                  ] else ...[
+                    TextButton(
+                      onPressed: () => setState(() {
+                        _mode = _Mode.signIn;
+                        _error = null;
+                        _info = null;
+                        _codeCtrl.clear();
+                        _newPasswordCtrl.clear();
+                      }),
+                      child: const Text(
+                        'Back to sign in',
+                        style: TextStyle(
+                          color: AppTheme.sage,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -365,14 +347,74 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  VoidCallback get _handleSubmit {
+  List<Widget> _buildFormFields() {
     switch (_mode) {
       case _Mode.signIn:
-        return _handleSignIn;
-      case _Mode.signUp:
-        return _handleSignUp;
-      case _Mode.confirm:
-        return _handleConfirm;
+        return [
+          _buildField(
+            controller: _emailCtrl,
+            label: 'Email',
+            hint: 'you@example.com',
+            icon: Icons.email_outlined,
+            keyboardType: TextInputType.emailAddress,
+          ),
+          const SizedBox(height: 16),
+          _buildField(
+            controller: _passwordCtrl,
+            label: 'Password',
+            hint: 'Enter your password',
+            icon: Icons.lock_outline_rounded,
+            obscure: _obscurePassword,
+            suffix: _ObscureToggle(
+              obscured: _obscurePassword,
+              onTap: () =>
+                  setState(() => _obscurePassword = !_obscurePassword),
+            ),
+          ),
+        ];
+      case _Mode.mfaVerify:
+        return [
+          _buildField(
+            controller: _codeCtrl,
+            label: 'Authenticator code',
+            hint: '123456',
+            icon: Icons.pin_rounded,
+            keyboardType: TextInputType.number,
+          ),
+        ];
+      case _Mode.forgotEmail:
+        return [
+          _buildField(
+            controller: _emailCtrl,
+            label: 'Email',
+            hint: 'you@example.com',
+            icon: Icons.email_outlined,
+            keyboardType: TextInputType.emailAddress,
+          ),
+        ];
+      case _Mode.forgotConfirm:
+        return [
+          _buildField(
+            controller: _codeCtrl,
+            label: 'Reset code',
+            hint: '123456',
+            icon: Icons.pin_rounded,
+            keyboardType: TextInputType.number,
+          ),
+          const SizedBox(height: 16),
+          _buildField(
+            controller: _newPasswordCtrl,
+            label: 'New password',
+            hint: 'Enter new password',
+            icon: Icons.lock_outline_rounded,
+            obscure: _obscureNewPassword,
+            suffix: _ObscureToggle(
+              obscured: _obscureNewPassword,
+              onTap: () => setState(
+                  () => _obscureNewPassword = !_obscureNewPassword),
+            ),
+          ),
+        ];
     }
   }
 
@@ -435,115 +477,60 @@ class _LoginScreenState extends State<LoginScreen> {
       ],
     );
   }
+}
 
-  Widget _buildRoleSelector() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'I am a...',
-          style: TextStyle(
-            color: AppTheme.textDark,
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
+class _ErrorBanner extends StatelessWidget {
+  const _ErrorBanner(this.message);
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppTheme.statusAlert.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: AppTheme.statusAlert.withOpacity(0.2),
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline_rounded,
+              color: AppTheme.statusAlert, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                color: AppTheme.statusAlert,
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
           ),
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: _RoleChip(
-                label: 'Walker',
-                subtitle: 'I use the device',
-                icon: Icons.directions_walk_rounded,
-                selected: _selectedRole == UserRole.walker,
-                onTap: () => setState(() => _selectedRole = UserRole.walker),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _RoleChip(
-                label: 'Caregiver',
-                subtitle: 'I monitor a walker',
-                icon: Icons.favorite_outline_rounded,
-                selected: _selectedRole == UserRole.caregiver,
-                onTap: () => setState(() => _selectedRole = UserRole.caregiver),
-              ),
-            ),
-          ],
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
 
-class _RoleChip extends StatelessWidget {
-  const _RoleChip({
-    required this.label,
-    required this.subtitle,
-    required this.icon,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String label;
-  final String subtitle;
-  final IconData icon;
-  final bool selected;
+class _ObscureToggle extends StatelessWidget {
+  const _ObscureToggle({required this.obscured, required this.onTap});
+  final bool obscured;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-        decoration: BoxDecoration(
-          color: selected ? AppTheme.sage.withOpacity(0.08) : AppTheme.cream,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: selected ? AppTheme.sage : AppTheme.border.withOpacity(0.5),
-            width: selected ? 1.5 : 1,
-          ),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              size: 20,
-              color: selected ? AppTheme.sage : AppTheme.textSoft,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    label,
-                    style: TextStyle(
-                      color: selected ? AppTheme.sage : AppTheme.textDark,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  Text(
-                    subtitle,
-                    style: const TextStyle(
-                      color: AppTheme.textSoft,
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (selected)
-              const Icon(Icons.check_circle_rounded,
-                  color: AppTheme.sage, size: 18),
-          ],
-        ),
+    return IconButton(
+      icon: Icon(
+        obscured
+            ? Icons.visibility_off_outlined
+            : Icons.visibility_outlined,
+        size: 18,
+        color: AppTheme.textSoft,
       ),
+      onPressed: onTap,
     );
   }
 }

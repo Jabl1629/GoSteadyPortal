@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
-import '../data/facility_mock_data.dart';
+import '../../data/facility_repository.dart';
 import '../state/facility_selection.dart';
 import '../state/notification_state.dart';
 import '../widgets/facility_top_bar.dart';
@@ -14,7 +14,7 @@ import 'patient_detail_view.dart';
 /// patient detail; tap the backdrop or the back affordance to dismiss.
 class FacilityShell extends StatefulWidget {
   const FacilityShell({super.key, required this.data});
-  final FacilityMockData data;
+  final FacilityRepository data;
 
   @override
   State<FacilityShell> createState() => _FacilityShellState();
@@ -104,7 +104,7 @@ class _PatientOverlay extends StatelessWidget {
     required this.notifications,
   });
 
-  final FacilityMockData data;
+  final FacilityRepository data;
   final FacilitySelection selection;
   final NotificationState notifications;
 

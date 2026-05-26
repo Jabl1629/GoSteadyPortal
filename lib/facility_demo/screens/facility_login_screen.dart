@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../auth/mock_auth_service.dart';
 import '../../theme/app_theme.dart';
-import '../services/mock_facility_auth.dart';
 
 /// Minimal login screen for the demo build. Per spec §9: no email/password
 /// fields — investors don't sign up at booths. One button signs in as the
@@ -19,7 +19,7 @@ class _FacilityLoginScreenState extends State<FacilityLoginScreen> {
   Future<void> _handleSignIn() async {
     if (_busy) return;
     setState(() => _busy = true);
-    await FacilityMockAuthService.instance.signIn();
+    await MockAuthService.instance.signIn('demo', 'demo');
     // No need to clear _busy — _AuthGate swaps screens immediately.
   }
 
