@@ -1,6 +1,6 @@
 # GoSteady Portal — Master Architecture & Phase Plan
 
-> **Last updated:** 2026-05-24 | **Branch:** `feature/infra-scaffold`
+> **Last updated:** 2026-05-25 | **Branch:** `feature/infra-scaffold`
 > **Repository:** [GoSteadyPortal](https://github.com/Jabl1629/GoSteadyPortal)
 
 ---
@@ -1364,7 +1364,7 @@ Phase 2B replaces the Flutter portal's mock data with live AWS-backed reads + wr
 
 | Subset | Status | What it ships |
 |---|---|---|
-| **2B-0** Foundation | 🔲 In flight ([`phase-2b-0-foundation.md`](phase-2b-0-foundation.md)) | `ApiClient` + extended `AuthService` (MFA, forgot-password, full claim extraction) + `FacilityRepository` abstraction + `GoRouter` URL state + dual-build (`BUILD_MODE=demo\|live`) + smoke screen on `GET /api/v1/me`. **Plus minimum-viable hosting** — `GoSteady-Dev-Hosting` CDK stack (S3 + CloudFront + OAC + ACM + baseline WAF) so live builds deploy to `dev.portal.gosteady.co` from day one (real-domain testing per commit). **Approach-C decision (2026-05-24):** evolve the existing facility demo in place — single screen tree, two thin entry points, two build artifacts. Demo continues at `facilitydemo.gosteady.co` on Netlify (subdomain migrated from `gosteady.co/facilitydemo`); dev portal at `dev.portal.gosteady.co` on S3+CF; production portal at `portal.gosteady.co` lands in Phase 3A |
+| **2B-0** Foundation | ✅ **Deployed (dev) 2026-05-25** ([`phase-2b-0-foundation.md`](phase-2b-0-foundation.md)) | `ApiClient` + extended `AuthService` (MFA, forgot-password, full claim extraction) + `FacilityRepository` abstraction + `GoRouter` URL state + dual-build (`BUILD_MODE=demo\|live`) + smoke screen on `GET /api/v1/me`. **Plus minimum-viable hosting** — `GoSteady-Dev-Hosting` CDK stack (S3 + CloudFront + OAC + ACM + baseline WAF) live at `dev.portal.gosteady.co`. **Approach-C (2026-05-24):** evolve the existing facility demo in place — single screen tree, two thin entry points, two build artifacts. Demo continues at `facilitydemo.gosteady.co` on Netlify (subdomain migrated from `gosteady.co/facilitydemo`); dev portal at `dev.portal.gosteady.co` on S3+CF; production portal at `portal.gosteady.co` lands in Phase 3A. End-to-end smoke verified 2026-05-25 with both caregiver + MFA-required facility_admin paths |
 | **2B-FAC-R** Facility Reads | 🔲 Planned | Wires `LiveFacilityRepository` to 2A-RD endpoints — Census, Patient Detail, Device Detail, Notification badges. Per-screen swap from `FacilityMockData` (no demo regression) |
 | **2B-FAC-W** Facility Writes | 🔲 Planned | Acknowledge notification (2A-AA) + Replace/Discontinue Device (2A-DL) + Add/Edit Resident, Discharge, Pause Notifications, Care Note (2A-UM-P) |
 | **2B-D2C** Household Path | 🔲 Planned | Refit legacy D2C single-walker dashboard to consume `LiveFacilityRepository` (different screens, same `FacilityRepository` abstraction) |

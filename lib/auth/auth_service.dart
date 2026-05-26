@@ -62,8 +62,15 @@ class AuthService extends AuthServiceInterface {
 
     try {
       _session = await _cognitoUser!.authenticateUser(authDetails);
+    } on CognitoUserTotpRequiredException {
+      // TOTP (SOFTWARE_TOKEN_MFA) challenge — the modern path used by
+      // facility_admin+ users with Authenticator-app-based MFA.
+      // SDK throws this when ChallengeName == 'SOFTWARE_TOKEN_MFA'.
+      _pendingMfaUser = _cognitoUser;
+      throw MfaChallengeRequired(email);
     } on CognitoUserMfaRequiredException {
-      // Hold the cognitoUser; caller routes UI to /mfa-verify.
+      // SMS MFA challenge — legacy path. Phase 0A-rev disabled SMS but we
+      // still catch it defensively in case any pre-rev users linger.
       _pendingMfaUser = _cognitoUser;
       throw MfaChallengeRequired(email);
     } on CognitoUserNewPasswordRequiredException {
