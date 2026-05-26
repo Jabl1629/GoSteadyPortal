@@ -71,7 +71,7 @@ class MePatientSummary {
       censusName: json['censusName'] as String?,
       currentDeviceSerial: json['currentDeviceSerial'] as String?,
       lastActivityAt: _parseTs(json['lastActivityAt']),
-      openAlertCount: (json['openAlertCount'] as int?) ?? 0,
+      openAlertCount: _parseInt(json['openAlertCount']) ?? 0,
     );
   }
 }
@@ -90,8 +90,8 @@ class MeScope {
   factory MeScope.fromJson(Map<String, dynamic> json) {
     return MeScope(
       role: (json['role'] as String?) ?? 'caregiver',
-      facilityCount: (json['facilityCount'] as int?) ?? 0,
-      censusCount: (json['censusCount'] as int?) ?? 0,
+      facilityCount: _parseInt(json['facilityCount']) ?? 0,
+      censusCount: _parseInt(json['censusCount']) ?? 0,
     );
   }
 }
@@ -241,11 +241,11 @@ class ActivitySession {
       sessionEnd: _parseTs(json['sessionEnd']) ?? DateTime.now(),
       date: (json['date'] as String?) ?? '',
       timezone: json['timezone'] as String?,
-      steps: (json['steps'] as num?)?.toInt() ?? 0,
-      distanceFt: (json['distanceFt'] as num?)?.toDouble() ?? 0.0,
-      activeMinutes: (json['activeMinutes'] as num?)?.toInt() ?? 0,
+      steps: _parseInt(json['steps']) ?? 0,
+      distanceFt: _parseDouble(json['distanceFt']) ?? 0.0,
+      activeMinutes: _parseInt(json['activeMinutes']) ?? 0,
       deviceSerial: json['deviceSerial'] as String?,
-      roughnessR: (json['roughnessR'] as num?)?.toDouble(),
+      roughnessR: _parseDouble(json['roughnessR']),
       surfaceClass: json['surfaceClass'] as String?,
       firmwareVersion: json['firmwareVersion'] as String?,
     );
@@ -420,9 +420,9 @@ class DeviceResponse {
       status: json['status'] as String?,
       firmwareVersion: json['firmwareVersion'] as String?,
       lastSeen: _parseTs(json['lastSeen']),
-      batteryPct: (json['batteryPct'] as num?)?.toDouble(),
-      rsrpDbm: (json['rsrpDbm'] as num?)?.toInt(),
-      snrDb: (json['snrDb'] as num?)?.toInt(),
+      batteryPct: _parseDouble(json['batteryPct']),
+      rsrpDbm: _parseInt(json['rsrpDbm']),
+      snrDb: _parseInt(json['snrDb']),
     );
   }
 }
@@ -478,4 +478,27 @@ DateTime? _parseTs(Object? raw) {
   final s = raw.toString();
   if (s.isEmpty) return null;
   return DateTime.tryParse(s);
+}
+
+/// Tolerant int parser — handles raw int, num, AND JSON-string-encoded
+/// numbers (the patient-api Lambda serializes DDB Decimals as strings).
+int? _parseInt(Object? raw) {
+  if (raw == null) return null;
+  if (raw is int) return raw;
+  if (raw is num) return raw.toInt();
+  final s = raw.toString();
+  if (s.isEmpty) return null;
+  // Decimal-as-string can come through as "0", "27", "1.04" — toInt
+  // any double form by truncation (we don't care about fractional steps).
+  return int.tryParse(s) ?? double.tryParse(s)?.toInt();
+}
+
+/// Tolerant double parser — same rationale.
+double? _parseDouble(Object? raw) {
+  if (raw == null) return null;
+  if (raw is double) return raw;
+  if (raw is num) return raw.toDouble();
+  final s = raw.toString();
+  if (s.isEmpty) return null;
+  return double.tryParse(s);
 }
