@@ -29,6 +29,7 @@ from typing import Any
 import boto3
 
 from _shared.api_authz import (
+    enforce_internal_session_age,
     enforce_scope,
     enforce_patient_access,
     extract_claims,
@@ -46,6 +47,7 @@ from _shared.audit_catalog import (
     AUDIT_PATIENT_LIST_READ,
 )
 from _shared.observability import emit_audit, get_logger
+from _shared.pause_check import days_remaining, is_currently_paused
 
 from pagination import (
     decode_cursor,
@@ -90,10 +92,46 @@ _role_assignments = _ddb.Table(ROLE_ASSIGNMENTS_TABLE)
 
 
 def _patient_view(p: dict[str, Any]) -> dict[str, Any]:
-    """Projection for GET /patients/{id} primary fields."""
+    """
+    Projection for GET /patients/{id} primary fields. Includes the
+    Phase 2A-UM-P additions (careNote + notificationsPaused state) so
+    the portal sees a consistent shape between read (this endpoint) and
+    write (patient-mgmt). Mirrors patient-mgmt._patient_view.
+    """
     keep = ("patientId", "displayName", "status", "timezone",
-            "clientId", "facilityId", "censusId")
-    return {k: p.get(k) for k in keep}
+            "clientId", "facilityId", "censusId", "room")
+    out = {k: p.get(k) for k in keep}
+
+    # Care note (2A-UM-P US-44). Only surface when non-empty text exists.
+    care_note = p.get("careNote")
+    if isinstance(care_note, dict) and care_note.get("text"):
+        out["careNote"] = {
+            "text": care_note.get("text"),
+            "updatedBy": care_note.get("updatedBy"),
+            "updatedByName": care_note.get("updatedByName"),
+            "updatedAt": care_note.get("updatedAt"),
+        }
+    else:
+        out["careNote"] = None
+
+    # Notifications-paused state (2A-UM-P US-31). Only surface as active
+    # if `until > now`. If expired-but-not-yet-cleared (the Patient row
+    # may have a stale pause if no fresh activity has triggered auto-
+    # resume yet), present as null — the portal should treat it as
+    # "not currently paused."
+    if is_currently_paused(p):
+        pause = p.get("notificationsPaused") or {}
+        out["notificationsPaused"] = {
+            "until": pause.get("until"),
+            "reason": pause.get("reason"),
+            "pausedAt": pause.get("pausedAt"),
+            "pausedBy": pause.get("pausedBy"),
+            "daysRemaining": days_remaining(p),
+        }
+    else:
+        out["notificationsPaused"] = None
+
+    return out
 
 
 def _patient_row_view(p: dict[str, Any]) -> dict[str, Any]:
@@ -574,6 +612,12 @@ def handler(api_event: dict[str, Any], context: Any) -> dict[str, Any]:
     claims = extract_claims(api_event)
     try:
         require_authenticated(claims)
+        # Phase 2A-0 Q8 (amended 2026-05-24): app-layer 4-hr absolute cap
+        # for internal_* sessions. No-op for customer roles. patient-api
+        # uses its own dispatcher pattern (not @audit_middleware), so the
+        # middleware-wired call never reaches this handler. Mirror in
+        # device-api / alert-actions / patient-mgmt.
+        enforce_internal_session_age(claims)
         action, params = _route(api_event)
 
         if action == "get_patient":

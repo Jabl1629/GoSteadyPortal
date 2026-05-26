@@ -21,7 +21,7 @@ Phase 2B is broken into five subsets that ship independently on a shared foundat
 |---|---|---|---|
 | **2B-0** Foundation | 🔲 Planned ([phase-2b-0-foundation.md](phase-2b-0-foundation.md)) | `ApiClient`, real Cognito auth in Flutter (sign-in / sign-out / token refresh / session restore), full-claim `GoSteadyUser`, JWT-attached HTTP client, error-envelope decoder, retry + backoff, network-failure UX, MFA challenge handler, forgot-password flow. `FacilityRepository` abstraction + dual-build (`BUILD_MODE=demo\|live`) so the same screen tree powers both the marketing demo and the live portal. **One smoke screen** — calls `GET /api/v1/me` and displays the claims (parallels 2A-0's stub-endpoint smoke approach) | 2A-0 (deployed) |
 | **2B-FAC-R** Facility Reads | 🔲 Planned | Login → Facility Shell → Census (list + tile) → Patient Detail (overlay) → Device Detail. Pure-read swap of the demo's `FacilityMockData` for `ApiClient` against 2A-RD endpoints. Notification badges driven by `/patients/{id}/alerts?status=unacknowledged`. Visual mirror of the demo, real data | 2A-RD (deployed) + 2A-0 |
-| **2B-FAC-W** Facility Writes | 🔲 Planned | Notification acknowledge (PATCH /alerts) + Care Note (US-44) + Pause Notifications (US-31) + Resident Settings lifecycle (Replace Device / Discontinue Device / Edit Info / Discharge) + Add Resident. **Partially blocked on Phase 2A-UM** — six endpoints don't exist yet (see §2A-UM dependencies below) | 2A-AA (deployed for alert-ack) + 2A-DL (deployed for device actions) + **2A-UM (planned; gates resident-mgmt writes)** |
+| **2B-FAC-W** Facility Writes | 🔲 Planned | Notification acknowledge (PATCH /alerts) + Care Note (US-44) + Pause Notifications (US-31) + Resident Settings lifecycle (Replace Device / Discontinue Device / Edit Info / Discharge) + Add Resident. **ALL BACKEND ENDPOINTS NOW DEPLOYED (as of 2026-05-24)** — 2A-AA + 2A-DL + 2A-UM-P all live in dev | 2A-AA + 2A-DL + 2A-UM-P (all ✅ deployed dev) |
 | **2B-D2C** Household Path | 🔲 Planned | Refit `lib/screens/dashboard_screen.dart` + `lib/screens/device_screen.dart` (the legacy single-walker D2C dashboard) to consume live API. Single-patient view; smaller surface than facility | 2A-RD (deployed) + 2A-UM (for household_owner-specific signup/setup flow) |
 | **2B-INT** Internal-tier UI additions | 🔲 Planned (low priority) | **Role-conditional UI surface inside the unified portal** (per L1). When `custom:role` starts with `internal_`, render extra navigation: cross-tenant patient search, cross-tenant device search, optional audit-reader UI. No separate build, no separate URL — same `portal.gosteady.co`, different conditional nav | 2A-INT (planned) + 1.7.1 (Athena workgroup if audit search wanted) |
 | **2B-POL** Polish | 🔲 Planned | Responsive QA across 390 / 430 / 744 / 1024 / 1280+; WCAG AA contrast audit; keyboard navigation + focus-ring polish; screen-reader labels on gear, badges, chart tooltips; loading/empty/error state pass; column-header tooltips (US-11) | none |
@@ -30,19 +30,19 @@ Phase 2B is broken into five subsets that ship independently on a shared foundat
 
 **Dependency on 2A-0 (foundation):** 2B-0 assumes the API Gateway HTTP API, JWT authorizer, error envelope, audit middleware, and CORS preflight (`localhost:8080` + `localhost:8090` allowed in dev) are deployed and stable. No expected drift.
 
-**Dependency on 2A-UM (gates 2B-FAC-W writes that aren't already covered by 2A-DL or 2A-AA):**
+**Dependency on 2A-UM (gates 2B-FAC-W writes that aren't already covered by 2A-DL or 2A-AA):** **AS OF 2026-05-24, ALL UNBLOCKED VIA 2A-UM-P DEPLOY.** Table below kept for reference.
 
 | User story | Endpoint needed | Status | In 2A-UM scope? |
 |---|---|---|---|
 | US-26 Acknowledge notification | `PATCH /alerts/{patientId}/{ts}` | ✅ 2A-AA deployed | — |
-| US-28 Add Resident | `POST /patients` | 🔲 needs 2A-UM | Yes |
-| US-29 Edit Resident Info | `PATCH /patients/{id}` (name / room / censusId) | 🔲 needs 2A-UM | Yes |
-| US-30 Cross-facility transfer | Same as US-29 (censusId change → new facility) | 🔲 needs 2A-UM | Yes |
-| US-31 Pause Notifications | `POST /patients/{id}/notifications/pause` + `DELETE …` | 🔲 needs 2A-UM | Yes — **new endpoint, not in current 2A-UM stub** |
-| US-32 Discharge Resident | `POST /patients/{id}/discharge` (cascades via Phase 2A-DL discharge-cascade Lambda already deployed) | 🔲 needs 2A-UM | Yes |
+| US-28 Add Resident | `POST /patients` | ✅ 2A-UM-P deployed 2026-05-24 | Yes — landed in 2A-UM-P |
+| US-29 Edit Resident Info | `PATCH /patients/{id}` (name / room / censusId) | ✅ 2A-UM-P deployed | Yes — landed in 2A-UM-P |
+| US-30 Cross-facility transfer | Same as US-29 (censusId change → new facility); requires `client_admin+` per Q3 | ✅ 2A-UM-P deployed | Yes — landed in 2A-UM-P |
+| US-31 Pause Notifications | `POST /patients/{id}/notifications/pause` + `DELETE …` | ✅ 2A-UM-P deployed (+ Activity Processor auto-resume on activity) | Yes — landed in 2A-UM-P |
+| US-32 Discharge Resident | `POST /patients/{id}/discharge` (cascades via Phase 2A-DL discharge-cascade Lambda already deployed) | ✅ 2A-UM-P deployed | Yes — landed in 2A-UM-P |
 | US-35 Replace Device | 2A-DL `end-assignment` + `provision` chain | ✅ 2A-DL deployed | — (orchestrated client-side) |
 | US-36 Discontinue Device | 2A-DL `end-assignment` | ✅ 2A-DL deployed | — |
-| US-44 Care Note (read + write) | Read via extended `GET /patients/{id}` response; write via `PATCH /patients/{id}/care-note` | 🔲 needs 2A-UM | Yes — **new endpoint, not in current 2A-UM stub** |
+| US-44 Care Note (read + write) | Read via extended `GET /patients/{id}` response (2A-RD); write via `PATCH /patients/{id}/care-note` (2A-UM-P) | ✅ 2A-UM-P deployed | Yes — landed in 2A-UM-P |
 
 The 2A-UM spec doesn't exist yet (per [ARCHITECTURE.md](ARCHITECTURE.md) §17 — "🔲 Planned (no spec)"). Two of the six user-needs items above (US-31 Pause Notifications, US-44 Care Note) are **new requirements that emerged from the user-needs prep** and were not on 2A-UM's prior implicit scope. Whether 2A-UM picks them up or whether they ship as a follow-on `2A-UM-NN` (notifications) subset is an open question — see §Open Questions Q6.
 

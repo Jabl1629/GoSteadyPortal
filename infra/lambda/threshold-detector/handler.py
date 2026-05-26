@@ -47,12 +47,15 @@ from _shared import (
     get_metrics,
     resolve_patient,
 )
+from _shared.pause_check import is_currently_paused
 from aws_lambda_powertools.metrics import MetricUnit
 
 # ── Configuration ────────────────────────────────────────────────
 ALERT_TABLE = os.environ["ALERT_TABLE"]
 DEVICE_TABLE = os.environ["DEVICE_TABLE"]
 PRE_ACTIVATION_AUDIT_HOURS = int(os.environ.get("PRE_ACTIVATION_AUDIT_SAMPLE_HOURS", "1"))
+# Phase 2A-UM-P L9 — sample suppressed-paused audit at ≤1/day/patient.
+PAUSE_SUPPRESSED_AUDIT_HOURS = int(os.environ.get("PAUSE_SUPPRESSED_AUDIT_SAMPLE_HOURS", "24"))
 
 # 24 months on Alerts (L5 / 0B-rev D2).
 ALERT_TTL_SECONDS = 24 * 30 * 86_400
@@ -81,6 +84,68 @@ def _f(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _maybe_emit_paused_suppressed_audit(serial: str, patient: PatientContext) -> None:
+    """
+    Sample `patient.notifications.suppressed_paused` at ≤1/day/serial via
+    Shadow `reported.lastNotificationSuppressedAuditAt` (Phase 2A-UM-P L9).
+    Mirrors the preactivation pattern; per-device dedupe is equivalent to
+    per-patient dedupe given the 1:1 device:patient mapping at any given
+    moment (DeviceAssignment uniqueness).
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=PAUSE_SUPPRESSED_AUDIT_HOURS)
+    try:
+        resp = _iot_data.get_thing_shadow(thingName=serial)
+        shadow = json.loads(resp["payload"].read())
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+            shadow = {}
+        else:
+            logger.exception("paused_suppressed_shadow_get_failed", extra={"serial": serial})
+            return
+    last_audit = (
+        shadow.get("state", {}).get("reported", {}).get("lastNotificationSuppressedAuditAt")
+    )
+    if last_audit:
+        try:
+            if _parse_iso(str(last_audit)) >= cutoff:
+                return  # within sample window — skip
+        except (TypeError, ValueError):
+            pass
+
+    audit_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        _iot_data.update_thing_shadow(
+            thingName=serial,
+            payload=json.dumps(
+                {"state": {"reported": {"lastNotificationSuppressedAuditAt": audit_iso}}}
+            ).encode("utf-8"),
+        )
+    except ClientError:
+        logger.exception("paused_suppressed_dedupe_write_failed", extra={"serial": serial})
+
+    pause = patient.notificationsPaused or {}
+    emit_audit(
+        "patient.notifications.suppressed_paused",
+        subject={
+            "patientId": patient.patientId,
+            "clientId": patient.clientId,
+            "facilityId": patient.facilityId,
+            "censusId": patient.censusId,
+            "deviceSerial": serial,
+        },
+        action="observe",
+        extra={
+            "sampledAt": audit_iso,
+            "pausedUntil": pause.get("until"),
+            "pauseReason": pause.get("reason"),
+        },
+    )
+    metrics.add_metric(
+        name="paused_suppressed_count", unit=MetricUnit.Count, value=1
+    )
 
 
 def _maybe_emit_preactivation_audit(serial: str) -> None:
@@ -233,6 +298,16 @@ def handler(event: dict, _context):
         )
         metrics.add_metric(name="unmapped_serial_count", unit=MetricUnit.Count, value=1)
         return {"statusCode": 200, "body": "no active assignment; alerts dropped"}
+
+    # Phase 2A-UM-P L9 — pause-aware gate.
+    # If the patient's notifications are currently paused (caregiver set
+    # via POST /patients/{id}/notifications/pause), skip threshold
+    # evaluation entirely. Sample a `patient.notifications.suppressed_paused`
+    # audit at ≤1/day/patient so compliance can see the pause is being
+    # honored without flooding the audit log.
+    if is_currently_paused({"notificationsPaused": patient.notificationsPaused}):
+        _maybe_emit_paused_suppressed_audit(serial, patient)
+        return {"statusCode": 200, "body": "patient notifications paused; suppressed"}
 
     breaches = determine_threshold_alerts(
         battery_pct, rsrp_dbm, overrides=patient.thresholds,

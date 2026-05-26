@@ -2,10 +2,10 @@
 
 ## Overview
 - **Phase**: 1C-slim (a focused subset of the broader Phase 1C Scheduled Jobs umbrella)
-- **Status**: 🔲 Planned
-- **Branch**: TBD
-- **Date Started**: TBD
-- **Date Completed**: TBD
+- **Status**: ✅ Deployed (dev) 2026-05-24 — 42/42 rule unit tests PASS + end-to-end audit pipeline verified on synthetic invoke
+- **Branch**: `feature/infra-scaffold`
+- **Date Started**: 2026-05-24
+- **Date Completed**: 2026-05-24 (dev) — real-data rule-firing validation deferred (needs local-09 / local-22 cron firing OR seeded fixtures with controlled timestamps)
 
 Ships **two server-side detection rules that the existing Threshold Detector (Phase 1B-rev) cannot serve** because they require daily-aggregate inputs, not real-time shadow deltas:
 
@@ -395,3 +395,4 @@ One of seven decided. Six require user input — but all are tunable knobs, not 
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-05-23 | Jace + Claude (portal session) | Initial spec drafted as the minimum-scope Phase 1C subset needed to (a) unblock [phase-2b-portal-integration.md](phase-2b-portal-integration.md) 2B-FAC-R's notification UX (server-side behavioral rules per US-22) and (b) close the [§C11.7](../firmware-coordination/2026-04-17-cloud-contracts.md) conference silent-failure gap (offline detector). Single Lambda + hourly cron + facility-local routing. Reuses existing Alert History table so 2A-RD read path is unchanged. Daily Rollup deferred to sibling `Phase 1C-rollup` (not V1-launch-blocking; 6M tab is shipping disabled per 2B L8). Seven open questions surfaced, all tunable-knob level — none architectural. |
+| 2026-05-24 | Jace + Claude (portal session) | **Deployed to dev** across 2 commits on `feature/infra-scaffold` (commit `c596c84` scaffold + 5 pure-fn rules + 42 unit tests → `31d241c` orchestration + CDK + deploy). **42/42 rule unit tests PASS** covering every threshold + boundary + cold-start guard + status-guard across no_activity_today (13), below_typical (8), declining_trend (7), device_offline/silent (14). **Deploy chronology** hit two gotchas: (1) first deploy rejected by Lambda — dev account's 10-concurrency new-account floor blocked `reservedConcurrentExecutions=1` (same gotcha Phase 1.7 hit); resolved by dropping the reservation (cron at 1/hr can't race itself; conditional PutItem on Alert History catches any theoretical overlap). (2) Second deploy succeeded but synthetic invoke surfaced `AccessDeniedException` on the Patients `by-client-status` GSI Query — `fromTableName()` references in processing-stack don't include GSI ARNs in `grantReadData`; resolved by explicit `PolicyStatement` on `table/*/index/*` for Patients + Activity + DeviceAssignments. (3) Third deploy succeeded; synthetic invoke evaluated 2 facilities × 4 active patients in 137ms; 0 alerts fired (correct given current UTC isn't local-09 or local-22 in seed facilities' America/Los_Angeles tz, and active patients don't have devices in `active_monitoring` with stale lastSeen). **End-to-end audit pipeline verified**: `behavioral.detector.run` summary event landed in `gosteady-dev-audit` log group with full counters (facilitiesEvaluated / patientsEvaluated / pausedSkipped / candidates / alertsWritten / alertsDeduplicated / writeErrors / durationSeconds). EventBridge schedule firing hourly. **Outstanding follow-ups** (not blocking): real-data rule-firing validation needs local-09 / local-22 cron firing OR seeded fixtures with controlled Activity Series timestamps + Device Registry lastSeen; `suppressed_paused` audit over-emits ~24x/day vs ≤1/day target (module-level set resets per cold-start; tighten via Patient-row `lastBehavioralSuppressedAuditAt` when audit volume becomes a concern — benign at MVP scale). Coord §C27 captures the deploy chronology. |

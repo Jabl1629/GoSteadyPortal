@@ -45,6 +45,8 @@ describe('SecurityStack (dev profile)', () => {
       patientApiTimeoutSeconds: 10,
       alertActionsMemoryMb: 256,
       alertActionsTimeoutSeconds: 10,
+      patientMgmtMemoryMb: 256,
+      patientMgmtTimeoutSeconds: 15,
     },
   });
   const template = Template.fromStack(stack);
@@ -161,6 +163,8 @@ describe('SecurityStack (prod profile — Object Lock enabled)', () => {
       patientApiTimeoutSeconds: 10,
       alertActionsMemoryMb: 256,
       alertActionsTimeoutSeconds: 10,
+      patientMgmtMemoryMb: 256,
+      patientMgmtTimeoutSeconds: 15,
     },
   });
   const template = Template.fromStack(stack);

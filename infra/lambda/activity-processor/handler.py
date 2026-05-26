@@ -36,10 +36,17 @@ from _shared import (
     get_metrics,
     resolve_patient,
 )
+from _shared.pause_check import days_remaining, is_currently_paused
 from aws_lambda_powertools.metrics import MetricUnit
 
 # ── Configuration ────────────────────────────────────────────────
 ACTIVITY_TABLE = os.environ["ACTIVITY_TABLE"]
+# Phase 2A-UM-P L10 — patients table lookup for auto-resume on activity.
+PATIENTS_TABLE = os.environ.get("PATIENTS_TABLE", "gosteady-dev-patients")
+# Activity threshold for auto-resume; spec A6: default 0 (any activity
+# clears the pause — "the reason for pausing is gone"). Tunable via env
+# if false-positives become a complaint.
+AUTO_RESUME_MIN_STEPS = int(os.environ.get("AUTO_RESUME_MIN_STEPS", "0"))
 
 # 13 months = 13 × 30 × 86400 seconds ≈ retention horizon (L5 / 0B-rev D2).
 ACTIVITY_TTL_SECONDS = 13 * 30 * 86_400
@@ -66,6 +73,69 @@ metrics = get_metrics()
 
 _ddb = boto3.resource("dynamodb")
 _activity_tbl = _ddb.Table(ACTIVITY_TABLE)
+_patients_tbl = _ddb.Table(PATIENTS_TABLE)
+
+
+def _maybe_auto_resume_pause(patient: PatientContext, steps: int, session_end_iso: str) -> None:
+    """
+    Phase 2A-UM-P L10 — auto-resume notification pause when fresh activity
+    arrives. Per user-needs US-31: "auto-resumes early if activity data
+    starts streaming again before the timer expires (the reason for
+    pausing is gone)."
+
+    Best-effort: failures are logged but don't break the activity write.
+    Conditional `attribute_exists` on REMOVE handles the race where a
+    manual unpause already cleared the attribute between our resolve
+    and this update.
+    """
+    if not is_currently_paused({"notificationsPaused": patient.notificationsPaused}):
+        return
+    if steps < AUTO_RESUME_MIN_STEPS:
+        return  # below noise threshold — don't auto-resume
+
+    pause = patient.notificationsPaused or {}
+    days_left_before = days_remaining({"notificationsPaused": pause})
+
+    try:
+        _patients_tbl.update_item(
+            Key={"patientId": patient.patientId},
+            UpdateExpression="REMOVE notificationsPaused",
+            ConditionExpression="attribute_exists(notificationsPaused)",
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "ConditionalCheckFailedException":
+            # Manual unpause raced us. Benign.
+            logger.info(
+                "auto_resume_lost_race",
+                extra={"patientId": patient.patientId},
+            )
+            return
+        logger.exception(
+            "auto_resume_update_failed",
+            extra={"patientId": patient.patientId},
+        )
+        return
+
+    emit_audit(
+        "patient.notifications.resume_auto",
+        subject={
+            "patientId": patient.patientId,
+            "clientId": patient.clientId,
+            "facilityId": patient.facilityId,
+            "censusId": patient.censusId,
+            "deviceSerial": patient.deviceSerial,
+        },
+        action="update",
+        before={"notificationsPaused": pause},
+        after={"notificationsPaused": None},
+        extra={
+            "triggeringActivity": {"sessionEnd": session_end_iso, "steps": steps},
+            "pauseHadDaysRemaining": days_left_before,
+            "pauseReason": pause.get("reason"),
+        },
+    )
+    metrics.add_metric(name="notifications_auto_resume_count", unit=MetricUnit.Count, value=1)
 
 
 def _parse_iso(ts: str) -> datetime:
@@ -235,6 +305,12 @@ def handler(event: dict, _context):
         action="create",
         after=audit_after,
     )
+
+    # Phase 2A-UM-P L10 — auto-resume notification pause if any.
+    # Runs AFTER the activity PutItem succeeds (so we only auto-resume
+    # on real persisted activity, not on validation-rejected payloads).
+    # Best-effort; failures logged but don't fail the activity write.
+    _maybe_auto_resume_pause(patient, item["steps"], session_end_iso)
 
     logger.info(
         "activity_ok",

@@ -469,10 +469,10 @@ If WAF false-positives block legitimate traffic during 2A-DL development, the ea
 
 **Decision:** ✅ **Option A for MVP** + **Option B (or a server-side idle-tracking mechanism) as a pre-prod hardening item**, mirroring how Phase 1.5 multi-account and 1.7 Object Lock work (dev gets the simpler version; prod adds the rigorous version before first paying customer).
 
-**Implementation surface (lands as a 2A-0 follow-up, ~30 lines total):**
+**Implementation surface (deployed 2026-05-23; amended 2026-05-24 for the dual-wiring fix):**
 
-1. **`infra/lib/stacks/api-stack.ts`** — narrow `userPoolClients` array from `[portalCustomerClient, portalInternalClient]` to `[portalCustomerClient]` only. One-line change at line 159
-2. **`infra/lambda/_shared/api_authz.py`** — add:
+1. **`infra/lib/stacks/api-stack.ts`** — narrow `userPoolClients` array from `[portalCustomerClient, portalInternalClient]` to `[portalCustomerClient]` only. One-line change. ✅ Deployed 2026-05-23
+2. **`infra/lambda/_shared/api_authz.py`** — `enforce_internal_session_age()` helper:
    ```python
    def enforce_internal_session_age(claims: dict, max_age_seconds: int = 4 * 3600) -> None:
        """For internal_* roles, reject if token issued > max_age_seconds ago.
@@ -486,9 +486,11 @@ If WAF false-positives block legitimate traffic during 2A-DL development, the ea
            raise ApiError(401, "INTERNAL_SESSION_EXPIRED",
                           "Internal-tier session exceeded 4-hour absolute cap. Re-authenticate.")
    ```
-3. **`infra/lambda/_shared/api_audit.py`** — call `enforce_internal_session_age()` from the `audit_middleware` decorator BEFORE running the wrapped handler (so every endpoint gets the check; no per-handler code)
-4. **`docs/specs/phase-0a-revision.md`** — addendum note: "Portal-Internal client (`gvc7n839vj4ppgioamknlk21c`) is reserved for non-browser tools (CLI / server-side admin scripts) — no longer used by browser portal under Phase 2B-L1 unified-portal decision"
-5. **`docs/specs/ARCHITECTURE.md` §4 Internal Access** — clarify that internal-token lifetime enforcement for browser users now lives in `enforce_internal_session_age` (app layer), not at the Cognito client config
+   ✅ Deployed 2026-05-23 with 23 unit tests passing
+3. **`infra/lambda/_shared/api_audit.py`** — `audit_middleware` decorator calls `enforce_internal_session_age()` BEFORE the wrapped handler. ✅ Deployed 2026-05-23. **But this only protects handlers that USE the @audit_middleware decorator. As of the initial deploy, only `api-stub` uses it** — `device-api`, `patient-api`, `alert-actions`, and `patient-mgmt` all use a custom dispatcher pattern (explicit `emit_audit` calls per action; the decorator can't accommodate multi-event flows like provision emitting `claimed` + `assigned` + `activation_sent`).
+4. **Inline call in non-middleware handlers (amended 2026-05-24)** — the four handlers above each gain a one-line `enforce_internal_session_age(claims)` call right after `require_authenticated(claims)` in their main `handler()` entry point. This is the **actual** enforcement path for every endpoint internal users would hit. Without this, the dev-deployed amendment's claim of "4-hr absolute cap on internal_* sessions enforced app-layer" was technically untrue (the helper was wired only to api-stub's `/me` endpoint, not to any data-handling endpoints). ✅ Deployed 2026-05-24
+5. **`docs/specs/phase-0a-revision.md`** — addendum note added 2026-05-24: "Portal-Internal client (`gvc7n839vj4ppgioamknlk21c`) is reserved for non-browser tools (CLI / server-side admin scripts) — no longer used by browser portal under Phase 2B-L1 unified-portal decision"
+6. **`docs/specs/ARCHITECTURE.md` §4 Internal Access** — clarification added 2026-05-24: internal-token lifetime enforcement for browser users now lives in `enforce_internal_session_age` (app layer, called both from `audit_middleware` AND from non-middleware handlers' entry points), not at the Cognito client config
 
 **What's at stake:** Pre-prod gate — Option B should be revisited before the first internal customer-data access in production. Until then, Option A is acceptable in dev where the threat model is "developers + Claude operating in trusted contexts."
 

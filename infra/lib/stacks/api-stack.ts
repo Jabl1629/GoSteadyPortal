@@ -812,6 +812,150 @@ export class ApiStack extends cdk.Stack {
     });
     alertActionsErrorPatternAlarm.addAlarmAction(snsAction);
 
+    // ════════════════════════════════════════════════════════════════
+    // Phase 2A-UM-P — Patient Management
+    // ════════════════════════════════════════════════════════════════
+    //
+    // Single patient-mgmt Lambda + 6 routes (all patient mutations):
+    //   POST   /api/v1/patients                                  (create + optional atomic provision)
+    //   PATCH  /api/v1/patients/{id}                             (name / room / cross-facility)
+    //   POST   /api/v1/patients/{id}/discharge                   (cascade via DDB Streams + 2A-DL)
+    //   POST   /api/v1/patients/{id}/notifications/pause         (set pause)
+    //   DELETE /api/v1/patients/{id}/notifications/pause         (manual unpause)
+    //   PATCH  /api/v1/patients/{id}/care-note                   (set/clear care note)
+    //
+    // IAM blast radius is the union of patient-side and device-side
+    // grants because POST /patients can include atomic device-provision
+    // (v1 simplification: inline duplication of device-api's provision
+    // chain — see patient-mgmt/handler.py::_provision_inline NOTE).
+    //
+    // Spec: docs/specs/phase-2a-um-patient-management.md
+    const patientMgmt = new ProcessingLambda(this, 'PatientMgmt', {
+      config,
+      functionName: `gosteady-${env}-patient-mgmt`,
+      handlerDir: path.join(__dirname, '..', '..', 'lambda', 'patient-mgmt'),
+      description: 'Phase 2A-UM-P — 6 patient mutation routes + inline atomic provision',
+      memoryMb: config.patientMgmtMemoryMb,
+      timeoutSeconds: config.patientMgmtTimeoutSeconds,
+      powertoolsLayer,
+      tracingActive: true,
+      environment: {
+        ENVIRONMENT: env,
+        PATIENTS_TABLE: dataStack.patientsTable.tableName,
+        ORGANIZATIONS_TABLE: dataStack.organizationsTable.tableName,
+        USERS_TABLE: dataStack.usersTable.tableName,
+        DEVICES_TABLE: dataStack.deviceTable.tableName,
+        ASSIGNMENTS_TABLE: dataStack.deviceAssignmentsTable.tableName,
+        ROLE_ASSIGNMENTS_TABLE: authStack.roleAssignmentsTable.tableName,
+        ACTIVATION_ACK_WINDOW_HOURS: '24',
+      },
+    });
+    // Patients: read/write — create + update + discharge + pause + care note.
+    dataStack.patientsTable.grantReadWriteData(patientMgmt.function);
+    // Devices + DeviceAssignments: read/write because _provision_inline
+    // mirrors device-api's atomic provision chain (Phase 2A-UM-P L3 +
+    // patient-mgmt/handler.py::_provision_inline NOTE re: inline
+    // duplication for v1).
+    dataStack.deviceTable.grantReadWriteData(patientMgmt.function);
+    dataStack.deviceAssignmentsTable.grantReadWriteData(patientMgmt.function);
+    // Organizations: read for census→facility resolution + facility
+    // timezone lookup (no writes — Organizations is admin-managed).
+    dataStack.organizationsTable.grantReadData(patientMgmt.function);
+    // Users: read for care-note actor displayName denormalization (spec D5).
+    dataStack.usersTable.grantReadData(patientMgmt.function);
+    // RoleAssignments: read for family_viewer linkedPatientIds chain via
+    // _shared/api_authz.linked_patient_ids (called from
+    // enforce_patient_access on every update/discharge/pause).
+    authStack.roleAssignmentsTable.grantReadData(patientMgmt.function);
+    // KMS — identity-bearing tables (Patients, Organizations,
+    // DeviceAssignments, RoleAssignments are CMK-encrypted per
+    // 0A-rev + 0B-rev). Need EncryptDecrypt because we WRITE to
+    // Patients + DeviceAssignments (encrypt) + READ (decrypt).
+    identityKey.grantEncryptDecrypt(patientMgmt.function);
+    auditKey.grantEncryptDecrypt(patientMgmt.function);
+    // IoT data plane — atomic-provision path publishes activate cmd to
+    // gs/{serial}/cmd + updates Shadow desired.activated_at. Scoped to
+    // the same resource ARN patterns as device-api per L14 of 2A-DL.
+    patientMgmt.function.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:Publish'],
+      resources: [
+        `arn:aws:iot:${this.region}:${this.account}:topic/gs/*/cmd`,
+      ],
+    }));
+    patientMgmt.function.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:UpdateThingShadow', 'iot:GetThingShadow'],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
+    }));
+
+    // Wire 6 routes to the existing HTTP API + JWT authorizer.
+    const patientMgmtIntegration = new HttpLambdaIntegration(
+      'PatientMgmtIntegration',
+      patientMgmt.function,
+    );
+    const patientMgmtRoutes: Array<[apigwv2.HttpMethod, string]> = [
+      [apigwv2.HttpMethod.POST, '/api/v1/patients'],
+      [apigwv2.HttpMethod.PATCH, '/api/v1/patients/{id}'],
+      [apigwv2.HttpMethod.POST, '/api/v1/patients/{id}/discharge'],
+      [apigwv2.HttpMethod.POST, '/api/v1/patients/{id}/notifications/pause'],
+      [apigwv2.HttpMethod.DELETE, '/api/v1/patients/{id}/notifications/pause'],
+      [apigwv2.HttpMethod.PATCH, '/api/v1/patients/{id}/care-note'],
+    ];
+    for (const [method, p] of patientMgmtRoutes) {
+      this.httpApi.addRoutes({
+        path: p,
+        methods: [method],
+        integration: patientMgmtIntegration,
+        authorizer: userPoolAuthorizer,
+      });
+    }
+
+    // patient-mgmt alarms (mirrors 1.6 per-handler pattern):
+    //   1. Lambda Errors > 0 in 5 min (uncaught exceptions)
+    //   2. ERROR-pattern log filter
+    const patientMgmtErrorsAlarm = new cloudwatch.Alarm(this, 'PatientMgmtErrors', {
+      alarmName: `gosteady-${env}-patient-mgmt-errors`,
+      alarmDescription:
+        'patient-mgmt Lambda Errors > 0 in 5 min — uncaught exception in a ' +
+        'patient-mutation handler. Check /aws/lambda/gosteady-{env}-patient-mgmt.',
+      metric: patientMgmt.function.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    patientMgmtErrorsAlarm.addAlarmAction(snsAction);
+
+    const patientMgmtErrorPatternFilter = patientMgmt.function.logGroup.addMetricFilter(
+      'PatientMgmtErrorPattern',
+      {
+        filterPattern: logs.FilterPattern.literal('{ $.level = "ERROR" }'),
+        metricNamespace: `GoSteady/Handlers/${env}`,
+        metricName: 'PatientMgmtErrorLogLines',
+        metricValue: '1',
+        defaultValue: 0,
+      },
+    );
+    const patientMgmtErrorPatternAlarm = new cloudwatch.Alarm(this, 'PatientMgmtErrorPatternAlarm', {
+      alarmName: `gosteady-${env}-patient-mgmt-error-log-pattern`,
+      alarmDescription:
+        'patient-mgmt emitted >0 ERROR-level structured log lines in 5 min ' +
+        '(logged-and-swallowed handler error or rollback path).',
+      metric: patientMgmtErrorPatternFilter.metric({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    patientMgmtErrorPatternAlarm.addAlarmAction(snsAction);
+
     // ── 2A-DL outputs ──────────────────────────────────────────────
     new cdk.CfnOutput(this, 'DeviceApiName', {
       value: deviceApi.function.functionName,
@@ -834,6 +978,11 @@ export class ApiStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AlertActionsName', {
       value: alertActions.function.functionName,
       exportName: `${env}-AlertActionsName`,
+    });
+    // ── 2A-UM-P outputs ────────────────────────────────────────────
+    new cdk.CfnOutput(this, 'PatientMgmtName', {
+      value: patientMgmt.function.functionName,
+      exportName: `${env}-PatientMgmtName`,
     });
 
     // ── Outputs (existing 2A-0) ───────────────────────────────────
