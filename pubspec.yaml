@@ -20,6 +20,8 @@ dependencies:
   go_router: ^14.0.0
   http: ^1.1.0
   url_strategy: ^0.3.0
+  # Added in Phase 2B-FAC-R (phase-2b-fac-r-facility-reads.md L5):
+  visibility_detector: ^0.4.0+2
 
 dev_dependencies:
   flutter_test:

@@ -8164,3 +8164,47 @@ Bench-tested against `pt_bench_98` via Chrome MCP. Network capture surfaced layo
 ---
 
 *Entry owner: Claude (portal session, 2026-05-26). No firmware impact; portal-only caching primitive.*
+
+# §C32 — 2B-FAC-R row-loader throttle (L5) (2026-05-26)
+
+Entry owner: Claude (portal session) | Trigger: 2B-FAC-R umbrella L5 — cap concurrent per-row stats fetches at 5 so a 200-patient cold-load doesn't burst past dev API Gateway's 25 RPS throttle. **Zero firmware-facing impact** — pure-portal throttle primitive.
+
+## C32.1 — What landed
+
+- New `lib/state/row_loader_queue.dart` — generic `RowLoaderQueue<T>` with `maxConcurrent` (default 5) + per-key in-flight Future dedup. Re-enqueueing the same `patientId` while the prior task is pending returns the existing Future.
+- New `lib/widgets/maybe_visible.dart` — `MaybeVisible` wraps a child in `visibility_detector` and fires its `onFirstVisible` callback once when the child first scrolls in. Falls back to unwrapped passthrough when the callback is null (demo mode).
+- New pubspec dep: `visibility_detector: ^0.4.0+2`.
+- `lib/facility_demo/widgets/patient_list_view.dart` — `PatientListRow` gains `isLoading` + `onFirstVisible` fields; metric cells render a sage-tinted `_SkeletonBar` instead of zeros while loading. Each row wrapped in `MaybeVisible`.
+- `lib/facility_demo/screens/patient_census_view.dart` — owns the `RowLoaderQueue`; `_scheduleLoad(patientId)` enqueues `rowStatsFor + notificationsForPatient`. List + tile views both wired.
+
+## C32.2 — Visibility-lazy reverted to eager-enqueue
+
+Initial plan was viewport-driven lazy fetch: each row's `MaybeVisible.onFirstVisible` enqueues only when the row scrolls into view, leaving below-the-fold rows untouched. Live-test in release Flutter Web showed `visibility_detector`'s `onVisibilityChanged` callbacks fire intermittently — after a service-worker handover (which `flutter clean + ./tools/deploy-portal.sh` triggers on every redeploy), the first frame after sign-in sometimes never received a `visibleFraction > 0` event, and the rows stayed in skeleton state indefinitely. Console log instrumentation via `dart:developer log` did not surface in `chrome://console`; `print` did not surface either (Dart Web release strips both).
+
+Compromise: Census now **eager-enqueues** all visible rows on init through the throttle (`addPostFrameCallback(_enqueueAllVisible)`). The queue caps concurrency at 5 regardless, so API Gateway is still protected; the only thing lost is the "don't fetch off-screen rows at all" optimization (only relevant at 200+ patient scale, which the bench doesn't hit). The `MaybeVisible` wrapper stays in the tree as defensive belt-and-suspenders — if the visibility callback DOES fire, `_scheduleLoad` short-circuits because the row is already loaded.
+
+Filed as a future polish item: revisit visibility-lazy at first multi-patient pilot. Options: alternative package (`flutter_intersection_observer`), manual `Scrollable.of(context).addListener` + RenderObject bounds check, or just accept the eager-enqueue tradeoff if pilot doesn't hit throttle pressure.
+
+## C32.3 — Live validation against pt_bench_98
+
+Sign-in → Census renders with skeleton bars in each metric cell. Within ~2 s, the throttled fetches resolve and rows populate with real data: "Battery critical · 45" badge + red severity dot + Active min today=1, 7d avg=9, trend ↗, Steps today=35, trend ↗. Demo build (`BUILD_MODE=demo`) compiles cleanly + behaves as before (skeletons + queue still active but FacilityMockData resolves fast so the transition is brief).
+
+## C32.4 — Subset status after this entry
+
+| 2B-FAC-R follow-up | Status |
+|---|---|
+| Initial impl slice | ✅ deployed (2026-05-25, validated 2026-05-26) |
+| L3 + L11 PollingController + lifecycle pause | ✅ deployed (2026-05-26, coord §C29) |
+| L6 notification engine swap to alertType | ✅ deployed (2026-05-26, coord §C30) |
+| L12 30 s TTL caching + in-flight dedup | ✅ deployed (2026-05-26, coord §C31) |
+| **L5 row-loader throttle + skeleton placeholders** | ✅ **deployed (2026-05-26) — this entry; visibility-lazy reverted to eager-enqueue (see §C32.2)** |
+
+**2B-FAC-R substantively complete for V1 critical-path.** All five umbrella locked-in requirements landed; the visibility-lazy sub-optimization is the only deferred piece, only relevant at >50-patient pilot scale.
+
+## C32.5 — Coord doc for next sync
+
+V1 portal MVP critical-path is fully wired. Next FAC subset is **2B-FAC-W** (facility writes): alert ack `PATCH /alerts/{patientId}/{ts}` + Add/Edit Resident + Discharge + Pause Notifications + Care Note. All four backend endpoints (2A-AA + 2A-UM-P) are already deployed; FAC-W is pure-Flutter wiring.
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-26). No firmware impact; portal-only throttle primitive.*

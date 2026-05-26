@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../theme/app_theme.dart';
+import '../../widgets/maybe_visible.dart';
 import '../data/facility_mock_data.dart';
 import '../models/notification.dart';
 import '../models/patient.dart';
@@ -14,11 +15,25 @@ class PatientListRow {
   final PatientRowStats stats;
   final List<PatientNotification> activeNotifications;
 
+  /// Whether stats are still loading. When true, the trend / avg /
+  /// today cells render a skeleton placeholder instead of zeros.
+  /// Per phase-2b-fac-r L5.
+  final bool isLoading;
+
+  /// Fired once when this row first scrolls into view. Wired by
+  /// `PatientCensusView` to enqueue the row's `rowStatsFor +
+  /// notificationsForPatient` fetch through its `RowLoaderQueue`
+  /// (capped at 5 concurrent per L5). Null in demo mode where rows
+  /// load eagerly from seed.
+  final VoidCallback? onFirstVisible;
+
   const PatientListRow({
     required this.patient,
     required this.unitDisplay,
     required this.stats,
     required this.activeNotifications,
+    this.isLoading = false,
+    this.onFirstVisible,
   });
 
   NotificationSeverity? get highestSeverity {
@@ -156,13 +171,18 @@ class PatientListView extends StatelessWidget {
             children: [
               _HeaderRow(columns: _columns, useFlex: !shouldScroll),
               for (var i = 0; i < rows.length; i++)
-                _DataRow(
-                  row: rows[i],
-                  columns: _columns,
-                  useFlex: !shouldScroll,
-                  selected: rows[i].patient.id == selectedPatientId,
-                  isLast: i == rows.length - 1,
-                  onTap: () => onSelect(rows[i].patient.id),
+                MaybeVisible(
+                  detectorKey:
+                      ValueKey('row-visibility-${rows[i].patient.id}'),
+                  onFirstVisible: rows[i].onFirstVisible,
+                  child: _DataRow(
+                    row: rows[i],
+                    columns: _columns,
+                    useFlex: !shouldScroll,
+                    selected: rows[i].patient.id == selectedPatientId,
+                    isLast: i == rows.length - 1,
+                    onTap: () => onSelect(rows[i].patient.id),
+                  ),
                 ),
             ],
           ),
@@ -347,67 +367,83 @@ class _DataRowState extends State<_DataRow> {
               ),
               _cell(
                 index: 2,
-                child: _NeedsReviewCell(
-                  count: r.activeNotifications.length,
-                  severity: r.highestSeverity,
-                  headlineLabel: _headlineLabel(r.activeNotifications),
-                ),
+                child: r.isLoading
+                    ? const _SkeletonBar(width: 70)
+                    : _NeedsReviewCell(
+                        count: r.activeNotifications.length,
+                        severity: r.highestSeverity,
+                        headlineLabel: _headlineLabel(r.activeNotifications),
+                      ),
               ),
               _cell(
                 index: 3,
-                child: _MetricText(
-                  value: stats.activeMinutesToday.toString(),
-                  color: _activeMinColor(stats.activeMinutesToday),
-                ),
+                child: r.isLoading
+                    ? const _SkeletonBar(width: 28)
+                    : _MetricText(
+                        value: stats.activeMinutesToday.toString(),
+                        color: _activeMinColor(stats.activeMinutesToday),
+                      ),
               ),
               _cell(
                 index: 4,
-                child: _MetricText(
-                  value: activeMin7d.toString(),
-                  color: _activeMinColor(activeMin7d),
-                ),
+                child: r.isLoading
+                    ? const _SkeletonBar(width: 28)
+                    : _MetricText(
+                        value: activeMin7d.toString(),
+                        color: _activeMinColor(activeMin7d),
+                      ),
               ),
               _cell(
                 index: 5,
-                child: _TrendCell(
-                  trend: stats.activeMinutesTrend7d,
-                  recent: stats.activeMinutes7dAvg,
-                  prior: stats.activeMinutesPrior7dAvg,
-                ),
+                child: r.isLoading
+                    ? const _SkeletonBar(width: 36)
+                    : _TrendCell(
+                        trend: stats.activeMinutesTrend7d,
+                        recent: stats.activeMinutes7dAvg,
+                        prior: stats.activeMinutesPrior7dAvg,
+                      ),
               ),
               _cell(
                 index: 6,
-                child: _MetricText(
-                  value: NumberFormat('#,##0').format(stats.stepsToday),
-                  color: _stepsColor(stats.stepsToday),
-                ),
+                child: r.isLoading
+                    ? const _SkeletonBar(width: 40)
+                    : _MetricText(
+                        value: NumberFormat('#,##0').format(stats.stepsToday),
+                        color: _stepsColor(stats.stepsToday),
+                      ),
               ),
               _cell(
                 index: 7,
-                child: _TrendCell(
-                  trend: stats.stepsTrend7d,
-                  recent: stats.stepsRecentAvg,
-                  prior: stats.stepsPriorAvg,
-                ),
+                child: r.isLoading
+                    ? const _SkeletonBar(width: 36)
+                    : _TrendCell(
+                        trend: stats.stepsTrend7d,
+                        recent: stats.stepsRecentAvg,
+                        prior: stats.stepsPriorAvg,
+                      ),
               ),
               _cell(
                 index: 8,
-                child: _MetricText(
-                  value: stats.gaitSpeed3dAvg > 0
-                      ? gaitFps.toStringAsFixed(2)
-                      : '—',
-                  color: stats.gaitSpeed3dAvg > 0
-                      ? AppTheme.textDark
-                      : AppTheme.textSoft,
-                ),
+                child: r.isLoading
+                    ? const _SkeletonBar(width: 28)
+                    : _MetricText(
+                        value: stats.gaitSpeed3dAvg > 0
+                            ? gaitFps.toStringAsFixed(2)
+                            : '—',
+                        color: stats.gaitSpeed3dAvg > 0
+                            ? AppTheme.textDark
+                            : AppTheme.textSoft,
+                      ),
               ),
               _cell(
                 index: 9,
-                child: _TrendCell(
-                  trend: stats.gaitSpeedTrend,
-                  recent: stats.gaitSpeed3dAvg,
-                  prior: stats.gaitSpeedPriorAvg,
-                ),
+                child: r.isLoading
+                    ? const _SkeletonBar(width: 36)
+                    : _TrendCell(
+                        trend: stats.gaitSpeedTrend,
+                        recent: stats.gaitSpeed3dAvg,
+                        prior: stats.gaitSpeedPriorAvg,
+                      ),
               ),
             ],
           ),
@@ -630,3 +666,25 @@ Alignment _toAlignment(_CellAlign a) {
       return Alignment.centerRight;
   }
 }
+
+/// Sage-tinted skeleton placeholder rendered in each metric cell
+/// while a row's `rowStatsFor + notificationsForPatient` fetch is
+/// pending (per phase-2b-fac-r L5). A static bar — not animated —
+/// keeps the Census quiet during cold-load instead of pulsing.
+class _SkeletonBar extends StatelessWidget {
+  const _SkeletonBar({this.width = 32});
+  final double width;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: width,
+      height: 10,
+      decoration: BoxDecoration(
+        color: AppTheme.sage.withOpacity(0.18),
+        borderRadius: BorderRadius.circular(4),
+      ),
+    );
+  }
+}
+

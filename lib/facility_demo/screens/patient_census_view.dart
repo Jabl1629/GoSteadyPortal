@@ -4,6 +4,8 @@ import '../../theme/app_theme.dart';
 import '../../data/facility_repository.dart';
 import '../../state/app_state.dart';
 import '../../state/polling_controller.dart';
+import '../../state/row_loader_queue.dart';
+import '../../widgets/maybe_visible.dart';
 import '../data/facility_mock_data.dart' show PatientRowStats, Trend;
 import '../data/notification_engine.dart';
 import '../models/notification.dart';
@@ -69,19 +71,47 @@ class PatientCensusView extends StatefulWidget {
 }
 
 class _PatientCensusViewState extends State<PatientCensusView> {
-  // Pre-loaded per-patient data; keyed by patientId.
+  // Loaded per-patient data; keyed by patientId.
   final Map<String, _RowData> _loaded = {};
-  // Currently-pending fetches.
+  // Currently-pending fetches (dedup at this state layer; deeper
+  // dedup happens inside [RowLoaderQueue] and the live repo's
+  // _TimedCache).
   final Set<String> _inFlight = {};
+
+  /// Lazy-per-row stats loader per phase-2b-fac-r L5 — caps concurrent
+  /// `rowStatsFor + notificationsForPatient` fetches at 5 so a 200-
+  /// patient cold-load doesn't slam API Gateway's 25 RPS dev throttle.
+  /// Tasks are enqueued by each row's `VisibilityDetector` callback
+  /// when it first scrolls into view.
+  late final RowLoaderQueue<_RowData> _rowQueue;
 
   PollingController? _polling;
 
   @override
   void initState() {
     super.initState();
+    _rowQueue = RowLoaderQueue<_RowData>(maxConcurrent: 5);
     widget.selection.addListener(_onSelectionChanged);
     widget.notifications.addListener(_rebuild);
-    _fetchMissing();
+    // Kick off fetches for the visible patient set through the
+    // throttled queue. The queue caps concurrency at 5 (per L5)
+    // even though we eager-enqueue everything — this gives us the
+    // API-throttle protection without depending on viewport
+    // visibility, which proved fragile in release Flutter Web
+    // (VisibilityDetector callbacks sometimes don't fire post-
+    // service-worker handover). Visibility-lazy remains an
+    // optional polish item if multi-patient pilot data shows the
+    // eager-enqueue rate-limit isn't sufficient.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _enqueueAllVisible());
+  }
+
+  void _enqueueAllVisible() {
+    if (!mounted) return;
+    final summaries =
+        widget.data.patientsForSelection(widget.selection.selectedUnitIds);
+    for (final s in summaries) {
+      _scheduleLoad(s.patient.id);
+    }
   }
 
   @override
@@ -107,6 +137,7 @@ class _PatientCensusViewState extends State<PatientCensusView> {
     widget.notifications.removeListener(_rebuild);
     _polling?.censusTick.removeListener(_onPollTick);
     _polling?.stopCensusPolling();
+    _rowQueue.clear();
     super.dispose();
   }
 
@@ -115,12 +146,17 @@ class _PatientCensusViewState extends State<PatientCensusView> {
   }
 
   void _onSelectionChanged() {
-    _fetchMissing();
+    _enqueueAllVisible();
     _rebuild();
   }
 
   /// Polling tick: refresh the cached `/me/patients` slice, then
-  /// drop any per-row stats so they re-fetch with current data.
+  /// re-fetch stats for any previously-loaded rows. We can't rely on
+  /// each row's [MaybeVisible.onFirstVisible] firing a second time —
+  /// it's intentionally one-shot per detector instance. So the set
+  /// of "rows we've seen at least once" is the right re-fetch
+  /// universe; newly-appearing rows still go through the visibility
+  /// callback as before.
   Future<void> _onPollTick() async {
     try {
       await widget.data.refreshCensus();
@@ -133,40 +169,44 @@ class _PatientCensusViewState extends State<PatientCensusView> {
     setState(() {
       _loaded.clear();
       _inFlight.clear();
+      _rowQueue.clear();
     });
-    _fetchMissing();
+    _enqueueAllVisible();
   }
 
-  /// Kick off fetches for any visible patient that hasn't loaded yet.
-  void _fetchMissing() {
-    final summaries =
-        widget.data.patientsForSelection(widget.selection.selectedUnitIds);
-    for (final s in summaries) {
-      final id = s.patient.id;
-      if (_loaded.containsKey(id) || _inFlight.contains(id)) continue;
-      _inFlight.add(id);
-      Future.wait([
-        widget.data.rowStatsFor(id),
-        notificationsForPatient(widget.data, id),
-      ]).then((results) {
-        if (!mounted) return;
-        setState(() {
-          _loaded[id] = _RowData(
-            stats: results[0] as PatientRowStats,
-            computed: results[1] as List<PatientNotification>,
-          );
-          _inFlight.remove(id);
-        });
-      }).catchError((_) {
-        if (!mounted) return;
-        setState(() {
-          // Mark as failed via empty placeholder so the UI doesn't
-          // hang forever; later commits add retry UX.
-          _loaded[id] = const _RowData.empty();
-          _inFlight.remove(id);
-        });
-      });
+  /// Enqueue a row's `rowStatsFor + notificationsForPatient` fetch
+  /// via [_rowQueue] (capped at 5 concurrent per L5). Called from
+  /// each row's `VisibilityDetector` callback when it first scrolls
+  /// into view. The queue dedups concurrent enqueues for the same
+  /// patientId.
+  void _scheduleLoad(String patientId) {
+    if (_loaded.containsKey(patientId) || _inFlight.contains(patientId)) {
+      return;
     }
+    _inFlight.add(patientId);
+    _rowQueue.enqueue(patientId, () async {
+      // Sequential awaits (not Future.wait) to keep the type inference
+      // simple in release builds and to play nicely with the live
+      // repo's in-flight Future dedup at the per-cache layer.
+      final stats = await widget.data.rowStatsFor(patientId);
+      final notifications =
+          await notificationsForPatient(widget.data, patientId);
+      return _RowData(stats: stats, computed: notifications);
+    }).then((data) {
+      if (!mounted) return;
+      setState(() {
+        _loaded[patientId] = data;
+        _inFlight.remove(patientId);
+      });
+    }, onError: (Object e) {
+      if (!mounted) return;
+      setState(() {
+        // Empty placeholder on error — UI doesn't hang; retry UX is
+        // a later polish item.
+        _loaded[patientId] = const _RowData.empty();
+        _inFlight.remove(patientId);
+      });
+    });
   }
 
   @override
@@ -199,13 +239,16 @@ class _PatientCensusViewState extends State<PatientCensusView> {
           else if (widget.selection.viewMode == CensusViewMode.list)
             PatientListView(
               rows: filtered.map((r) {
-                final loaded = _loaded[r.summary.patient.id];
+                final id = r.summary.patient.id;
+                final loaded = _loaded[id];
                 return PatientListRow(
                   patient: r.summary.patient,
                   unitDisplay:
                       unitDisplayFor(widget.data, r.summary.patient.unitId),
                   stats: loaded?.stats ?? _placeholderStats,
                   activeNotifications: r.active,
+                  isLoading: loaded == null,
+                  onFirstVisible: () => _scheduleLoad(id),
                 );
               }).toList(),
               selectedPatientId: widget.selection.selectedPatientId,
@@ -216,6 +259,7 @@ class _PatientCensusViewState extends State<PatientCensusView> {
               rows: filtered,
               data: widget.data,
               selection: widget.selection,
+              onRowVisible: _scheduleLoad,
             ),
         ],
       ),
@@ -410,11 +454,17 @@ class _Grid extends StatelessWidget {
     required this.rows,
     required this.data,
     required this.selection,
+    required this.onRowVisible,
   });
 
   final List<_CensusRow> rows;
   final FacilityRepository data;
   final FacilitySelection selection;
+
+  /// Fired once when each tile first scrolls into view. Wired by
+  /// the Census view to enqueue the row's stats fetch through its
+  /// [RowLoaderQueue] (L5).
+  final void Function(String patientId) onRowVisible;
 
   @override
   Widget build(BuildContext context) {
@@ -432,12 +482,19 @@ class _Grid extends StatelessWidget {
             for (final r in rows)
               SizedBox(
                 width: (constraints.maxWidth - gap * (cols - 1)) / cols,
-                child: PatientTile(
-                  summary: r.summary,
-                  unitDisplay: unitDisplayFor(data, r.summary.patient.unitId),
-                  selected: selection.selectedPatientId == r.summary.patient.id,
-                  onTap: () => selection.selectPatient(r.summary.patient.id),
-                  activeNotifications: r.active,
+                child: MaybeVisible(
+                  detectorKey:
+                      ValueKey('tile-visibility-${r.summary.patient.id}'),
+                  onFirstVisible: () => onRowVisible(r.summary.patient.id),
+                  child: PatientTile(
+                    summary: r.summary,
+                    unitDisplay:
+                        unitDisplayFor(data, r.summary.patient.unitId),
+                    selected:
+                        selection.selectedPatientId == r.summary.patient.id,
+                    onTap: () => selection.selectPatient(r.summary.patient.id),
+                    activeNotifications: r.active,
+                  ),
                 ),
               ),
           ],
