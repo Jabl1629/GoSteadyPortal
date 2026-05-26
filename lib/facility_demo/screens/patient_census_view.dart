@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
 import '../../data/facility_repository.dart';
+import '../../state/app_state.dart';
+import '../../state/polling_controller.dart';
 import '../data/facility_mock_data.dart' show PatientRowStats, Trend;
 import '../data/notification_engine.dart';
 import '../models/notification.dart';
@@ -72,6 +74,8 @@ class _PatientCensusViewState extends State<PatientCensusView> {
   // Currently-pending fetches.
   final Set<String> _inFlight = {};
 
+  PollingController? _polling;
+
   @override
   void initState() {
     super.initState();
@@ -81,9 +85,28 @@ class _PatientCensusViewState extends State<PatientCensusView> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Per phase-2b-fac-r-facility-reads.md L3 — 60s Census poll
+    // driven by the AppShell-mounted PollingController. Subscribing
+    // here (rather than initState) gives access to AppState's
+    // InheritedWidget.
+    final ctl = AppState.of(context).polling;
+    if (ctl != _polling) {
+      _polling?.censusTick.removeListener(_onPollTick);
+      _polling?.stopCensusPolling();
+      _polling = ctl;
+      _polling!.censusTick.addListener(_onPollTick);
+      _polling!.startCensusPolling();
+    }
+  }
+
+  @override
   void dispose() {
     widget.selection.removeListener(_onSelectionChanged);
     widget.notifications.removeListener(_rebuild);
+    _polling?.censusTick.removeListener(_onPollTick);
+    _polling?.stopCensusPolling();
     super.dispose();
   }
 
@@ -94,6 +117,24 @@ class _PatientCensusViewState extends State<PatientCensusView> {
   void _onSelectionChanged() {
     _fetchMissing();
     _rebuild();
+  }
+
+  /// Polling tick: refresh the cached `/me/patients` slice, then
+  /// drop any per-row stats so they re-fetch with current data.
+  Future<void> _onPollTick() async {
+    try {
+      await widget.data.refreshCensus();
+    } catch (_) {
+      // Swallow transient errors; next tick retries. Loud diagnostics
+      // live in the API client.
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _loaded.clear();
+      _inFlight.clear();
+    });
+    _fetchMissing();
   }
 
   /// Kick off fetches for any visible patient that hasn't loaded yet.

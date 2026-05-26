@@ -4,7 +4,9 @@ import '../../data/facility_repository.dart';
 import '../../models/activity.dart';
 import '../../models/device.dart';
 import '../../screens/device_screen.dart';
+import '../../state/app_state.dart';
 import '../../state/build_mode.dart';
+import '../../state/polling_controller.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/patient_dashboard.dart';
 import '../data/notification_engine.dart';
@@ -84,11 +86,34 @@ class _PatientDetailLoader extends StatefulWidget {
 
 class _PatientDetailLoaderState extends State<_PatientDetailLoader> {
   late Future<_PatientDetailBundle> _bundle;
+  PollingController? _polling;
 
   @override
   void initState() {
     super.initState();
     _bundle = _load();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Per phase-2b-fac-r-facility-reads.md L3 — 30s Patient Detail
+    // poll driven by the AppShell-mounted PollingController.
+    final ctl = AppState.of(context).polling;
+    if (ctl != _polling) {
+      _polling?.patientTick.removeListener(_onPollTick);
+      _polling?.stopPatientPolling();
+      _polling = ctl;
+      _polling!.patientTick.addListener(_onPollTick);
+      _polling!.startPatientPolling(widget.patientId);
+    }
+  }
+
+  @override
+  void dispose() {
+    _polling?.patientTick.removeListener(_onPollTick);
+    _polling?.stopPatientPolling();
+    super.dispose();
   }
 
   Future<_PatientDetailBundle> _load() async {
@@ -110,6 +135,21 @@ class _PatientDetailLoaderState extends State<_PatientDetailLoader> {
       last6m: results[5] as List<WeeklyActivity>,
       notifications: results[6] as List<PatientNotification>,
     );
+  }
+
+  /// Polling tick: drop the per-patient caches and re-issue the
+  /// parallel detail fetch. Errors are swallowed so the next tick
+  /// retries; the FutureBuilder keeps showing the prior bundle.
+  Future<void> _onPollTick() async {
+    try {
+      await widget.data.refreshPatientDetail(widget.patientId);
+    } catch (_) {
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _bundle = _load();
+    });
   }
 
   @override

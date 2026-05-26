@@ -8040,3 +8040,49 @@ CR-1 fully closed end-to-end. No further firmware or cloud action required. Next
 ---
 
 *Entry owner: Claude (portal session, 2026-05-26). Validates §C28.1 deploy; no firmware impact.*
+
+# §C29 — 2B-FAC-R PollingController landed + live-validated (2026-05-26)
+
+Entry owner: Claude (portal session) | Trigger: 2B-FAC-R umbrella L3 + L11 — polling cadence + lifecycle-paused refresh. Cloud-side V1 critical path was already complete (see §C27); this entry covers the portal-side polling implementation. **Zero firmware-facing impact** — pure-Flutter follow-up.
+
+## C29.1 — What landed
+
+New file `lib/state/polling_controller.dart`: a `WidgetsBindingObserver`-backed singleton with two `ValueNotifier<int>` ticks (`censusTick`, `patientTick`) driven by `Timer.periodic` on configurable intervals (defaults 60 s / 30 s per umbrella L3). Both timers pause when `didChangeAppLifecycleState` reports anything other than `AppLifecycleState.resumed` and resume immediately on return.
+
+Wired into:
+
+- `lib/shell/app_shell.dart` — constructs one PollingController in `_AppShellState.initState`, calls `attach()` to register the observer, `dispose()` on shell teardown
+- `lib/state/app_state.dart` — adds `final PollingController polling` field next to existing `auth`/`repository`/`apiClient`/`buildMode`
+- `lib/facility_demo/screens/patient_census_view.dart` — subscribes in `didChangeDependencies` (`startCensusPolling()` + `censusTick.addListener(_onPollTick)`); `_onPollTick` calls `repository.refreshCensus()` then clears `_loaded`/`_inFlight` and re-runs `_fetchMissing()`
+- `lib/facility_demo/screens/patient_detail_view.dart` — `_PatientDetailLoaderState` subscribes in `didChangeDependencies` (`startPatientPolling(patientId)` + `patientTick.addListener(_onPollTick)`); `_onPollTick` calls `repository.refreshPatientDetail(patientId)` and re-runs `_bundle = _load()`
+
+Both views unsubscribe + stop polling in `dispose()`. Errors inside `_onPollTick` are swallowed; the next tick retries.
+
+## C29.2 — Live validation against pt_bench_98
+
+Signed in as `dev-pilot-caregiver@test.local` at the dev portal; opened Patient Detail for `pt_bench_98`. Captured network requests via the Chrome MCP `read_network_requests` tool over a ~70 s observation window. Confirmed:
+
+- `/me/patients` GET fires at the 60 s mark (Census polling tick)
+- `/patients/pt_bench_98` + `/patients/pt_bench_98/activity?range=24h` + `/patients/pt_bench_98/alerts?status=unacknowledged` + 7d + 30d all fire every ~30 s while Patient Detail is open (Patient Detail polling tick)
+
+The fan-out per Patient Detail tick is 6 requests (full `_load()` re-run after `refreshPatientDetail` clears the per-patient caches). Two of those 6 are duplicate `?range=30d` calls because `last30DaysFor` and `last6MonthsFor` both internally call `_fetchActivity(30d)` and race the cache write. A future TTL-caching pass (umbrella L12) would dedupe in-flight fetches and collapse this to 5 requests per tick.
+
+Did not bench-test backgrounded pause behavior (the Chrome MCP tab stays focused throughout). The lifecycle gate is exercised at app-resume time during normal use; no live-fire regression expected.
+
+## C29.3 — Subset status after this entry
+
+| 2B-FAC-R follow-up | Status |
+|---|---|
+| Initial impl slice (commits `b2da2cc` through `89bd76f`) | ✅ deployed (2026-05-25, validated 2026-05-26) |
+| L3 + L11 PollingController + lifecycle pause | ✅ **deployed (2026-05-26) — this entry** |
+| L5 lazy-per-row activity throttle | 🔲 mostly invisible at single-patient bench scale; needed at 200-patient facility scale |
+| L6 notification engine swap to alertType | 🔲 live Census still renders "—" in Notifications column; live-mode bypass of `notification_engine.dart` still pending |
+| L12 30s TTL caching + in-flight-future dedupe | 🔲 would collapse duplicate `?range=30d` fan-out fetches; minor at MVP |
+
+## C29.4 — Coord doc for next sync
+
+Next portal-side work item TBD per user direction. Cloud-side V1 critical path remains complete. No firmware action required.
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-26). No firmware impact; portal-only polling primitive.*

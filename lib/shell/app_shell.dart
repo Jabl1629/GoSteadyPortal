@@ -8,6 +8,7 @@ import '../facility_demo/screens/facility_shell.dart';
 import '../state/app_router.dart';
 import '../state/app_state.dart';
 import '../state/build_mode.dart';
+import '../state/polling_controller.dart';
 import '../theme/app_theme.dart';
 
 /// Shared root widget for both build modes.
@@ -40,6 +41,7 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   late final GoRouter _router;
+  late final PollingController _polling;
 
   /// Future for the repository prime call. Null until sign-in fires
   /// the listener that kicks it off. Replaced on each new sign-in.
@@ -50,6 +52,7 @@ class _AppShellState extends State<AppShell> {
   @override
   void initState() {
     super.initState();
+    _polling = PollingController()..attach();
     _wasSignedIn = widget.auth.isSignedIn;
     if (_wasSignedIn) {
       _primeFuture = widget.repository.primeAtSignIn();
@@ -68,6 +71,7 @@ class _AppShellState extends State<AppShell> {
   @override
   void dispose() {
     widget.auth.removeListener(_onAuthChanged);
+    _polling.dispose();
     super.dispose();
   }
 
@@ -96,6 +100,7 @@ class _AppShellState extends State<AppShell> {
       repository: widget.repository,
       apiClient: widget.apiClient,
       buildMode: widget.buildMode,
+      polling: _polling,
       child: MaterialApp.router(
         title: widget.buildMode.isDemo
             ? 'GoSteady — Facility Demo'
