@@ -47,6 +47,14 @@ class AuthService extends AuthServiceInterface {
   @override
   Future<GoSteadyUser> signIn(String email, String password) async {
     _cognitoUser = CognitoUser(email, _pool);
+    // Switch from SRP_AUTH (default) to USER_PASSWORD_AUTH — SRP via
+    // Web Crypto API has been unreliable on Flutter Web in our testing
+    // (CognitoNotAuthorizedException despite correct credentials).
+    // USER_PASSWORD_AUTH sends the password over HTTPS to Cognito;
+    // safe for a customer-facing browser flow. The Portal-Customer App
+    // Client has ALLOW_USER_PASSWORD_AUTH enabled per Phase 0A-rev.
+    _cognitoUser!.setAuthenticationFlowType('USER_PASSWORD_AUTH');
+
     final authDetails = AuthenticationDetails(
       username: email,
       password: password,
