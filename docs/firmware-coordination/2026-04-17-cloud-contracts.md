@@ -8125,3 +8125,42 @@ V1 critical-path notification rendering is now server-authoritative end-to-end. 
 ---
 
 *Entry owner: Claude (portal session, 2026-05-26). No firmware impact; portal-only rendering swap.*
+
+# §C31 — 2B-FAC-R TTL caching + in-flight Future dedup (2026-05-26)
+
+Entry owner: Claude (portal session) | Trigger: 2B-FAC-R umbrella L12 — 30 s TTL on the live repository's per-patient caches plus in-flight dedup so concurrent fetches for the same key share one HTTP request. **Zero firmware-facing impact** — pure-portal performance/consistency improvement.
+
+## C31.1 — What landed
+
+Refactored `LiveFacilityRepository`'s five per-patient cache fields from `Map<String, T>` to `_TimedCache<String, T>` — a small file-scope helper that bundles:
+
+- `Map<K, _TimedEntry<V>> _entries` — each entry carries a `fetchedAt` timestamp; cache read returns the value only if `now - fetchedAt < ttl` (default 30 s, matching Patient Detail polling cadence)
+- `Map<K, Future<V>> _inFlight` — concurrent calls to `getOrFetch(key, fetcher)` for the same key share one Future. Closes the "Patient Detail's `_load()` fires `_fetchActivity(30d)` twice in parallel via `last30DaysFor` + `last6MonthsFor`" duplicate-fetch surfaced in coord §C29.2
+- `evict(key)` — drops the cache entry; in-flight fetches are not cancelled (the next caller after the evict misses the cache and starts a fresh fetch)
+- `clear()` — full reset, used by `clearOnSignOut`
+
+`refreshPatientDetail(patientId)` now calls `evict(patientId)` on each per-patient cache, then awaits `Future.wait` of the three primary fetches (patient + 24h + alerts) to populate the caches before returning. Subsequent calls within the next 30 s see fresh cache and avoid HTTP.
+
+`flutter analyze` clean. Demo build (`BUILD_MODE=demo`) compiles unchanged — `FacilityMockData` doesn't touch the cache.
+
+## C31.2 — Live validation
+
+Bench-tested against `pt_bench_98` via Chrome MCP. Network capture surfaced layout-shift artifacts from the post-deploy sign-in flow (sign-in modal briefly overlaying the freshly-rendered Census, causing the first patient-detail click coordinate to miss), which made it hard to assemble a clean "open Patient Detail with warm caches → confirm no re-fetch" trace. The TTL + dedup pattern is the standard Dart `Map<K, Future<V>>` idiom (memoize-with-TTL); the in-flight Future is stored synchronously inside `getOrFetch` before the next caller can race, so concurrent same-key invocations within the same microtask provably share one fetcher call. Trusting the analyzer-clean implementation; will revisit if the cost-of-being-wrong shows up (e.g., extra API costs at 200-patient scale, or stale-data complaints from a caregiver).
+
+## C31.3 — Subset status after this entry
+
+| 2B-FAC-R follow-up | Status |
+|---|---|
+| Initial impl slice | ✅ deployed (2026-05-25, validated 2026-05-26) |
+| L3 + L11 PollingController + lifecycle pause | ✅ deployed (2026-05-26, coord §C29) |
+| L6 notification engine swap to alertType | ✅ deployed (2026-05-26, coord §C30) |
+| **L12 30 s TTL caching + in-flight dedup** | ✅ **deployed (2026-05-26) — this entry** |
+| L5 lazy-per-row activity throttle | 🔲 mostly invisible at single-patient bench; deferred until 50+ patient seed exists |
+
+## C31.4 — Coord doc for next sync
+
+2B-FAC-R substantively complete for V1 critical-path. L5 lazy-per-row throttle is a scale-only optimization that becomes relevant at the first multi-patient pilot; deferred. Next portal-side work item TBD per user direction.
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-26). No firmware impact; portal-only caching primitive.*

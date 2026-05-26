@@ -34,12 +34,19 @@ class LiveFacilityRepository implements FacilityRepository {
   /// [primeAtSignIn]; cleared by [clearOnSignOut].
   List<MePatientSummary>? _mePatients;
 
-  /// Per-patient detail caches. Simple maps; no TTL yet.
-  final Map<String, PatientFull> _patientDetailCache = {};
-  final Map<String, List<ActivitySession>> _activity24hCache = {};
-  final Map<String, List<ActivitySession>> _activity7dCache = {};
-  final Map<String, List<ActivitySession>> _activity30dCache = {};
-  final Map<String, List<AlertRow>> _alertsCache = {};
+  /// Per-patient detail caches with 30-second TTL + in-flight Future
+  /// dedup per phase-2b-fac-r L12. Concurrent calls for the same key
+  /// share one HTTP fetch; subsequent calls within the TTL window
+  /// hit the cache (no HTTP). Entries are evicted by [_TimedCache.evict]
+  /// from the explicit `refresh*()` methods and by [clearOnSignOut].
+  final _TimedCache<String, PatientFull> _patientDetailCache = _TimedCache();
+  final _TimedCache<String, List<ActivitySession>> _activity24hCache =
+      _TimedCache();
+  final _TimedCache<String, List<ActivitySession>> _activity7dCache =
+      _TimedCache();
+  final _TimedCache<String, List<ActivitySession>> _activity30dCache =
+      _TimedCache();
+  final _TimedCache<String, List<AlertRow>> _alertsCache = _TimedCache();
 
   // ── Lifecycle ─────────────────────────────────────────────────
 
@@ -66,12 +73,16 @@ class LiveFacilityRepository implements FacilityRepository {
 
   @override
   Future<void> refreshPatientDetail(String patientId) async {
-    // Drop the per-patient caches and refetch in parallel.
-    _patientDetailCache.remove(patientId);
-    _activity24hCache.remove(patientId);
-    _activity7dCache.remove(patientId);
-    _activity30dCache.remove(patientId);
-    _alertsCache.remove(patientId);
+    // Evict the per-patient cache entries so the next fetch hits HTTP
+    // instead of the now-stale TTL-cache value. In-flight fetches are
+    // not cancelled — if a poll tick raced with an ongoing fetch, the
+    // ongoing fetch completes and its result populates the cache; the
+    // very next caller after this `evict` sees a miss and re-fetches.
+    _patientDetailCache.evict(patientId);
+    _activity24hCache.evict(patientId);
+    _activity7dCache.evict(patientId);
+    _activity30dCache.evict(patientId);
+    _alertsCache.evict(patientId);
     // Eager refetch — caller awaits the parallel chain.
     await Future.wait([
       _fetchPatientDetail(patientId),
@@ -352,48 +363,109 @@ class LiveFacilityRepository implements FacilityRepository {
   }
 
   Future<PatientFull> _fetchPatientDetail(String patientId) async {
-    final cached = _patientDetailCache[patientId];
-    if (cached != null) return cached;
-    final resp = await _api.getPatient(patientId);
-    _patientDetailCache[patientId] = resp.patient;
-    return resp.patient;
+    return _patientDetailCache.getOrFetch(patientId, () async {
+      final resp = await _api.getPatient(patientId);
+      return resp.patient;
+    });
   }
 
   Future<List<ActivitySession>> _fetchActivity(
     String patientId,
     ActivityRange range,
-  ) async {
+  ) {
     final cache = switch (range) {
       ActivityRange.h24 => _activity24hCache,
       ActivityRange.d7 => _activity7dCache,
       ActivityRange.d30 => _activity30dCache,
     };
-    final cached = cache[patientId];
-    if (cached != null) return cached;
-
-    // Paginate through all pages for the requested range.
-    final all = <ActivitySession>[];
-    String? cursor;
-    do {
-      final resp = await _api.getActivity(patientId, range, cursor: cursor);
-      all.addAll(resp.sessions);
-      cursor = resp.nextCursor;
-    } while (cursor != null && cursor.isNotEmpty);
-
-    cache[patientId] = all;
-    return all;
+    return cache.getOrFetch(patientId, () async {
+      // Paginate through all pages for the requested range.
+      final all = <ActivitySession>[];
+      String? cursor;
+      do {
+        final resp = await _api.getActivity(patientId, range, cursor: cursor);
+        all.addAll(resp.sessions);
+        cursor = resp.nextCursor;
+      } while (cursor != null && cursor.isNotEmpty);
+      return all;
+    });
   }
 
   Future<List<AlertRow>> _fetchAlerts(
     String patientId,
     AlertStatus status,
-  ) async {
-    final cached = _alertsCache[patientId];
-    if (cached != null) return cached;
-    final resp = await _api.getAlerts(patientId, status);
-    _alertsCache[patientId] = resp.alerts;
-    return resp.alerts;
+  ) {
+    return _alertsCache.getOrFetch(patientId, () async {
+      final resp = await _api.getAlerts(patientId, status);
+      return resp.alerts;
+    });
   }
+}
+
+/// In-memory cache with a 30 s TTL and in-flight Future dedup.
+///
+/// Two concurrent calls to [getOrFetch] for the same key share one
+/// underlying fetch — the second caller awaits the same Future as
+/// the first, instead of firing a duplicate HTTP request. Useful in
+/// `Future.wait` fan-outs like Patient Detail's parallel detail
+/// load, where multiple paths (`last30DaysFor`, `last6MonthsFor`)
+/// would otherwise race on the same `?range=30d` request.
+///
+/// Per phase-2b-fac-r-facility-reads.md L12. The 30 s TTL aligns with
+/// Patient Detail's polling interval — between two consecutive poll
+/// ticks, any second consumer of the same data hits the cache and
+/// avoids a redundant HTTP request.
+class _TimedCache<K, V> {
+  _TimedCache({this.ttl = const Duration(seconds: 30)});
+
+  final Duration ttl;
+  final Map<K, _TimedEntry<V>> _entries = {};
+  final Map<K, Future<V>> _inFlight = {};
+
+  /// Returns the cached value if fresh, otherwise calls [fetcher] and
+  /// caches its result. Concurrent callers with the same [key] share
+  /// the in-flight Future.
+  Future<V> getOrFetch(K key, Future<V> Function() fetcher) {
+    final entry = _entries[key];
+    if (entry != null && !entry.isExpired(ttl)) {
+      return Future.value(entry.value);
+    }
+    final pending = _inFlight[key];
+    if (pending != null) return pending;
+
+    final future = fetcher().then((value) {
+      _entries[key] = _TimedEntry(value, DateTime.now());
+      _inFlight.remove(key);
+      return value;
+    }, onError: (Object error, StackTrace stack) {
+      _inFlight.remove(key);
+      throw error;
+    });
+    _inFlight[key] = future;
+    return future;
+  }
+
+  /// Drop the cached value for [key]. In-flight fetches are not
+  /// cancelled — the next caller after this evict misses the cache
+  /// and starts a fresh fetch.
+  void evict(K key) {
+    _entries.remove(key);
+  }
+
+  void clear() {
+    _entries.clear();
+    _inFlight.clear();
+  }
+}
+
+class _TimedEntry<V> {
+  _TimedEntry(this.value, this.fetchedAt);
+
+  final V value;
+  final DateTime fetchedAt;
+
+  bool isExpired(Duration ttl) =>
+      DateTime.now().difference(fetchedAt) > ttl;
 }
 
 /// Maps a server-side `alertType` string to the portal's
