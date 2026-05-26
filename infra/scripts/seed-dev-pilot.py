@@ -138,11 +138,16 @@ def main() -> int:
         f"  before: clientId={before.get('clientId')!r}  facilityId={before.get('facilityId')!r}  "
         f"censusId={before.get('censusId')!r}  timezone={before.get('timezone')!r}"
     )
+    # Note: status_patientId is the composite range key for the
+    # by-census-status + by-client-status GSIs (Phase 0B-rev). Without
+    # this, 2A-RD's /me/patients query returns empty for patients
+    # provisioned outside the seed-2a-rd-test-data.py path. Format:
+    # "{status}_{patientId}".
     patients_table.update_item(
         Key={"patientId": PATIENT_ID},
         UpdateExpression=(
             "SET clientId = :cid, facilityId = :fid, censusId = :ceid, "
-            "#tz = :tz, displayName = :dn"
+            "#tz = :tz, displayName = :dn, status_patientId = :spi"
         ),
         ExpressionAttributeNames={"#tz": "timezone"},
         ExpressionAttributeValues={
@@ -151,6 +156,7 @@ def main() -> int:
             ":ceid": CENSUS_ID,
             ":tz": FACILITY_TIMEZONE,
             ":dn": PATIENT_DISPLAY_NAME,
+            ":spi": f"{before.get('status', 'active')}_{PATIENT_ID}",
         },
     )
     print(
