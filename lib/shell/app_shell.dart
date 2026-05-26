@@ -4,7 +4,6 @@ import 'package:go_router/go_router.dart';
 import '../api/api_client.dart';
 import '../auth/auth_service_interface.dart';
 import '../data/facility_repository.dart';
-import '../facility_demo/data/facility_mock_data.dart';
 import '../facility_demo/screens/facility_shell.dart';
 import '../state/app_router.dart';
 import '../state/app_state.dart';
@@ -18,7 +17,9 @@ import '../theme/app_theme.dart';
 /// via [AppState], and hosts the [GoRouter] config built from those
 /// dependencies.
 ///
-/// Per phase-2b-0-foundation.md §Files Changed > lib/shell/app_shell.dart.
+/// Per phase-2b-0-foundation.md §Files Changed > lib/shell/app_shell.dart
+/// + phase-2b-fac-r-facility-reads.md (both modes now route to
+/// FacilityShell; live mode primes the repository on sign-in).
 class AppShell extends StatefulWidget {
   const AppShell({
     super.key,
@@ -40,27 +41,52 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   late final GoRouter _router;
 
+  /// Future for the repository prime call. Null until sign-in fires
+  /// the listener that kicks it off. Replaced on each new sign-in.
+  Future<void>? _primeFuture;
+
+  bool _wasSignedIn = false;
+
   @override
   void initState() {
     super.initState();
+    _wasSignedIn = widget.auth.isSignedIn;
+    if (_wasSignedIn) {
+      _primeFuture = widget.repository.primeAtSignIn();
+    }
+    widget.auth.addListener(_onAuthChanged);
     _router = buildAppRouter(
       auth: widget.auth,
       buildMode: widget.buildMode,
-      facilityHomeBuilder: (_) {
-        // The existing FacilityShell still expects a FacilityMockData
-        // because it doesn't itself care about repository abstractness
-        // until 2B-FAC-R. For 2B-0 we pass through whatever was injected
-        // — in demo mode it's a real FacilityMockData; in live mode it's
-        // a LiveFacilityRepository that throws UnimplementedError on
-        // every screen call. That's the expected behavior for 2B-0
-        // (we don't have live data wired yet — that's 2B-FAC-R).
-        if (widget.repository is FacilityMockData) {
-          return FacilityShell(data: widget.repository);
-        }
-        // Live mode pre-2B-FAC-R: render a stub explaining the state.
-        return const _LiveFacilityShellStub();
-      },
+      facilityHomeBuilder: (_) => _FacilityHome(
+        primeFuture: _primeFuture,
+        repository: widget.repository,
+      ),
     );
+  }
+
+  @override
+  void dispose() {
+    widget.auth.removeListener(_onAuthChanged);
+    super.dispose();
+  }
+
+  void _onAuthChanged() {
+    final nowSignedIn = widget.auth.isSignedIn;
+    if (nowSignedIn && !_wasSignedIn) {
+      // Just signed in — prime the repository.
+      setState(() {
+        _primeFuture = widget.repository.primeAtSignIn();
+      });
+    } else if (!nowSignedIn && _wasSignedIn) {
+      // Just signed out — clear the cache so the next session starts
+      // fresh (different user → different scope).
+      widget.repository.clearOnSignOut();
+      setState(() {
+        _primeFuture = null;
+      });
+    }
+    _wasSignedIn = nowSignedIn;
   }
 
   @override
@@ -82,58 +108,74 @@ class _AppShellState extends State<AppShell> {
   }
 }
 
-/// Live-mode placeholder while 2B-FAC-R is still in flight. Renders a
-/// "this is the foundation; business screens land in 2B-FAC-R" message
-/// + a link to the smoke screen at `/dev/me`. Removed once 2B-FAC-R
-/// wires real data through the repository.
-class _LiveFacilityShellStub extends StatelessWidget {
-  const _LiveFacilityShellStub();
+/// Facility home — wraps [FacilityShell] in a FutureBuilder against
+/// the repository's prime call. Shows a brief spinner while
+/// `/me/patients` loads on cold sign-in; immediate render on
+/// subsequent navigations to the same shell (the prime Future
+/// resolves once and the FutureBuilder's `connectionState` is `done`
+/// from then on).
+class _FacilityHome extends StatelessWidget {
+  const _FacilityHome({
+    required this.primeFuture,
+    required this.repository,
+  });
+
+  final Future<void>? primeFuture;
+  final FacilityRepository repository;
 
   @override
   Widget build(BuildContext context) {
-    final auth = AppState.of(context).auth;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('GoSteady Portal'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: () => auth.signOut(),
-            tooltip: 'Sign out',
-          ),
-        ],
-      ),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 520),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Foundation ready',
-                  style: Theme.of(context).textTheme.headlineSmall,
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Sign-in works against real Cognito; the JWT pipeline + '
-                  '/me smoke screen are wired. Business screens (Census, '
-                  'Patient Detail, Device Detail) land in Phase 2B-FAC-R.',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-                const SizedBox(height: 24),
-                FilledButton(
-                  onPressed: () =>
-                      GoRouter.of(context).go('/dev/me'),
-                  child: const Text('Open /api/v1/me smoke'),
-                ),
-              ],
+    if (primeFuture == null) {
+      // Not signed in (shouldn't normally reach here — router redirects);
+      // render the shell against empty cache as a defensive fallback.
+      return FacilityShell(data: repository);
+    }
+    return FutureBuilder<void>(
+      future: primeFuture,
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(
+              child: CircularProgressIndicator(color: AppTheme.sage),
             ),
-          ),
-        ),
-      ),
+          );
+        }
+        if (snap.hasError) {
+          return Scaffold(
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(48),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.error_outline_rounded,
+                      size: 56,
+                      color: AppTheme.statusAlert,
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      'Could not load your patients',
+                      style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                            fontSize: 20,
+                          ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${snap.error}',
+                      style: const TextStyle(
+                        color: AppTheme.textSoft,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+        return FacilityShell(data: repository);
+      },
     );
   }
 }

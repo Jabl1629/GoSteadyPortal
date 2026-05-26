@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
 import '../../data/facility_repository.dart';
+import '../data/facility_mock_data.dart' show PatientRowStats, Trend;
 import '../data/notification_engine.dart';
 import '../models/notification.dart';
 import '../models/patient.dart';
@@ -13,10 +14,43 @@ import '../widgets/patient_tile.dart';
 import '../widgets/simple_select_dropdown.dart';
 import '../widgets/view_mode_toggle.dart';
 
+// ── Loaded per-row data + placeholder used until a fetch completes. ──
+
+class _RowData {
+  final PatientRowStats stats;
+  final List<PatientNotification> computed;
+  const _RowData({required this.stats, required this.computed});
+  const _RowData.empty()
+      : stats = _placeholderStats,
+        computed = const [];
+}
+
+const _placeholderStats = PatientRowStats(
+  alertsThisWeek: 0,
+  activeMinutesToday: 0,
+  activeMinutes7dAvg: 0,
+  activeMinutesPrior7dAvg: 0,
+  activeMinutesTrend7d: Trend.flat,
+  activeMinutes30dAvg: 0,
+  stepsToday: 0,
+  stepsTrend7d: Trend.flat,
+  stepsRecentAvg: 0,
+  stepsPriorAvg: 0,
+  gaitSpeed3dAvg: 0,
+  gaitSpeedTrend: Trend.flat,
+  gaitSpeedPriorAvg: 0,
+);
+
 /// Left/main pane of the facility shell. Renders one tile per patient
 /// matching the current unit selection, sort, and filter. Click a tile ->
 /// sets FacilitySelection.selectedPatientId, triggering the overlay.
-class PatientCensusView extends StatelessWidget {
+///
+/// Per phase-2b-fac-r-facility-reads.md L2 — the repository's per-
+/// patient methods are async. This view pre-loads row stats +
+/// notifications for all visible patients in parallel via a stateful
+/// loader, then renders the synchronous list/grid against the loaded
+/// data. Throttle + lazy-per-row are L5 follow-ups.
+class PatientCensusView extends StatefulWidget {
   const PatientCensusView({
     super.key,
     required this.data,
@@ -29,57 +63,121 @@ class PatientCensusView extends StatelessWidget {
   final NotificationState notifications;
 
   @override
+  State<PatientCensusView> createState() => _PatientCensusViewState();
+}
+
+class _PatientCensusViewState extends State<PatientCensusView> {
+  // Pre-loaded per-patient data; keyed by patientId.
+  final Map<String, _RowData> _loaded = {};
+  // Currently-pending fetches.
+  final Set<String> _inFlight = {};
+
+  @override
+  void initState() {
+    super.initState();
+    widget.selection.addListener(_onSelectionChanged);
+    widget.notifications.addListener(_rebuild);
+    _fetchMissing();
+  }
+
+  @override
+  void dispose() {
+    widget.selection.removeListener(_onSelectionChanged);
+    widget.notifications.removeListener(_rebuild);
+    super.dispose();
+  }
+
+  void _rebuild() {
+    if (mounted) setState(() {});
+  }
+
+  void _onSelectionChanged() {
+    _fetchMissing();
+    _rebuild();
+  }
+
+  /// Kick off fetches for any visible patient that hasn't loaded yet.
+  void _fetchMissing() {
+    final summaries =
+        widget.data.patientsForSelection(widget.selection.selectedUnitIds);
+    for (final s in summaries) {
+      final id = s.patient.id;
+      if (_loaded.containsKey(id) || _inFlight.contains(id)) continue;
+      _inFlight.add(id);
+      Future.wait([
+        widget.data.rowStatsFor(id),
+        notificationsForPatient(widget.data, id),
+      ]).then((results) {
+        if (!mounted) return;
+        setState(() {
+          _loaded[id] = _RowData(
+            stats: results[0] as PatientRowStats,
+            computed: results[1] as List<PatientNotification>,
+          );
+          _inFlight.remove(id);
+        });
+      }).catchError((_) {
+        if (!mounted) return;
+        setState(() {
+          // Mark as failed via empty placeholder so the UI doesn't
+          // hang forever; later commits add retry UX.
+          _loaded[id] = const _RowData.empty();
+          _inFlight.remove(id);
+        });
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: Listenable.merge([selection, notifications]),
-      builder: (context, _) {
-        final summaries = data.patientsForSelection(selection.selectedUnitIds);
-        final rows = summaries.map((s) {
-          final computed = notificationsForPatient(data, s.patient.id);
-          final active = notifications.activeOf(computed);
-          return _CensusRow(summary: s, active: active);
-        }).toList();
+    final summaries =
+        widget.data.patientsForSelection(widget.selection.selectedUnitIds);
+    final rows = summaries.map((s) {
+      final loaded = _loaded[s.patient.id];
+      final computed = loaded?.computed ?? const <PatientNotification>[];
+      final active = widget.notifications.activeOf(computed);
+      return _CensusRow(summary: s, active: active);
+    }).toList();
 
-        final filtered = _applyFilter(rows, selection.filterMode);
-        _applySort(filtered, selection.sortMode);
+    final filtered = _applyFilter(rows, widget.selection.filterMode);
+    _applySort(filtered, widget.selection.sortMode);
 
-        return SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(10, 24, 10, 32),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _Header(
-                totalShown: filtered.length,
-                totalSelected: summaries.length,
-                selection: selection,
-              ),
-              const SizedBox(height: 18),
-              if (filtered.isEmpty)
-                _EmptyState(filterMode: selection.filterMode)
-              else if (selection.viewMode == CensusViewMode.list)
-                PatientListView(
-                  rows: filtered
-                      .map((r) => PatientListRow(
-                            patient: r.summary.patient,
-                            unitDisplay:
-                                unitDisplayFor(data, r.summary.patient.unitId),
-                            stats: data.rowStatsFor(r.summary.patient.id),
-                            activeNotifications: r.active,
-                          ))
-                      .toList(),
-                  selectedPatientId: selection.selectedPatientId,
-                  onSelect: selection.selectPatient,
-                )
-              else
-                _Grid(
-                  rows: filtered,
-                  data: data,
-                  selection: selection,
-                ),
-            ],
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(10, 24, 10, 32),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _Header(
+            totalShown: filtered.length,
+            totalSelected: summaries.length,
+            selection: widget.selection,
           ),
-        );
-      },
+          const SizedBox(height: 18),
+          if (filtered.isEmpty)
+            _EmptyState(filterMode: widget.selection.filterMode)
+          else if (widget.selection.viewMode == CensusViewMode.list)
+            PatientListView(
+              rows: filtered.map((r) {
+                final loaded = _loaded[r.summary.patient.id];
+                return PatientListRow(
+                  patient: r.summary.patient,
+                  unitDisplay:
+                      unitDisplayFor(widget.data, r.summary.patient.unitId),
+                  stats: loaded?.stats ?? _placeholderStats,
+                  activeNotifications: r.active,
+                );
+              }).toList(),
+              selectedPatientId: widget.selection.selectedPatientId,
+              onSelect: widget.selection.selectPatient,
+            )
+          else
+            _Grid(
+              rows: filtered,
+              data: widget.data,
+              selection: widget.selection,
+            ),
+        ],
+      ),
     );
   }
 

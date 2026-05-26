@@ -48,17 +48,22 @@ class ApiClient {
     return MeResponse.fromJson(body);
   }
 
-  // ── 2A-RD reads (deployed; wiring in 2B-FAC-R) ────────────────
+  // ── 2A-RD reads (deployed; wired in 2B-FAC-R) ─────────────────
 
   Future<MePatientsResponse> getMyPatients({
     String? cursor,
     String? clientId,
   }) async {
-    throw UnimplementedError('Wiring in 2B-FAC-R');
+    final query = <String, String>{};
+    if (cursor != null && cursor.isNotEmpty) query['cursor'] = cursor;
+    if (clientId != null && clientId.isNotEmpty) query['clientId'] = clientId;
+    final body = await _get('/api/v1/me/patients', query: query);
+    return MePatientsResponse.fromJson(body);
   }
 
   Future<PatientDetailResponse> getPatient(String patientId) async {
-    throw UnimplementedError('Wiring in 2B-FAC-R');
+    final body = await _get('/api/v1/patients/$patientId');
+    return PatientDetailResponse.fromJson(body);
   }
 
   Future<ActivityResponse> getActivity(
@@ -66,7 +71,11 @@ class ApiClient {
     ActivityRange range, {
     String? cursor,
   }) async {
-    throw UnimplementedError('Wiring in 2B-FAC-R');
+    final query = <String, String>{'range': range.wireValue};
+    if (cursor != null && cursor.isNotEmpty) query['cursor'] = cursor;
+    final body =
+        await _get('/api/v1/patients/$patientId/activity', query: query);
+    return ActivityResponse.fromJson(body);
   }
 
   Future<AlertsResponse> getAlerts(
@@ -74,11 +83,19 @@ class ApiClient {
     AlertStatus status, {
     String? cursor,
   }) async {
-    throw UnimplementedError('Wiring in 2B-FAC-R');
+    final query = <String, String>{'status': status.wireValue};
+    if (cursor != null && cursor.isNotEmpty) query['cursor'] = cursor;
+    final body = await _get('/api/v1/patients/$patientId/alerts', query: query);
+    return AlertsResponse.fromJson(body);
   }
 
   Future<DeviceResponse> getDevice(String serial) async {
-    throw UnimplementedError('Wiring in 2B-FAC-R');
+    // NOTE: 2A-RD spec doesn't ship /devices/{serial}; per
+    // phase-2b-fac-r Q5 we surface this stub for follow-on. V1 patient-
+    // detail card uses /patients/{id}.currentDevice fields.
+    throw UnimplementedError(
+      'GET /devices/{serial} not in 2A-RD; see phase-2b-fac-r Q5',
+    );
   }
 
   Future<CensusRosterResponse> getCensusRoster(
@@ -86,7 +103,13 @@ class ApiClient {
     String censusId, {
     String? cursor,
   }) async {
-    throw UnimplementedError('Wiring in 2B-FAC-R');
+    final query = <String, String>{};
+    if (cursor != null && cursor.isNotEmpty) query['cursor'] = cursor;
+    final body = await _get(
+      '/api/v1/facilities/$facilityId/censuses/$censusId/patients',
+      query: query,
+    );
+    return CensusRosterResponse.fromJson(body);
   }
 
   // ── 2A-AA + 2A-DL writes (deployed; wiring in 2B-FAC-W) ────────
@@ -157,21 +180,28 @@ class ApiClient {
   // ── Internals ─────────────────────────────────────────────────
 
   /// GET with JWT attachment, envelope decoding, and retry on 5xx.
-  Future<Map<String, dynamic>> _get(String path) async {
-    return _request('GET', path);
+  Future<Map<String, dynamic>> _get(
+    String path, {
+    Map<String, String>? query,
+  }) async {
+    return _request('GET', path, query: query);
   }
 
   Future<Map<String, dynamic>> _request(
     String method,
     String path, {
     Object? body,
+    Map<String, String>? query,
   }) async {
     final token = await _auth.getIdToken();
     if (token == null) {
       throw ApiException.unauthenticated();
     }
 
-    final uri = Uri.parse('$_baseUrl$path');
+    var uri = Uri.parse('$_baseUrl$path');
+    if (query != null && query.isNotEmpty) {
+      uri = uri.replace(queryParameters: {...uri.queryParameters, ...query});
+    }
     final headers = {
       'Authorization': 'Bearer $token',
       'Content-Type': 'application/json',

@@ -75,11 +75,13 @@ class NotificationEngine {
   }
 }
 
-/// Convenience that wires FacilityMockData into the engine for a patient.
-List<PatientNotification> notificationsForPatient(
+/// Convenience that wires FacilityRepository into the engine for a
+/// patient. Async per phase-2b-fac-r L2 — the live impl needs to fetch
+/// the alerts response to derive the context.
+Future<List<PatientNotification>> notificationsForPatient(
   FacilityRepository data,
   String patientId,
-) {
-  final ctx = data.notificationContextFor(patientId);
+) async {
+  final ctx = await data.notificationContextFor(patientId);
   return const NotificationEngine().evaluate(patientId, ctx);
 }

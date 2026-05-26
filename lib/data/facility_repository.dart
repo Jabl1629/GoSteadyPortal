@@ -16,22 +16,33 @@ import '../models/device.dart';
 ///     — `ApiClient`-backed, used by the live portal build
 ///     (`BUILD_MODE=live`)
 ///
-/// Per phase-2b-0-foundation.md L3 — with the deviation noted below.
-///
-/// **Deviation from spec's §Interfaces (2026-05-24):** the spec called
-/// for `Future<...>`-returning methods. In practice, converting the
-/// existing demo screens to await/FutureBuilder wrappers is a much
-/// larger change than 2B-0 foundation should carry (~25 call sites in
-/// 8 files; cascades through `FacilitySelection` ChangeNotifier and
-/// every screen `build()`). Keeping the interface synchronous matches
-/// the demo verbatim and defers the async-loading question to
-/// 2B-FAC-R, which will design a cache + `refresh()` discipline for
-/// the live impl appropriate to each screen's loading pattern. 2B-0
-/// ships [LiveFacilityRepository] as stubs that throw
-/// `UnimplementedError`; 2B-FAC-R fills them with cache-then-return
-/// behavior.
+/// **Hybrid sync/async per phase-2b-fac-r-facility-reads.md L2:**
+/// Census-level lookups (Facility / Unit / PatientSummary) stay
+/// **synchronous** — the live impl caches the `/me/patients` response
+/// at shell init via [primeAtSignIn] and serves these synchronously
+/// from cache. Per-patient methods are **async** so the live impl can
+/// fetch + cache per-patient detail on demand.
 abstract class FacilityRepository {
-  // ── Facility / Unit / Patient lookups ─────────────────────────
+  // ── Lifecycle (added in 2B-FAC-R) ────────────────────────────
+
+  /// Called after sign-in. Live impl fetches all pages of /me/patients
+  /// and primes its in-memory caches; mock impl is a no-op.
+  Future<void> primeAtSignIn();
+
+  /// Force a Census refresh. Live impl refetches page 1 of
+  /// /me/patients (per L13); mock impl is a no-op.
+  Future<void> refreshCensus();
+
+  /// Force a Patient Detail refresh. Live impl re-fetches the 3
+  /// detail endpoints in parallel and replaces the cache; mock impl
+  /// is a no-op.
+  Future<void> refreshPatientDetail(String patientId);
+
+  /// Drop all cached state. Called on sign-out so the next user
+  /// starts fresh.
+  void clearOnSignOut();
+
+  // ── Census-level (sync; backed by cache in live impl) ────────
 
   List<Facility> allFacilities();
 
@@ -44,29 +55,34 @@ abstract class FacilityRepository {
   /// set returns no patients (UI default is "all selected").
   List<PatientSummary> patientsForSelection(Set<String> selectedUnitIds);
 
+  // ── Per-patient (async — cache + fetch on miss in live impl) ─
+
   /// Lookup a single patient.
-  Patient patientById(String patientId);
+  Future<Patient> patientById(String patientId);
 
-  // ── Detail-panel data (one patient) ───────────────────────────
-
-  DailyActivity todayFor(String patientId);
+  Future<DailyActivity> todayFor(String patientId);
 
   /// 7 days of history, oldest-first.
-  List<DailyActivity> last7DaysFor(String patientId);
+  Future<List<DailyActivity>> last7DaysFor(String patientId);
 
   /// 30 days of history, oldest-first.
-  List<DailyActivity> last30DaysFor(String patientId);
+  Future<List<DailyActivity>> last30DaysFor(String patientId);
 
   /// 26 weeks of history, oldest-first.
-  List<WeeklyActivity> last6MonthsFor(String patientId);
+  ///
+  /// Live build hides the 6M tab per phase-2b-fac-r L4; demo build
+  /// continues to render this from seeded weekly data.
+  Future<List<WeeklyActivity>> last6MonthsFor(String patientId);
 
-  DeviceHealth deviceFor(String patientId);
+  Future<DeviceHealth> deviceFor(String patientId);
 
-  /// Snapshot the demo's notification engine evaluates against (today's
-  /// activity + recent baselines). Live impl will populate this from
-  /// server-side rule output once Phase 1C-slim ships.
-  NotificationContext notificationContextFor(String patientId);
+  /// Snapshot the demo's notification engine evaluates against.
+  /// Live impl returns a context derived from the cached /me/patients
+  /// + /alerts response (per phase-2b-fac-r L6 — the live build
+  /// renders alertType-mapped badges directly, bypassing this engine
+  /// at the screen level; this method is retained for compatibility).
+  Future<NotificationContext> notificationContextFor(String patientId);
 
   /// All stats the list-view table needs for one patient.
-  PatientRowStats rowStatsFor(String patientId);
+  Future<PatientRowStats> rowStatsFor(String patientId);
 }

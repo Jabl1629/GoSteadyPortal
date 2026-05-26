@@ -21,6 +21,8 @@ class PatientDashboard extends StatefulWidget {
     required this.last30,
     required this.last6Months,
     this.onDeviceTap,
+    this.hideGait = false,
+    this.hide6MonthTab = false,
   });
 
   final DeviceHealth device;
@@ -29,6 +31,16 @@ class PatientDashboard extends StatefulWidget {
   final List<DailyActivity> last30;
   final List<WeeklyActivity> last6Months;
   final VoidCallback? onDeviceTap;
+
+  /// Hide the gait-speed chart card. Used by the live build per
+  /// phase-2b-fac-r L8 (firmware + 2A-RD don't emit per-session gait
+  /// yet; V1.1 wires this back on).
+  final bool hideGait;
+
+  /// Remove the 6M segment from the time-range toggle. Used by the
+  /// live build per phase-2b-fac-r L4 (Phase 1C-full rollups not yet
+  /// shipped).
+  final bool hide6MonthTab;
 
   @override
   State<PatientDashboard> createState() => _PatientDashboardState();
@@ -63,6 +75,7 @@ class _PatientDashboardState extends State<PatientDashboard> {
         final toggle = TimeRangeToggle(
           selected: _selectedRange,
           onChanged: (r) => setState(() => _selectedRange = r),
+          hideSixMonth: widget.hide6MonthTab,
         );
 
         return Column(
@@ -97,8 +110,10 @@ class _PatientDashboardState extends State<PatientDashboard> {
             _chartCard(ChartMetric.distance),
             const SizedBox(height: 20),
             _chartCard(ChartMetric.steps),
-            const SizedBox(height: 20),
-            _chartCard(ChartMetric.gaitSpeed),
+            if (!widget.hideGait) ...[
+              const SizedBox(height: 20),
+              _chartCard(ChartMetric.gaitSpeed),
+            ],
           ],
         );
       },

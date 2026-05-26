@@ -10,10 +10,15 @@ class TimeRangeToggle extends StatelessWidget {
     super.key,
     required this.selected,
     required this.onChanged,
+    this.hideSixMonth = false,
   });
 
   final TimeRange selected;
   final ValueChanged<TimeRange> onChanged;
+
+  /// Hide the 6M segment. Used by the live build per
+  /// phase-2b-fac-r L4 (Phase 1C-full daily rollups not yet shipped).
+  final bool hideSixMonth;
 
   static const _labels = {
     TimeRange.day: '24H',
@@ -24,6 +29,11 @@ class TimeRangeToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final ranges = hideSixMonth
+        ? TimeRange.values
+            .where((r) => r != TimeRange.sixMonth)
+            .toList(growable: false)
+        : TimeRange.values;
     return Container(
       decoration: BoxDecoration(
         color: AppTheme.cream,
@@ -33,7 +43,7 @@ class TimeRangeToggle extends StatelessWidget {
       padding: const EdgeInsets.all(4),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: TimeRange.values.map((range) {
+        children: ranges.map((range) {
           final isActive = range == selected;
           return Expanded(
             child: MouseRegion(

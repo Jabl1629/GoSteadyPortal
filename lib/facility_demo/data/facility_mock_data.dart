@@ -26,19 +26,40 @@ class FacilityMockData implements FacilityRepository {
   // Cached generated data per patient. Lazy: filled on first access.
   final Map<String, _PatientGenerated> _cache = {};
 
-  // ── Facility / unit / patient lookups ───────────────────────────────────
+  // ── Lifecycle (no-ops in demo) ──────────────────────────────────────────
+  // Demo data is generated lazily on access; no need to prime or refresh.
 
+  @override
+  Future<void> primeAtSignIn() async {}
+
+  @override
+  Future<void> refreshCensus() async {}
+
+  @override
+  Future<void> refreshPatientDetail(String patientId) async {}
+
+  @override
+  void clearOnSignOut() {
+    _cache.clear();
+  }
+
+  // ── Facility / unit / patient lookups (sync) ───────────────────────────
+
+  @override
   List<Facility> allFacilities() => FacilitySeed.facilities;
 
+  @override
   List<Unit> unitsForFacility(String facilityId) => FacilitySeed.units
       .where((u) => u.facilityId == facilityId)
       .toList(growable: false);
 
   /// All units across all facilities (helper for the selector dropdown).
+  @override
   List<Unit> allUnits() => FacilitySeed.units;
 
   /// All patient summaries whose unit is in [selectedUnitIds]. Empty set
   /// returns no patients (UI default is "all selected").
+  @override
   List<PatientSummary> patientsForSelection(Set<String> selectedUnitIds) {
     return FacilitySeed.patients
         .where((p) => selectedUnitIds.contains(p.unitId))
@@ -46,35 +67,44 @@ class FacilityMockData implements FacilityRepository {
         .toList(growable: false);
   }
 
+  // ── Per-patient methods (async; demo wraps sync data in Future) ───────
+
   /// Lookup a single patient.
-  Patient patientById(String patientId) =>
+  @override
+  Future<Patient> patientById(String patientId) async =>
       FacilitySeed.patients.firstWhere((p) => p.id == patientId);
 
-  // ── Detail-panel data (one patient) ────────────────────────────────────
-
-  DailyActivity todayFor(String patientId) => _gen(patientId).today;
+  @override
+  Future<DailyActivity> todayFor(String patientId) async =>
+      _gen(patientId).today;
 
   /// 7 days of history, oldest-first.
-  List<DailyActivity> last7DaysFor(String patientId) {
+  @override
+  Future<List<DailyActivity>> last7DaysFor(String patientId) async {
     final all = _gen(patientId).last182Days;
     return all.sublist(all.length - 7);
   }
 
   /// 30 days of history, oldest-first.
-  List<DailyActivity> last30DaysFor(String patientId) {
+  @override
+  Future<List<DailyActivity>> last30DaysFor(String patientId) async {
     final all = _gen(patientId).last182Days;
     return all.sublist(all.length - 30);
   }
 
   /// 26 weeks of history, oldest-first.
-  List<WeeklyActivity> last6MonthsFor(String patientId) =>
+  @override
+  Future<List<WeeklyActivity>> last6MonthsFor(String patientId) async =>
       _gen(patientId).last6Months;
 
-  DeviceHealth deviceFor(String patientId) => _gen(patientId).device;
+  @override
+  Future<DeviceHealth> deviceFor(String patientId) async =>
+      _gen(patientId).device;
 
   /// Snapshot used by NotificationEngine. Median is computed over each
   /// window's totalSteps, sorted middle-element.
-  NotificationContext notificationContextFor(String patientId) {
+  @override
+  Future<NotificationContext> notificationContextFor(String patientId) async {
     final gen = _gen(patientId);
     final allHistory = gen.last182Days;
     final last7Steps = allHistory
@@ -106,7 +136,8 @@ class FacilityMockData implements FacilityRepository {
   /// the same 182-day generated history that drives the tile view + charts.
   /// Trends compare last N days vs the immediately prior N days using
   /// `Trend.compute` (±5% threshold).
-  PatientRowStats rowStatsFor(String patientId) {
+  @override
+  Future<PatientRowStats> rowStatsFor(String patientId) async {
     final gen = _gen(patientId);
     final history = gen.last182Days;
 
@@ -172,7 +203,11 @@ class FacilityMockData implements FacilityRepository {
   // ── Internals ──────────────────────────────────────────────────────────
 
   PatientSummary _summaryFor(Patient p) {
-    final today = todayFor(p.id);
+    // Read today's data directly from the cache (not via todayFor, which
+    // is now async per phase-2b-fac-r L2). The mock data layer is
+    // synchronous internally; the async wrappers are just for interface
+    // parity with the live impl.
+    final today = _gen(p.id).today;
     final hasData = today.totalSteps > 0 || today.totalTimeInMotionMinutes > 0;
     return PatientSummary(
       patient: p,
