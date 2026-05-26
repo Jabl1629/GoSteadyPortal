@@ -7971,3 +7971,72 @@ Both items closed as far as this entry tracks. CR-1 deployment is a follow-up �
 ---
 
 *Entry owner: Claude (portal session, 2026-05-25). No firmware impact; cloud-side state-correctness improvement only.*
+
+# §C28.5 — CR-1 deploy + live validation (2026-05-26)
+
+Entry owner: Claude (portal session) | Trigger: Step-1 of the §C28 hand-off — deploy + validate the heartbeat-processor mirror.
+
+## C28.5.1 — Deploy
+
+`cdk deploy GoSteady-Dev-Processing --context env=dev` — single Lambda code-asset swap, total ~41 s wall clock (build 1.6 s, publish 1.5 s, CFN `UPDATE_IN_PROGRESS` → `UPDATE_COMPLETE` 9 s on the HeartbeatProcessor function + 2 s stack rollup). No IAM change. No schema change. Security stack rolled `no changes` on the dependency check.
+
+## C28.5.2 — Pre-deploy baseline (sanity)
+
+GS9999999998 Device Registry row immediately before the deploy:
+
+```
+lastSeen          = null
+firstHeartbeatAt  = 2026-05-18T00:26:14Z   (the stale 8-day-old value §C28.1 described)
+status            = active_monitoring
+```
+
+Last shadow heartbeat at this point was `reported.lastSeen = 2026-05-26T15:42:03Z` — 8 minutes before the deploy. Confirmed the registry row was untouched (Shadow path runs independently).
+
+## C28.5.3 — Post-deploy heartbeat
+
+The next hourly heartbeat from GS9999999998 landed at `16:42:23Z` (about 11 min after the deploy). The new code path fired and atomically wrote:
+
+```
+Device Registry.lastSeen = 2026-05-26T16:42:23Z
+```
+
+Confirmed two ways:
+- `aws dynamodb get-item --table-name gosteady-dev-devices --key '{"serialNumber":{"S":"GS9999999998"}}'` returns the fresh `lastSeen`.
+- `GET /api/v1/patients/pt_bench_98` returns `currentDevice.lastSeen = "2026-05-26T16:42:23Z"` (the fallback chain `lastSeen or firstHeartbeatAt` now resolves to the populated `lastSeen` — `firstHeartbeatAt` cleanly demoted to "last-resort for never-heartbeated devices" as the §C28.1 fix intends).
+
+## C28.5.4 — Live portal validation
+
+After the cloud-side fix, the dev portal at `dev.portal.gosteady.co` still rendered "Last seen: 8d ago" because the deployed Flutter build artifact at S3 (timestamped `2026-05-25 21:36:31`) was uploaded **before** commit `89bd76f` (the portal-side fallback workaround, committed `21:36:52`). The live `main.dart.js` was from the prior working-tree state and didn't contain the `bestLastSeen = max(dev.lastSeen, max(sessionEnd))` logic.
+
+Fix: `flutter clean && ./tools/deploy-portal.sh` (with `AWS_REGION=us-east-1` exported — the script doesn't pass `--region` and `aws cloudformation describe-stacks` 254-errors silently otherwise). Fresh 4.4 MB build, 14 files synced to S3, CloudFront invalidation `IF34QNLF1W0T66DDLXEC8DB7D2` completed in ~60 s.
+
+Post-redeploy Patient Detail for `pt_bench_98`:
+- "Last seen: **1 min ago**" (was "8d ago") — both the cloud-side mirror AND the portal fallback now produce the right answer; portal renders `max(currentDevice.lastSeen, max(sessionEnd)) = currentDevice.lastSeen = 16:42:23Z`
+- Today's Activity correctly sums the local-Denver-day sessions (was previously showing only one bucket due to UTC-date filtering; closed by 89bd76f's `toToday` rework)
+- Census list view's Active-min-today / 7d-avg / Steps-today columns populate with real numbers (1, 9, 35 respectively) once `rowStatsFor` resolves on init
+
+## C28.5.5 — Tooling gotchas surfaced during validation
+
+Two friction points worth recording so future deploy/validate cycles don't re-trip them:
+
+1. **`AWS_REGION` is mandatory for `tools/deploy-portal.sh`.** The script queries CFN stack outputs to resolve the API base URL and the hosting bucket, but does not pass `--region us-east-1`. If `AWS_REGION` / `AWS_DEFAULT_REGION` aren't already exported (or your `~/.aws/config` default profile isn't `us-east-1`), the queries fail with a generic "stack does not exist" error and the script exits before building. Either export the env vars or edit the script to pin region. Filed as a 2B-0 tooling-polish follow-up.
+2. **`flutter build web` can silently reuse a cached `main.dart.js`** if the prior build artifact is present and source-tree mtimes don't trigger a recompile (1.3 s compile time vs ~30 s clean build = obvious tell). Result: `aws s3 sync` only uploads the 3 files that *did* change (index.html / flutter_bootstrap.js / flutter_service_worker.js), and the deployed bundle stays stale. Defense: always `flutter clean` before a "I expect new behavior" deploy, OR check `build/web/main.dart.js` mtime vs the latest `git log -1 lib/` commit time before uploading.
+
+## C28.5.6 — Operational state after this entry
+
+| Item | Status |
+|---|---|
+| heartbeat-processor lastSeen-mirror | ✅ Deployed (dev) 2026-05-26, validated on first post-deploy heartbeat |
+| Device Registry.lastSeen on GS9999999998 | ✅ Populating on every heartbeat |
+| patient-api `currentDevice.lastSeen` accuracy | ✅ Returns real timestamp; fallback to `firstHeartbeatAt` now correctly fires only for never-heartbeated devices |
+| Portal "Last seen" on Patient Detail | ✅ Shows current minutes/hours-ago via `max(registry, sessionEnd)` fallback (defensive; still useful if a future regression breaks the registry write path) |
+| Portal `main.dart.js` deployed to dev | ✅ Fresh build with `89bd76f` workaround + all subsequent FAC-R commits up to `fd22083` |
+| CR-1 + CR-2 portal-side workarounds | ✅ Retained as belt-and-suspenders |
+
+## C28.5.7 — Coord doc for next sync
+
+CR-1 fully closed end-to-end. No further firmware or cloud action required. Next coord-doc-affecting work: 2B-FAC-R polling controller (umbrella L3 + L11) — portal-only, no firmware impact.
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-26). Validates §C28.1 deploy; no firmware impact.*
