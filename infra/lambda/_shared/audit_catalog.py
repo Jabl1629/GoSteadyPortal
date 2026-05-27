@@ -52,6 +52,13 @@ AUDIT_ALERT_SYNTHETIC_CREATE = "alert.synthetic.create"
 AUDIT_ALERT_DEVICE_CREATE = "alert.device.create"
 AUDIT_ALERT_READ = "alert.read"
 AUDIT_ALERT_ACK = "alert.ack"
+# Alert recurrence policy (2026-05-26-alert-recurrence-policy.md L6):
+# emitted by threshold-detector + behavioral-detector when a
+# continuous-condition alert's underlying condition clears and the
+# system auto-acks the open alert. Distinct from AUDIT_ALERT_ACK so
+# downstream consumers can filter system-driven acks from caregiver-
+# driven ones via the `actor.type == 'system'` discriminator alone.
+AUDIT_ALERT_AUTO_ACKNOWLEDGED = "alert.auto_acknowledged"
 AUDIT_CENSUS_ROSTER_READ = "census.roster.read"
 AUDIT_PATIENT_THRESHOLDS_READ = "patient.thresholds.read"  # Phase 2A-AA
 AUDIT_PATIENT_THRESHOLDS_UPDATE = "patient.thresholds.update"  # Phase 2A-AA: full before/after per spec L8

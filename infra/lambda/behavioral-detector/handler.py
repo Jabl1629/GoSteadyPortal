@@ -55,6 +55,23 @@ from history_window import (
 )
 from patient_iterator import list_active_patients
 from rules import below_typical, declining_trend, device_offline, no_activity_today
+from rules.types import (
+    ALERT_DEVICE_OFFLINE,
+    ALERT_DEVICE_SILENT,
+    DEFAULT_OFFLINE_THRESHOLD_HOURS,
+    DEFAULT_SILENT_THRESHOLD_HOURS,
+)
+
+from _shared.open_alerts import auto_ack_alert, claim_open_alert
+
+# Continuous-condition alert types this Lambda emits — see
+# `docs/specs/2026-05-26-alert-recurrence-policy.md` L2. These
+# participate in the open-alert state machine; same-type re-fires
+# while the prior alert is open are suppressed.
+_CONTINUOUS_ALERT_TYPES = frozenset({
+    ALERT_DEVICE_OFFLINE,
+    ALERT_DEVICE_SILENT,
+})
 from rules.types import AlertCandidate
 
 
@@ -139,12 +156,43 @@ def _write_alert(
     device_serial: Optional[str],
 ) -> bool:
     """
-    Conditional PutItem on Alert History. Mirrors threshold-detector's
-    pattern: compound SK `{eventTimestamp}#{alertType}`, hierarchy
-    snapshot at write time, TTL on `expiresAt`. Returns True on first
-    write; False on duplicate (idempotent).
+    Conditional PutItem on Alert History. Compound SK
+    `{eventTimestamp}#{alertType}`, hierarchy snapshot at write time,
+    TTL on `expiresAt`. Returns True on first write; False on dedupe.
+
+    Per `docs/specs/2026-05-26-alert-recurrence-policy.md` L3, for
+    continuous-condition alert types (`device_offline` /
+    `device_silent`), claim_open_alert is called first; subsequent
+    same-type firings while the prior alert is open are suppressed.
+    Daily-cadence types (`no_activity_today`, `below_typical_activity`,
+    `declining_trend`) skip the open-alert gate — each day's row is
+    the historical record of that day and is naturally once-per-day
+    via the hour-gate in facility_iterator.rule_set_for_facility().
     """
     sk = f"{cand.event_timestamp_iso}#{cand.alert_type}"
+
+    if cand.alert_type in _CONTINUOUS_ALERT_TYPES:
+        if not claim_open_alert(
+            patient_id=patient["patientId"],
+            alert_type=cand.alert_type,
+            sk=sk,
+            opened_at=_utc_iso(),
+        ):
+            logger.info(
+                "behavioral_alert_suppressed_open",
+                extra={
+                    "patientId": patient["patientId"],
+                    "alertType": cand.alert_type,
+                    "sk": sk,
+                },
+            )
+            metrics.add_metric(
+                name="behavioral_alert_suppressed_open",
+                unit=MetricUnit.Count,
+                value=1,
+            )
+            return False
+
     # Convert the facility-local ISO to UTC epoch for the TTL math.
     try:
         ts_epoch = int(datetime.fromisoformat(cand.event_timestamp_iso).timestamp())
@@ -177,7 +225,10 @@ def _write_alert(
         return True
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            # Same-day dedupe — idempotent.
+            # Same-day dedupe — idempotent. For continuous types we
+            # already claimed the slot; leaving the (now-orphan)
+            # claim in place is safe — a duplicate SK means the prior
+            # write owns the same slot anyway.
             return False
         logger.exception(
             "alert_put_failed",
@@ -379,6 +430,97 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
                 local_now_iso=local_now_iso,
             )
             _maybe_fire(patient, cand, device_serial, summary)
+            # Recurrence policy (2026-05-26-alert-recurrence-policy.md
+            # L4): if the device has recovered below either threshold,
+            # auto-ack the corresponding open alert. Runs on every cron
+            # firing — including the first one after a recovery, so
+            # the closed loop completes within ≤1 hr of the heartbeat
+            # that brings lastSeen back into range.
+            _auto_ack_recovered_offline(
+                patient=patient,
+                device_status=device_status,
+                device_last_seen_epoch=device_last_seen,
+                now_epoch=now_epoch,
+                device_serial=device_serial,
+                summary=summary,
+            )
+
+
+def _auto_ack_recovered_offline(
+    *,
+    patient: dict[str, Any],
+    device_status: Optional[str],
+    device_last_seen_epoch: Optional[int],
+    now_epoch: int,
+    device_serial: Optional[str],
+    summary: dict,
+) -> None:
+    """
+    Per `2026-05-26-alert-recurrence-policy.md` L4 + L7 — when the
+    device has recovered (lastSeen is within the rule's threshold),
+    auto-ack any open alert of that type.
+
+    Clear conditions (mirror of the violation thresholds in
+    `device_offline.evaluate`):
+      - device_offline clears when `now - lastSeen <= 2h`
+      - device_silent clears when `now - lastSeen <= 24h`
+
+    The status guard mirrors the violation path: only act on devices
+    in `active_monitoring`. Devices that have transitioned to
+    `discontinued` or `decommissioned` should not have their open
+    alerts auto-acked here — they may need manual closure.
+    """
+    if device_status != "active_monitoring":
+        return
+    if device_last_seen_epoch is None:
+        return
+
+    hours_offline = (now_epoch - device_last_seen_epoch) / 3600
+
+    cleared_types: list[str] = []
+    if hours_offline < DEFAULT_OFFLINE_THRESHOLD_HOURS:
+        cleared_types.append(ALERT_DEVICE_OFFLINE)
+    if hours_offline < DEFAULT_SILENT_THRESHOLD_HOURS:
+        cleared_types.append(ALERT_DEVICE_SILENT)
+
+    if not cleared_types:
+        return
+
+    subject = {
+        "patientId": patient["patientId"],
+        "clientId": patient.get("clientId"),
+        "facilityId": patient.get("facilityId"),
+        "censusId": patient.get("censusId"),
+    }
+    if device_serial:
+        subject["deviceSerial"] = device_serial
+
+    for alert_type in cleared_types:
+        try:
+            fired = auto_ack_alert(
+                patient_id=patient["patientId"],
+                alert_type=alert_type,
+                actor_service="behavioral-detector",
+                subject=subject,
+            )
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.exception(
+                "behavioral_auto_ack_failed",
+                extra={
+                    "patientId": patient["patientId"],
+                    "alertType": alert_type,
+                },
+            )
+            continue
+        if fired:
+            summary["alertsAutoAcknowledged"] = (
+                summary.get("alertsAutoAcknowledged", 0) + 1
+            )
+            metrics.add_metric(
+                name="behavioral_alert_auto_acked",
+                unit=MetricUnit.Count,
+                value=1,
+            )
 
 
 def _maybe_fire(
@@ -502,3 +644,4 @@ def handler(event: dict, _context):
             f"duration={duration_s}s"
         ),
     }
+# bundle-marker: 2026-05-27T05:50Z (open_alerts two-step fix)

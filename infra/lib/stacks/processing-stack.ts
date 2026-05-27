@@ -186,9 +186,12 @@ export class ProcessingStack extends cdk.Stack {
     this.thresholdDetector = thresholdDet.function;
 
     deviceTable.grantReadData(this.thresholdDetector);
-    alertTable.grantWriteData(this.thresholdDetector);
+    alertTable.grantReadWriteData(this.thresholdDetector);
     deviceAssignmentsTable.grantReadData(this.thresholdDetector);
-    patientsTable.grantReadData(this.thresholdDetector);
+    // ReadWrite on Patients: alert recurrence policy (2026-05-26-alert-
+    // recurrence-policy.md L3) maintains a Patient.openAlerts map via
+    // conditional UpdateItem to gate continuous-condition alert writes.
+    patientsTable.grantReadWriteData(this.thresholdDetector);
     identityKey.grantDecrypt(this.thresholdDetector);
     identityKey.grant(this.thresholdDetector, 'kms:GenerateDataKey');
     this.thresholdDetector.addToRolePolicy(
@@ -392,7 +395,9 @@ export class ProcessingStack extends cdk.Stack {
     // status / facilityId / notificationsPaused but does NOT mutate it.
     // Activity Processor (in this same stack) handles auto-resume by
     // REMOVE'ing notificationsPaused when fresh activity arrives.
-    patientsTable.grantReadData(this.behavioralDetector);
+    // ReadWrite on Patients: alert recurrence policy (2026-05-26-alert-
+    // recurrence-policy.md L3) for device_offline + device_silent.
+    patientsTable.grantReadWriteData(this.behavioralDetector);
     activityTable.grantReadData(this.behavioralDetector);
     // GSI access: behavioral-detector queries Patients.by-client-status
     // (active patients per facility) + Activity Series base table range
@@ -411,7 +416,7 @@ export class ProcessingStack extends cdk.Stack {
         ],
       }),
     );
-    alertTable.grantWriteData(this.behavioralDetector);
+    alertTable.grantReadWriteData(this.behavioralDetector);
     organizationsTableRef.grantReadData(this.behavioralDetector);
     deviceTable.grantReadData(this.behavioralDetector);
     deviceAssignmentsTable.grantReadData(this.behavioralDetector);

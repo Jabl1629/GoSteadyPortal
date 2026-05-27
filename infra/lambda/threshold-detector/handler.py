@@ -47,8 +47,21 @@ from _shared import (
     get_metrics,
     resolve_patient,
 )
+from _shared.open_alerts import auto_ack_alert, claim_open_alert
 from _shared.pause_check import is_currently_paused
+from _shared.thresholds import merge_thresholds
 from aws_lambda_powertools.metrics import MetricUnit
+
+# Per `docs/specs/2026-05-26-alert-recurrence-policy.md` — types that
+# this Lambda emits and that participate in the open-alert state
+# machine. Threshold-detector owns battery + signal; behavioral-
+# detector owns device_offline + device_silent.
+_CONTINUOUS_ALERT_TYPES = (
+    "battery_critical",
+    "battery_low",
+    "signal_lost",
+    "signal_weak",
+)
 
 # ── Configuration ────────────────────────────────────────────────
 ALERT_TABLE = os.environ["ALERT_TABLE"]
@@ -215,6 +228,35 @@ def _write_synthetic_alert(
     """
     sk = f"{event_ts_iso}#{alert_type}"
     expires_at = int(_parse_iso(event_ts_iso).timestamp()) + ALERT_TTL_SECONDS
+
+    # Recurrence policy (docs/specs/2026-05-26-alert-recurrence-policy.md L3):
+    # claim the (patient, alertType) open-alert slot before writing. If
+    # a same-type alert is already open, suppress this write so the
+    # Census + Notification Review panel stays focused on one row per
+    # active condition.
+    claim_now = _now_iso()
+    if not claim_open_alert(
+        patient_id=patient.patientId,
+        alert_type=alert_type,
+        sk=sk,
+        opened_at=claim_now,
+    ):
+        logger.info(
+            "synthetic_alert_suppressed_open",
+            extra={
+                "serial": serial,
+                "patientId": patient.patientId,
+                "alertType": alert_type,
+                "sk": sk,
+            },
+        )
+        metrics.add_metric(
+            name="synthetic_alert_suppressed_open",
+            unit=MetricUnit.Count,
+            value=1,
+        )
+        return False
+
     item: dict[str, Any] = {
         "patientId": patient.patientId,
         "timestamp": sk,
@@ -228,7 +270,7 @@ def _write_synthetic_alert(
         "source": "cloud",
         "acknowledged": False,
         "data": snapshot,
-        "createdAt": _now_iso(),
+        "createdAt": claim_now,
         "expiresAt": expires_at,
     }
     try:
@@ -240,6 +282,9 @@ def _write_synthetic_alert(
         return True
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            # Same-key duplicate (shouldn't happen post-claim, but guard
+            # for safety). Leave the claim in place — the prior identical
+            # write owns the slot.
             logger.info(
                 "synthetic_alert_duplicate",
                 extra={
@@ -255,6 +300,107 @@ def _write_synthetic_alert(
             extra={"serial": serial, "alertType": alert_type},
         )
         raise
+
+
+def _auto_ack_cleared_thresholds(
+    *,
+    serial: str,
+    patient: PatientContext,
+    battery_pct: float | None,
+    rsrp_dbm: float | None,
+) -> None:
+    """
+    Auto-ack any open continuous-condition slot whose territory is
+    not currently active for this shadow update. Uses "active
+    territories" semantics so transitions in either direction
+    (recovery upward, escalation downward, tier change) close stale
+    slots correctly.
+
+    Active territories per dimension (mirror of
+    `determine_threshold_alerts`):
+      battery_pct:
+        - < batteryCritical             → battery_critical active
+        - [batteryCritical, batteryLow) → battery_low active
+        - >= batteryLow                 → neither active (fine state)
+      rsrp_dbm:
+        - <= rsrpLost                   → signal_lost active
+        - (rsrpLost, rsrpWeak]          → signal_weak active
+        - > rsrpWeak                    → neither active
+
+    Examples:
+      - Recovery (battery 0.03 → 0.50): battery_critical slot acks;
+        battery_low slot acks (if it had been open from a prior
+        cycle); no new alert fires.
+      - Tier change (battery 0.03 → 0.07): battery_critical slot
+        acks; battery_low SLOT GETS CLAIMED on the breach-write path
+        below.
+      - Escalation (battery 0.07 → 0.03): battery_low slot acks;
+        battery_critical slot gets claimed on breach-write.
+
+    Per-patient threshold overrides honored (same merge logic as
+    `determine_threshold_alerts`).
+    """
+    t = merge_thresholds(patient.thresholds)
+    active: set[str] = set()
+    if battery_pct is not None:
+        if battery_pct < t["batteryCritical"]:
+            active.add("battery_critical")
+        elif battery_pct < t["batteryLow"]:
+            active.add("battery_low")
+    if rsrp_dbm is not None:
+        if rsrp_dbm <= t["rsrpLost"]:
+            active.add("signal_lost")
+        elif rsrp_dbm <= t["rsrpWeak"]:
+            active.add("signal_weak")
+
+    # Auto-ack any open slot whose territory is NOT currently active
+    # for the dimension we observed. If a value wasn't reported in
+    # this shadow update, don't touch that dimension's slots — we
+    # have no signal to act on.
+    cleared: list[str] = []
+    if battery_pct is not None:
+        for at in ("battery_critical", "battery_low"):
+            if at not in active:
+                cleared.append(at)
+    if rsrp_dbm is not None:
+        for at in ("signal_lost", "signal_weak"):
+            if at not in active:
+                cleared.append(at)
+
+    if not cleared:
+        return
+
+    subject = {
+        "patientId": patient.patientId,
+        "clientId": patient.clientId,
+        "facilityId": patient.facilityId,
+        "censusId": patient.censusId,
+        "deviceSerial": serial,
+    }
+    for alert_type in cleared:
+        try:
+            fired = auto_ack_alert(
+                patient_id=patient.patientId,
+                alert_type=alert_type,
+                actor_service="threshold-detector",
+                subject=subject,
+            )
+        except Exception:  # noqa: BLE001 — best-effort; log + continue
+            logger.exception(
+                "auto_ack_failed",
+                extra={
+                    "serial": serial,
+                    "patientId": patient.patientId,
+                    "alertType": alert_type,
+                },
+            )
+            continue
+        if fired:
+            metrics.add_metric(
+                name="synthetic_alert_auto_acked",
+                unit=MetricUnit.Count,
+                value=1,
+            )
 
 
 @logger.inject_lambda_context(log_event=False, correlation_id_path="thingName")
@@ -312,6 +458,20 @@ def handler(event: dict, _context):
     breaches = determine_threshold_alerts(
         battery_pct, rsrp_dbm, overrides=patient.thresholds,
     )
+
+    # Recurrence policy (2026-05-26-alert-recurrence-policy.md L4):
+    # any continuous-condition alert whose underlying value is now
+    # in a clear state gets auto-acked. Runs on every shadow update
+    # — including ones that don't have any new breaches to write —
+    # so a recovery from battery_critical alone (no other breach
+    # firing) still closes the open alert.
+    _auto_ack_cleared_thresholds(
+        serial=serial,
+        patient=patient,
+        battery_pct=battery_pct,
+        rsrp_dbm=rsrp_dbm,
+    )
+
     if not breaches:
         return {"statusCode": 200, "body": "no threshold breach"}
 
@@ -369,3 +529,4 @@ def handler(event: dict, _context):
         "statusCode": 200,
         "body": f"{written_count} synthetic alert(s) written for patient={patient.patientId}",
     }
+# bundle-marker: 2026-05-27T06:05Z (active-territories auto-ack)

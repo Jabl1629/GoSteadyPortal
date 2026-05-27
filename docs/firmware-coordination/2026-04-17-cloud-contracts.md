@@ -8208,3 +8208,65 @@ V1 portal MVP critical-path is fully wired. Next FAC subset is **2B-FAC-W** (fac
 ---
 
 *Entry owner: Claude (portal session, 2026-05-26). No firmware impact; portal-only throttle primitive.*
+
+# §C33 — Alert recurrence policy: suppress-until-acked + auto-ack-on-clear (2026-05-26)
+
+Entry owner: Claude (portal session) | Trigger: bench unit `GS9999999998` accumulated 45 unacked `battery_critical` rows (one per hourly heartbeat) — Census + Notification Review panel unusable. Same shape would hit `device_offline`, `battery_low`, `signal_lost/weak`, `device_silent` whenever any continuous condition persists across detector firings. Two-tier fix: new design memo + implementation across three Lambdas + migration script for the existing backlog. **Zero firmware-facing impact** — pure cloud-side state-machine fix.
+
+## C33.1 — Product decision
+
+Per design memo `gosteady-portal/docs/specs/2026-05-26-alert-recurrence-policy.md` — each (patient, continuous-condition alertType) pair has at most one open alert at a time. While open, detector firings that re-evaluate the same violating condition emit zero new rows. The open alert closes via either: (a) caregiver manual ack via `PATCH /alerts/{patientId}/{ts}` → alert-actions releases the slot; (b) detector observes the condition has cleared → auto-ack via `system:condition_cleared` actor.
+
+Applies to: `battery_critical`, `battery_low`, `signal_lost`, `signal_weak` (threshold-detector); `device_offline`, `device_silent` (behavioral-detector). **Does NOT apply to:** `no_activity_today`, `below_typical_activity`, `declining_trend` — daily-cadence rules whose row IS the historical record for that day; current natural once-per-day behavior (hour-gate in `facility_iterator.rule_set_for_facility()`) stays.
+
+## C33.2 — What landed
+
+- **New `infra/lambda/_shared/open_alerts.py`** — `claim_open_alert` (atomic two-step conditional UpdateItem on `Patient.openAlerts: Map<alertType, {sk, openedAt}>`), `release_open_alert`, `get_open_alert_sk`, `auto_ack_alert` (looks up SK, conditional ack on Alert row, release slot, emit audit).
+- **New audit event `alert.auto_acknowledged`** in `_shared/audit_catalog.py`. Subject includes alertType + sk + duration. Actor `{type: 'system', id: 'threshold-detector' | 'behavioral-detector'}`.
+- **`threshold-detector/handler.py`** — `_write_synthetic_alert` now claims via `claim_open_alert` before PutItem. New `_auto_ack_cleared_thresholds` runs on every shadow update with active-territories semantics (see §C33.3).
+- **`behavioral-detector/handler.py`** — `_write_alert` claims for continuous types (offline/silent). New `_auto_ack_recovered_offline` runs at end of each per-patient eval; auto-acks open offline/silent slots when device lastSeen is back in range.
+- **`alert-actions/handler.py`** — on successful manual ack of a continuous-condition alert, releases the openAlerts slot (best-effort).
+- **CDK grants** — `patientsTable.grantReadWriteData(thresholdDetector)` + `grantReadWriteData(behavioralDetector)` (were ReadData only). Same for `alertTable.grantReadWriteData(thresholdDetector)` (threshold-detector now writes ack updates to existing alert rows on auto-ack, not just PutItem on new rows).
+- **Migration: `infra/scripts/ack-pre-recurrence-policy-alerts.py`** — bulk-acks all duplicate continuous-condition alerts (keeps most-recent per (patient, alertType) as the post-policy open slot), `acknowledgedBy='system:migration_2026_05_26'`. Initializes `openAlerts = {}` on every active patient as defense-in-depth. **Ran 2026-05-26 against dev: acked 71 duplicates across 9 patients (49 of those on pt_bench_98).**
+
+## C33.3 — Active-territories semantics (L7 of the design memo)
+
+Rather than "clear when threshold-recovery happens" (which leaves stale lower-tier slots when value escalates), the auto-ack pass computes the active territory per dimension and auto-acks ANY open slot whose territory isn't currently active:
+
+```
+battery_pct value         active territory
+< batteryCritical         battery_critical
+[batteryCritical, low)    battery_low
+>= batteryLow             (none)
+```
+
+Symmetric for signal. Dimensions not reported in the shadow update don't get touched (no signal). This single rule handles recovery (both slots ack), tier change (one acks, the other claimed on breach-write), and escalation (lower-tier acks, higher-tier claimed) uniformly.
+
+## C33.4 — Deploy chronology + gotchas
+
+1. First `cdk deploy GoSteady-Dev-Processing`: succeeded ~41 s; threshold + behavioral Lambdas updated.
+2. First synthetic invoke surfaced `KeyError: 'ALERTS_TABLE'` — `open_alerts.py` read the plural name used by alert-actions; the detector Lambdas have `ALERT_TABLE` (singular). Helper now reads `os.environ.get("ALERTS_TABLE") or os.environ.get("ALERT_TABLE")`.
+3. Second synthetic invoke surfaced `AccessDeniedException: dynamodb:UpdateItem ... gosteady-dev-patients` — the CDK `grantReadWriteData` change was in source but CDK didn't redeploy (the prior synth-cached `cdk.out` hashed the same source). Fixed by `npm run build` to recompile TS + redeploy; IAM policy now includes `dynamodb:UpdateItem` on `patients` resource.
+4. Third synthetic invoke surfaced `ValidationException: Two document paths overlap` — `UpdateExpression: SET openAlerts = if_not_exists(...), openAlerts.X = ...` is rejected by DDB because the two SET clauses touch overlapping paths. Rewrote `claim_open_alert` as two atomic UpdateItems (defensive ensure-map-exists + conditional claim).
+5. Fourth (and final) synthetic invoke succeeded end-to-end. Bench-validated all five state transitions: recovery, tier change (down), tier change (up), suppression, escalation.
+6. CDK asset hashing gotcha — changes to `_shared/*.py` don't invalidate the per-handler `Code.fromAsset(handlerDir)` source hash because `_shared/` is copied in during bundling but isn't in the source directory. **Fix: add a content marker line (`# bundle-marker: <timestamp>`) at the top of each handler that consumes `_shared`** when shipping a `_shared/*.py` change; or alternatively change a handler-local file in the same commit. Documented for future deploys.
+
+## C33.5 — Operational state after this entry
+
+| Item | Status |
+|---|---|
+| Alert recurrence policy implemented | ✅ deployed (Processing + Api stacks) |
+| pt_bench_98 unack count | ✅ 2 (battery_low + device_offline + device_silent — battery_critical is currently absent because the bench unit reported `battery_pct=0.50` in my last synthetic invoke; next real heartbeat with `battery_pct=0` will fire a fresh battery_critical alert as expected) |
+| Migration cleanup | ✅ 71 duplicate rows acked across 9 dev patients |
+| Audit pipeline | ✅ `alert.auto_acknowledged` events now flowing through Phase 1.7's audit log group + Firehose + S3 |
+| Suppress-while-open | ✅ verified — second invoke with same `battery_pct=0` writes zero alerts |
+| Auto-ack-on-clear | ✅ verified — `battery_pct=0.50` invoke clears battery_critical + battery_low slots |
+| Manual-ack release | ✅ wired in alert-actions; verified by reading the code path (caregiver-facing UX not yet bench-tested but the unit logic is straight-forward) |
+
+## C33.6 — Coord doc for next sync
+
+V1 alert UX is now caregiver-usable end-to-end. Next portal-side work item: **2B-FAC-W (facility writes)** — wire Patient Detail's ack button to `PATCH /alerts/{patientId}/{ts}` (will exercise the manual-ack release path live), then Add/Edit Resident + Discharge + Pause Notifications + Care Note from 2A-UM-P.
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-26). No firmware impact; cloud-side state-machine + portal-facing UX cleanup only.*

@@ -43,7 +43,23 @@ from _shared.audit_catalog import (
     AUDIT_PATIENT_THRESHOLDS_UPDATE,
 )
 from _shared.observability import emit_audit, get_logger
+from _shared.open_alerts import release_open_alert
 from _shared.thresholds import DEFAULTS, merge_thresholds
+
+# Continuous-condition alert types that participate in the open-alert
+# state machine per `docs/specs/2026-05-26-alert-recurrence-policy.md`
+# L2. On manual ack of one of these, also release the openAlerts
+# slot on Patient so the next condition violation can fire a fresh
+# alert. Daily-cadence types are NOT in this set — their state isn't
+# tracked on Patient.openAlerts.
+_CONTINUOUS_ALERT_TYPES = frozenset({
+    "battery_critical",
+    "battery_low",
+    "signal_lost",
+    "signal_weak",
+    "device_offline",
+    "device_silent",
+})
 
 from thresholds_validation import (
     ALLOWED_FIELDS,
@@ -216,6 +232,29 @@ def _action_ack_alert(
             alert = res.get("Item") or alert
         else:
             raise
+
+    # Recurrence policy (2026-05-26-alert-recurrence-policy.md L5):
+    # release the Patient.openAlerts slot so the next condition
+    # violation can fire a fresh alert. Best-effort — see D6 in the
+    # design memo: if this fails, the only consequence is one
+    # suppressed alert in the future, which the next manual ack
+    # resolves naturally.
+    alert_type = alert.get("alertType")
+    if (
+        not was_already_acked
+        and isinstance(alert_type, str)
+        and alert_type in _CONTINUOUS_ALERT_TYPES
+    ):
+        try:
+            release_open_alert(
+                patient_id=patient_id,
+                alert_type=alert_type,
+            )
+        except Exception:  # noqa: BLE001 — non-fatal
+            logger.exception(
+                "release_open_alert_failed",
+                extra={"patientId": patient_id, "alertType": alert_type},
+            )
 
     emit_audit(
         event=AUDIT_ALERT_ACK,
