@@ -8270,3 +8270,33 @@ V1 alert UX is now caregiver-usable end-to-end. Next portal-side work item: **2B
 ---
 
 *Entry owner: Claude (portal session, 2026-05-26). No firmware impact; cloud-side state-machine + portal-facing UX cleanup only.*
+
+# §C34 — CORS drift incident + force-redeploy fix (2026-05-27)
+
+Entry owner: Claude (portal session) | Trigger: portal returned `ApiException(NETWORK, 0): Connection lost` on every `primeAtSignIn` call. Curl tests against the API confirmed the cloud-side was healthy (200 OK with full patient payload). Browser console showed only a generic Dart exception — no HTTP call ever fired.
+
+## C34.1 — Root cause
+
+Deployed HTTP API CORS config had only the two localhost origins (`http://localhost:8080` and `:8090`); `https://dev.portal.gosteady.co` was missing. Chrome's CORS preflight saw no `access-control-allow-origin` matching the portal's origin and blocked the request before it left the browser. The portal's `ApiClient._request` catch-all wraps that browser-side block as `ApiException.network()` ("Connection lost"), masking the underlying CORS failure.
+
+But the CDK source had the dev.portal origin since commit `0d63ec5a` (2026-05-24, Phase 2B-0 hosting). The compiled JS in `infra/lib/stacks/api-stack.js` also had it. Some prior `cdk deploy GoSteady-Dev-Api` invocation evidently used a stale `cdk.out` and didn't synthesize the latest CORS change — the CFN diff was empty for `AWS::ApiGatewayV2::Api` even though the source had drifted.
+
+## C34.2 — Fix
+
+`cd infra && npx cdk deploy GoSteady-Dev-Api --context env=dev --require-approval never --force` — the `--force` flag was the lever; it skips the `is the cached cdk.out current?` check and re-synths fresh. The redeploy showed CFN updating `HttpApi (HttpApiF5A9A8A7)` to `UPDATE_COMPLETE` and the CORS config now includes the dev.portal origin. Browser preflight returns the correct `access-control-allow-origin: https://dev.portal.gosteady.co` header.
+
+## C34.3 — Lessons learned
+
+1. **`ApiClient.network()` is a swallow-and-mask catch.** The `catch (_) → throw ApiException.network()` block in `lib/api/api_client.dart:_request` wraps any client-side exception (CORS block, browser network failure, sync error in headers/uri construction) as `ApiException.network()`. The portal surfaces this to the user as "Connection lost. Retry?" — useless for diagnosis. **Follow-up:** preserve the underlying error type or include a structured `details` field with the inner exception's `toString()` so future CORS-class failures aren't indistinguishable from "actually offline."
+2. **CDK `cdk.out` staleness is a silent failure mode.** Running `cdk deploy` without `--force` will reuse a previously-synthesized cloud assembly if CDK thinks it's still fresh. If the source has drifted but a prior synth's cache is intact, the deploy applies the OLD CFN. **Defensive practice:** always pass `--force` to deploys that touch CORS / IAM / Authorizer config, OR `rm -rf infra/cdk.out` between deploys that modify infra config (not just Lambda code).
+3. **CORS check should be part of every API stack post-deploy smoke.** A one-liner `curl -X OPTIONS -i -H "Origin: https://dev.portal.gosteady.co" ... | grep access-control` would have caught this in seconds. Adding to the API stack's deploy runbook.
+
+## C34.4 — Operational state after this entry
+
+Portal works end-to-end. `dev-pilot-caregiver@test.local` sign-in → Census renders → Bench Patient row shows "Device ..." badge (warning, amber) + Active min today 3 / 7d avg 10 + Steps today 205 + trending up. Recurrence policy from §C33 is visibly working — one alert row per condition, not 45.
+
+No firmware impact. No source change to commit (the source was always correct; only the deployed CFN had drifted).
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-27). No firmware impact; CFN drift recovery + portal-side error-masking lesson.*
