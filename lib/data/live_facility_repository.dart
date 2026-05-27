@@ -160,12 +160,13 @@ class LiveFacilityRepository implements FacilityRepository {
       displayName: full.displayName,
       facilityId: full.facilityId ?? '',
       unitId: full.censusId ?? '',
-      room: '', // Patient.room isn't on the 2A-RD response yet;
-                // V1 displays display-name + unit + censusName instead
+      room: full.room ?? '',
       deviceSerial: full.currentDevice?.serialNumber,
       status: full.status == 'discharged'
           ? PatientStatus.discharged
           : PatientStatus.active,
+      careNote: full.careNote,
+      notificationsPaused: full.notificationsPaused,
     );
   }
 
@@ -253,6 +254,15 @@ class LiveFacilityRepository implements FacilityRepository {
           type: _mapAlertType(a.alertType),
           severity: _mapSeverity(a.alertType, a.severity),
           detail: _formatDetail(a, now),
+          // 2B-FAC-W: preserve the SK so the Notification Review
+          // panel's Acknowledge button can call PATCH /alerts/{id}/{sk}.
+          // AlertRow's SK isn't currently exposed; reconstruct from
+          // eventTimestamp + alertType. Mirrors the server-side
+          // `{eventTs}#{alertType}` convention.
+          // Preserves the server's exact SK (with original timezone
+          // offset) for round-trip-safe PATCH /alerts/{id}/{sk} —
+          // see AlertRow.sk.
+          sk: a.sk,
         ),
     ];
   }
@@ -399,6 +409,124 @@ class LiveFacilityRepository implements FacilityRepository {
       final resp = await _api.getAlerts(patientId, status);
       return resp.alerts;
     });
+  }
+
+  // ── Writes (2B-FAC-W) ─────────────────────────────────────────
+
+  @override
+  Future<AckAlertResponse> ackAlert({
+    required String patientId,
+    required String sk,
+    String? notes,
+  }) async {
+    final resp = await _api.ackAlert(patientId, sk, notes: notes);
+    // Evict the alerts cache so the next /alerts read reflects the
+    // ack. Also clear the per-patient detail cache (currentDevice.
+    // lastSeen / openAlertCount fields are influenced by this).
+    _alertsCache.evict(patientId);
+    _patientDetailCache.evict(patientId);
+    return resp;
+  }
+
+  @override
+  Future<PatientDetailResponse> createPatient({
+    required String displayName,
+    required String censusId,
+    required String room,
+    String? deviceSerial,
+  }) async {
+    final resp = await _api.createPatient(
+      displayName: displayName,
+      censusId: censusId,
+      room: room,
+      deviceSerial: deviceSerial,
+    );
+    // New patient → refresh the /me/patients slice so the Census
+    // surfaces the new row on the next render tick.
+    try {
+      await refreshCensus();
+    } catch (_) {/* non-fatal — next poll tick will catch up */}
+    return resp;
+  }
+
+  @override
+  Future<PatientDetailResponse> updatePatient({
+    required String patientId,
+    String? displayName,
+    String? censusId,
+    String? room,
+  }) async {
+    final resp = await _api.updatePatient(
+      patientId,
+      displayName: displayName,
+      censusId: censusId,
+      room: room,
+    );
+    // Evict per-patient caches and refresh the Census in case
+    // cross-facility transfer moved the row.
+    _patientDetailCache.evict(patientId);
+    try {
+      await refreshCensus();
+    } catch (_) {/* non-fatal */}
+    return resp;
+  }
+
+  @override
+  Future<DischargeResponse> dischargePatient({
+    required String patientId,
+    required String reason,
+    String? notes,
+  }) async {
+    final resp = await _api.dischargePatient(
+      patientId,
+      reason: reason,
+      notes: notes,
+    );
+    // Discharged patient drops out of the active-census /me/patients
+    // filter; evict + refresh so the Census re-renders without the row.
+    _patientDetailCache.evict(patientId);
+    _activity24hCache.evict(patientId);
+    _activity7dCache.evict(patientId);
+    _activity30dCache.evict(patientId);
+    _alertsCache.evict(patientId);
+    try {
+      await refreshCensus();
+    } catch (_) {/* non-fatal */}
+    return resp;
+  }
+
+  @override
+  Future<NotificationsPauseResponse> pauseNotifications({
+    required String patientId,
+    required int days,
+    required String reason,
+  }) async {
+    final resp = await _api.pauseNotifications(
+      patientId,
+      days: days,
+      reason: reason,
+    );
+    _patientDetailCache.evict(patientId);
+    return resp;
+  }
+
+  @override
+  Future<NotificationsPauseResponse> resumeNotifications(
+    String patientId,
+  ) async {
+    final resp = await _api.resumeNotifications(patientId);
+    _patientDetailCache.evict(patientId);
+    return resp;
+  }
+
+  @override
+  Future<CareNoteResponse> updateCareNote({
+    required String patientId,
+    required String text,
+  }) async {
+    final resp = await _api.updateCareNote(patientId, text);
+    _patientDetailCache.evict(patientId);
+    return resp;
   }
 }
 

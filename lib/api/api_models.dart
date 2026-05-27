@@ -122,7 +122,12 @@ class PatientFull {
   final String? facilityName;
   final String? censusId;
   final String? censusName;
+  final String? room;
   final CurrentDevice? currentDevice;
+  // 2A-UM-P additions — both fields are absent for patients without
+  // a note / pause; null is the "unset" sentinel.
+  final CareNote? careNote;
+  final NotificationsPaused? notificationsPaused;
 
   const PatientFull({
     required this.patientId,
@@ -134,11 +139,16 @@ class PatientFull {
     this.facilityName,
     this.censusId,
     this.censusName,
+    this.room,
     this.currentDevice,
+    this.careNote,
+    this.notificationsPaused,
   });
 
   factory PatientFull.fromJson(Map<String, dynamic> json) {
     final dev = json['currentDevice'] as Map<String, dynamic>?;
+    final note = json['careNote'] as Map<String, dynamic>?;
+    final paused = json['notificationsPaused'] as Map<String, dynamic>?;
     return PatientFull(
       patientId: (json['patientId'] as String?) ?? '',
       displayName: (json['displayName'] as String?) ?? '',
@@ -149,9 +159,61 @@ class PatientFull {
       facilityName: json['facilityName'] as String?,
       censusId: json['censusId'] as String?,
       censusName: json['censusName'] as String?,
+      room: json['room'] as String?,
       currentDevice: dev == null ? null : CurrentDevice.fromJson(dev),
+      careNote: note == null ? null : CareNote.fromJson(note),
+      notificationsPaused:
+          paused == null ? null : NotificationsPaused.fromJson(paused),
     );
   }
+}
+
+class CareNote {
+  final String text;
+  final String updatedBy;
+  final String? updatedByName;
+  final DateTime updatedAt;
+
+  const CareNote({
+    required this.text,
+    required this.updatedBy,
+    this.updatedByName,
+    required this.updatedAt,
+  });
+
+  factory CareNote.fromJson(Map<String, dynamic> json) {
+    return CareNote(
+      text: (json['text'] as String?) ?? '',
+      updatedBy: (json['updatedBy'] as String?) ?? '',
+      updatedByName: json['updatedByName'] as String?,
+      updatedAt: _parseTs(json['updatedAt']) ?? DateTime.now(),
+    );
+  }
+}
+
+class NotificationsPaused {
+  final DateTime until;
+  final String reason;
+  final DateTime? pausedAt;
+  final String? pausedBy;
+
+  const NotificationsPaused({
+    required this.until,
+    required this.reason,
+    this.pausedAt,
+    this.pausedBy,
+  });
+
+  factory NotificationsPaused.fromJson(Map<String, dynamic> json) {
+    return NotificationsPaused(
+      until: _parseTs(json['until']) ?? DateTime.now(),
+      reason: (json['reason'] as String?) ?? 'other',
+      pausedAt: _parseTs(json['pausedAt']),
+      pausedBy: json['pausedBy'] as String?,
+    );
+  }
+
+  bool get isActive => until.isAfter(DateTime.now());
 }
 
 class CurrentDevice {
@@ -296,6 +358,13 @@ class AlertsResponse {
 
 class AlertRow {
   final DateTime eventTimestamp;
+  /// Raw ISO-8601 string as the server sent it. Preserves the
+  /// timezone offset of the original `{eventTs}#{alertType}` SK so
+  /// 2B-FAC-W's `PATCH /alerts/{patientId}/{sk}` round-trips
+  /// correctly. (Some rows were written with facility-local offsets
+  /// like `-06:00`; converting to UTC would produce a different SK
+  /// that doesn't match the stored row.)
+  final String eventTimestampRaw;
   final String alertType;
   final String severity;
   final String? source;
@@ -305,6 +374,7 @@ class AlertRow {
 
   const AlertRow({
     required this.eventTimestamp,
+    required this.eventTimestampRaw,
     required this.alertType,
     required this.severity,
     this.source,
@@ -313,9 +383,14 @@ class AlertRow {
     this.deviceSerial,
   });
 
+  /// Compound SK for `PATCH /alerts/{patientId}/{sk}` (2B-FAC-W).
+  String get sk => '$eventTimestampRaw#$alertType';
+
   factory AlertRow.fromJson(Map<String, dynamic> json) {
+    final tsRaw = json['eventTimestamp']?.toString() ?? '';
     return AlertRow(
-      eventTimestamp: _parseTs(json['eventTimestamp']) ?? DateTime.now(),
+      eventTimestamp: _parseTs(tsRaw) ?? DateTime.now(),
+      eventTimestampRaw: tsRaw,
       alertType: (json['alertType'] as String?) ?? 'unknown',
       severity: (json['severity'] as String?) ?? 'standard',
       source: json['source'] as String?,
@@ -501,4 +576,149 @@ double? _parseDouble(Object? raw) {
   final s = raw.toString();
   if (s.isEmpty) return null;
   return double.tryParse(s);
+}
+
+// ── 2A-AA + 2A-UM-P write responses (consumed by 2B-FAC-W) ────────
+
+/// `PATCH /alerts/{patientId}/{ts}` response shape.
+class AckAlertResponse {
+  final AlertRow alert;
+  final bool wasAlreadyAcknowledged;
+
+  const AckAlertResponse({
+    required this.alert,
+    required this.wasAlreadyAcknowledged,
+  });
+
+  factory AckAlertResponse.fromJson(Map<String, dynamic> json) {
+    return AckAlertResponse(
+      alert: AlertRow.fromJson(
+        (json['alert'] as Map<String, dynamic>?) ?? const {},
+      ),
+      wasAlreadyAcknowledged:
+          (json['wasAlreadyAcknowledged'] as bool?) ?? false,
+    );
+  }
+}
+
+/// `POST /patients/{id}/discharge` response shape.
+class DischargeResponse {
+  final PatientFull patient;
+  final DischargeCascadeInfo cascade;
+
+  const DischargeResponse({required this.patient, required this.cascade});
+
+  factory DischargeResponse.fromJson(Map<String, dynamic> json) {
+    return DischargeResponse(
+      patient: PatientFull.fromJson(
+        (json['patient'] as Map<String, dynamic>?) ?? const {},
+      ),
+      cascade: DischargeCascadeInfo.fromJson(
+        (json['cascade'] as Map<String, dynamic>?) ?? const {},
+      ),
+    );
+  }
+}
+
+class DischargeCascadeInfo {
+  final int devicesEnded;
+  final List<String> deviceSerials;
+  final bool wipeRequested;
+
+  const DischargeCascadeInfo({
+    required this.devicesEnded,
+    required this.deviceSerials,
+    required this.wipeRequested,
+  });
+
+  factory DischargeCascadeInfo.fromJson(Map<String, dynamic> json) {
+    final serials =
+        (json['deviceSerials'] as List?)?.map((e) => e.toString()).toList() ??
+            const [];
+    return DischargeCascadeInfo(
+      devicesEnded: (json['devicesEnded'] as int?) ?? 0,
+      deviceSerials: serials,
+      wipeRequested: (json['wipeRequested'] as bool?) ?? false,
+    );
+  }
+}
+
+/// `POST/DELETE /patients/{id}/notifications/pause` response shape.
+class NotificationsPauseResponse {
+  final NotificationsPaused? notificationsPaused;
+
+  const NotificationsPauseResponse({this.notificationsPaused});
+
+  factory NotificationsPauseResponse.fromJson(Map<String, dynamic> json) {
+    final p = json['notificationsPaused'] as Map<String, dynamic>?;
+    return NotificationsPauseResponse(
+      notificationsPaused: p == null ? null : NotificationsPaused.fromJson(p),
+    );
+  }
+}
+
+/// `PATCH /patients/{id}/care-note` response shape.
+class CareNoteResponse {
+  final CareNote? careNote;
+
+  const CareNoteResponse({this.careNote});
+
+  factory CareNoteResponse.fromJson(Map<String, dynamic> json) {
+    final n = json['careNote'] as Map<String, dynamic>?;
+    return CareNoteResponse(careNote: n == null ? null : CareNote.fromJson(n));
+  }
+}
+
+/// Pause-notifications reasons per 2A-UM-P L6 enum.
+enum PauseReason {
+  inHospital('in_hospital'),
+  atRehab('at_rehab'),
+  familyVisitOffsite('family_visit_offsite'),
+  onVacation('on_vacation'),
+  other('other');
+
+  final String wireValue;
+  const PauseReason(this.wireValue);
+
+  String get label {
+    switch (this) {
+      case PauseReason.inHospital:
+        return 'In hospital';
+      case PauseReason.atRehab:
+        return 'At rehab';
+      case PauseReason.familyVisitOffsite:
+        return 'Family visit (off-site)';
+      case PauseReason.onVacation:
+        return 'On vacation';
+      case PauseReason.other:
+        return 'Other';
+    }
+  }
+}
+
+/// Discharge reasons per 2A-UM-P L5 enum.
+enum DischargeReason {
+  transferred('transferred'),
+  movedHome('moved_home'),
+  hospitalAdmission('hospital_admission'),
+  deceased('deceased'),
+  other('other');
+
+  final String wireValue;
+  const DischargeReason(this.wireValue);
+
+  String get label {
+    switch (this) {
+      case DischargeReason.transferred:
+        return 'Transferred';
+      case DischargeReason.movedHome:
+        return 'Moved home';
+      case DischargeReason.hospitalAdmission:
+        return 'Hospital admission';
+      case DischargeReason.deceased:
+        return 'Deceased';
+      case DischargeReason.other:
+        return 'Other';
+    }
+  }
 }

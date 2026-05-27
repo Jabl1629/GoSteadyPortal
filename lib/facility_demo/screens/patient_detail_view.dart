@@ -14,7 +14,9 @@ import '../models/notification.dart';
 import '../models/patient.dart';
 import '../state/facility_selection.dart';
 import '../state/notification_state.dart';
+import '../widgets/care_note_panel.dart';
 import '../widgets/notification_review_panel.dart';
+import '../widgets/pause_banner.dart';
 import '../widgets/resident_settings_dialog.dart';
 
 /// Right pane (or full-screen overlay on medium screens) of the facility
@@ -173,6 +175,7 @@ class _PatientDetailLoaderState extends State<_PatientDetailLoader> {
           notifications: widget.notifications,
           showBackButton: widget.showBackButton,
           onBack: widget.onBack,
+          onRefresh: () => setState(() => _bundle = _load()),
         );
       },
     );
@@ -206,10 +209,12 @@ class _PatientView extends StatelessWidget {
     required this.notifications,
     required this.showBackButton,
     required this.onBack,
+    required this.onRefresh,
   });
 
   final FacilityRepository data;
   final _PatientDetailBundle bundle;
+  final VoidCallback onRefresh;
   final NotificationState notifications;
   final bool showBackButton;
   final VoidCallback onBack;
@@ -261,13 +266,40 @@ class _PatientView extends StatelessWidget {
                   context,
                   patient: patient,
                   data: data,
+                  onCompleted: onRefresh,
                 ),
+              ),
+              const SizedBox(height: 20),
+              // 2B-FAC-W: pause banner appears whenever notifications
+              // are currently paused. Stacks above the care-note +
+              // notification-review panels so caregivers see the
+              // pause state before anything else.
+              if (patient.notificationsPaused != null &&
+                  patient.notificationsPaused!.isActive) ...[
+                PauseBanner(
+                  patientId: patient.id,
+                  paused: patient.notificationsPaused!,
+                  data: data,
+                  onResumed: onRefresh,
+                ),
+                const SizedBox(height: 16),
+              ],
+              // 2B-FAC-W: care-note panel between header and
+              // notifications. Always rendered (empty-state shows
+              // "Tap to add" placeholder).
+              CareNotePanel(
+                patientId: patient.id,
+                note: patient.careNote,
+                data: data,
+                onUpdated: onRefresh,
               ),
               const SizedBox(height: 20),
               if (active.isNotEmpty) ...[
                 NotificationReviewPanel(
                   notifications: active,
                   state: notifications,
+                  data: data,
+                  onAcked: onRefresh,
                 ),
                 const SizedBox(height: 24),
               ],

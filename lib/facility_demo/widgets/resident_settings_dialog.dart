@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../api/api_exception.dart';
+import '../../api/api_models.dart' show DischargeReason, PauseReason;
 import '../../theme/app_theme.dart';
 import '../../data/facility_repository.dart';
 import '../models/patient.dart';
@@ -19,20 +21,31 @@ class ResidentSettingsDialog extends StatefulWidget {
     super.key,
     required this.patient,
     required this.data,
+    this.onCompleted,
   });
 
   final Patient patient;
   final FacilityRepository data;
 
+  /// Called after a successful Edit / Pause / Resume / Discharge —
+  /// Patient Detail uses this to refresh the bundle so the new state
+  /// renders immediately. Per phase-2b-fac-w-facility-writes.md L3.
+  final VoidCallback? onCompleted;
+
   static Future<void> show(
     BuildContext context, {
     required Patient patient,
     required FacilityRepository data,
+    VoidCallback? onCompleted,
   }) =>
       showDialog<void>(
         context: context,
         barrierColor: Colors.black.withOpacity(0.45),
-        builder: (_) => ResidentSettingsDialog(patient: patient, data: data),
+        builder: (_) => ResidentSettingsDialog(
+          patient: patient,
+          data: data,
+          onCompleted: onCompleted,
+        ),
       );
 
   @override
@@ -68,6 +81,43 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
         duration: const Duration(seconds: 3),
       ),
     );
+  }
+
+  /// Runs an async write op, then closes the dialog and toasts. On
+  /// error, closes + toasts the error. Captures the messenger before
+  /// the await so it survives context invalidation. Phase 2B-FAC-W L2.
+  Future<void> _runWrite(
+    String successMessage,
+    Future<void> Function() op,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    try {
+      await op();
+      widget.onCompleted?.call();
+      navigator.pop();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(successMessage),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: AppTheme.sage,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      navigator.pop();
+      final msg = e is ApiException
+          ? '${e.code}: ${e.message}'
+          : 'Could not save: $e';
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(msg),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: AppTheme.statusAlert,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
   }
 
   String _unitDisplay(String unitId) =>
@@ -131,16 +181,31 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
           data: widget.data,
           onBack: _back,
           onClose: _close,
-          onSubmit: (name) => _toastAndClose('Resident info updated for $name.'),
+          onSubmit: (name) => _runWrite(
+            'Resident info updated for $name.',
+            () => widget.data.updatePatient(
+              patientId: widget.patient.id,
+              displayName: name,
+            ),
+          ),
         );
       case _View.pauseMonitoring:
         return _PauseMonitoringForm(
           patient: widget.patient,
           onBack: _back,
           onClose: _close,
-          onSubmit: (days) => _toastAndClose(
+          onSubmit: (days) => _runWrite(
             'Monitoring paused for ${widget.patient.displayName} '
             'for $days day${days == 1 ? '' : 's'}.',
+            () => widget.data.pauseNotifications(
+              patientId: widget.patient.id,
+              days: days,
+              // The current form doesn't collect reason; default to
+              // `other` until the form picks one up. Per 2A-UM-P L6
+              // the enum is required server-side — `other` is a valid
+              // fallback that the audit log can still differentiate.
+              reason: PauseReason.other.wireValue,
+            ),
           ),
         );
       case _View.dischargeResident:
@@ -148,9 +213,16 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
           patient: widget.patient,
           onBack: _back,
           onClose: _close,
-          onConfirm: () => _toastAndClose(
+          onConfirm: () => _runWrite(
             '${widget.patient.displayName} discharged. '
             'Activity history preserved.',
+            () => widget.data.dischargePatient(
+              patientId: widget.patient.id,
+              // Same — form doesn't pick a reason yet. Use `other`
+              // until the form prompts. Server stores notes only if
+              // provided; we don't here.
+              reason: DischargeReason.other.wireValue,
+            ),
           ),
         );
     }

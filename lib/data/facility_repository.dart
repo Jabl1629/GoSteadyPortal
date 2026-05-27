@@ -1,3 +1,4 @@
+import '../api/api_models.dart' as api;
 import '../facility_demo/data/facility_mock_data.dart' show PatientRowStats;
 import '../facility_demo/data/notification_engine.dart';
 import '../facility_demo/models/facility.dart';
@@ -98,4 +99,74 @@ abstract class FacilityRepository {
 
   /// All stats the list-view table needs for one patient.
   Future<PatientRowStats> rowStatsFor(String patientId);
+
+  // ── Writes (2B-FAC-W) ─────────────────────────────────────────
+  //
+  // Live impl delegates to ApiClient + evicts the relevant caches on
+  // success. Demo impl mutates the in-memory mock state so the
+  // marketing demo's interactivity stays correct without going
+  // out-of-network. Per phase-2b-fac-w-facility-writes.md L2 + L3.
+
+  /// `PATCH /alerts/{patientId}/{sk}` — caregiver acknowledges an
+  /// open alert. Live impl also evicts the alerts cache so the
+  /// Notification Review panel re-renders without the acked row.
+  Future<api.AckAlertResponse> ackAlert({
+    required String patientId,
+    required String sk,
+    String? notes,
+  });
+
+  /// `POST /patients` — add a new resident. When [deviceSerial] is
+  /// present, the server atomically provisions the device (per
+  /// 2A-UM-P L3). Returns the new patient's full detail; live impl
+  /// also refreshes `/me/patients`.
+  Future<api.PatientDetailResponse> createPatient({
+    required String displayName,
+    required String censusId,
+    required String room,
+    String? deviceSerial,
+  });
+
+  /// `PATCH /patients/{id}` — edit displayName / censusId / room.
+  /// At least one must be non-null. Live impl evicts the per-patient
+  /// detail cache and refreshes `/me/patients` (in case cross-facility
+  /// transfer moved the row).
+  Future<api.PatientDetailResponse> updatePatient({
+    required String patientId,
+    String? displayName,
+    String? censusId,
+    String? room,
+  });
+
+  /// `POST /patients/{id}/discharge` — flip Patient.status to
+  /// discharged; the discharge-cascade Lambda fires async via DDB
+  /// Streams. Returns the cascade snapshot at response-time. Live
+  /// impl refreshes `/me/patients` so the now-discharged row drops
+  /// out of the active census.
+  Future<api.DischargeResponse> dischargePatient({
+    required String patientId,
+    required String reason,
+    String? notes,
+  });
+
+  /// `POST /patients/{id}/notifications/pause` — pause for [days]
+  /// (∈ [1,90]). Live impl refreshes the patient detail cache so
+  /// the Pause Banner renders immediately.
+  Future<api.NotificationsPauseResponse> pauseNotifications({
+    required String patientId,
+    required int days,
+    required String reason,
+  });
+
+  /// `DELETE /patients/{id}/notifications/pause` — caregiver-driven
+  /// resume. Live impl refreshes the patient detail cache.
+  Future<api.NotificationsPauseResponse> resumeNotifications(String patientId);
+
+  /// `PATCH /patients/{id}/care-note` — set or clear the free-text
+  /// care note. Empty [text] clears. Live impl refreshes patient
+  /// detail so the new text + attribution render immediately.
+  Future<api.CareNoteResponse> updateCareNote({
+    required String patientId,
+    required String text,
+  });
 }

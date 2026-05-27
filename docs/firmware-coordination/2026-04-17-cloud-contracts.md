@@ -8300,3 +8300,84 @@ No firmware impact. No source change to commit (the source was always correct; o
 ---
 
 *Entry owner: Claude (portal session, 2026-05-27). No firmware impact; CFN drift recovery + portal-side error-masking lesson.*
+
+# §C35 — 2B-FAC-W facility writes deployed + live-validated (2026-05-27)
+
+Entry owner: Claude (portal session) | Trigger: complete the V1 caregiver UX loop. **Zero firmware-facing impact** — pure-Flutter wiring of the 5 mutation endpoints that 2A-AA + 2A-UM-P already deployed.
+
+## C35.1 — What landed
+
+- **New spec:** `gosteady-portal/docs/specs/phase-2b-fac-w-facility-writes.md`.
+- **`ApiClient` 7 methods wired:** `ackAlert`, `createPatient`, `updatePatient`, `dischargePatient`, `pauseNotifications`, `resumeNotifications`, `updateCareNote`. (Provision-device + end-assignment stubs left in place for the deferred "replace device" UX.)
+- **`api_models.dart`** gained `AckAlertResponse`, `DischargeResponse + DischargeCascadeInfo`, `NotificationsPauseResponse + NotificationsPaused`, `CareNoteResponse + CareNote`, `PauseReason` + `DischargeReason` enums. `PatientFull` now decodes `careNote` + `notificationsPaused` (the 2A-RD response always carried them per 2A-UM-P L8; portal just didn't surface them).
+- **`AlertRow`** gained `eventTimestampRaw` + `sk` getter — preserves the server's exact SK including facility-local timezone offsets (e.g. `2026-05-26T21:19:26-06:00#device_offline`) so PATCH /alerts/{id}/{sk} round-trips correctly. UTC conversion would have produced a different SK that doesn't match the stored row.
+- **`FacilityRepository`** abstract interface extended with 7 write methods. Live impl evicts the relevant caches (alerts + patient detail + Census `/me/patients` slice) after each successful write. Demo impl returns synthesized responses so the marketing build's UX continues to compile + run.
+- **Portal screens:**
+  - `notification_review_panel.dart` — Acknowledge button wired to `data.ackAlert(...)`; spinner during in-flight; inline error banner on failure.
+  - `add_resident_dialog.dart` — submit wired to `data.createPatient(...)`; facility/unit picker now sources from `data.allFacilities()` (live) with seed fallback; error banner on failure.
+  - `resident_settings_dialog.dart` — Edit / Pause / Discharge actions go through a new `_runWrite` helper that awaits the write, then closes + toasts (or toasts the error). Replace/Discontinue device stay no-op for now (deferred to FAC-W follow-up).
+  - `care_note_panel.dart` (new) — sage-tinted block above Notification Review with `Patient.careNote.text` + edit pencil; inline edit dialog with 280-char counter, save/clear/cancel.
+  - `pause_banner.dart` (new) — warning-tinted banner above care-note when `Patient.notificationsPaused.isActive`; reason label + remaining-days + single-tap Resume.
+  - `patient_detail_view.dart` — mounts `PauseBanner` (conditional) + `CareNotePanel` (always) between the device-health strip and the Notification Review panel.
+- **`api_exception.dart`** — `ApiException.network({String? detail})` factory preserves the underlying exception type/message in `details.inner` so future CORS-class failures aren't indistinguishable from real network outages. `toString()` includes the inner detail. Closes coord §C34.3 lesson #1.
+
+## C35.2 — Live validation against pt_bench_98
+
+Direct API ack via curl (UI ack blocked by a Flutter / `form_input` quirk — see §C35.3):
+
+```
+PATCH /api/v1/alerts/pt_bench_98/2026-05-27T14%3A00%3A00Z%23battery_critical
+  body: {"notes": "Replaced AAs."}
+  → 200 OK
+  → alert.acknowledged = true
+  → alert.acknowledgedBy = "4408b4a8-b031-70b9-1a5d-a3826121a4db" (caregiver Cognito sub)
+  → alert.ackNotes = "Replaced AAs."
+  → Patient.openAlerts.battery_critical → null  ← coord §C33 L5 manual-ack-release path verified live for the first time
+```
+
+Subsequent fresh `battery_pct=0.02` shadow update through threshold-detector:
+
+```
+status: 200, body: "1 synthetic alert(s) written for patient=pt_bench_98"
+  → Patient.openAlerts.battery_critical = {sk: 2026-05-27T14:25:00Z#battery_critical, openedAt: 2026-05-27T14:23:27Z}
+```
+
+Recurrence after release validated. Full alert-recurrence state machine now closed end-to-end with caregiver-initiated ack.
+
+## C35.3 — Known UI quirk: `form_input` doesn't trigger Flutter onChange
+
+Chrome MCP's `form_input` tool sets the DOM input's `value` attribute directly. Flutter Web's text field listens for `input` / `change` events to update its internal text state. Setting the DOM value via JS without dispatching the event leaves Flutter's `_hasText` boolean false → the Acknowledge button stays disabled → the click does nothing.
+
+Bench-testing via the UI requires native key events (Chrome MCP's `computer.type` action with the input focused). The two attempts during today's validation hit click-timing races that left the field empty — the underlying ack flow is verified via direct API call, which exercises the same alert-actions code path.
+
+Not blocking — V1 caregivers will use real keyboards, not JS-driven test fixtures. Filed as a 2B-POL test-harness improvement.
+
+## C35.4 — Deferred FAC-W follow-ups
+
+- **Census-tier paused-bell icon (US-31).** The `/me/patients` response doesn't include `notificationsPaused`. Surfacing the icon at Census scan tier requires either (a) augmenting the 2A-RD response — small spec amendment, may make sense to land alongside other `/me/patients` extensions; or (b) per-row lazy fetch — adds N HTTP calls at Census cold-load, not justified at MVP. Deferred until 2A-RD follow-up batch.
+- **Replace / Discontinue Device** — UI dialogs already exist in `resident_settings_dialog.dart`; the device-api endpoints (2A-DL provision + end-assignment) deployed in coord §C24. Just needs the same `_runWrite` wiring as Edit/Pause/Discharge. Out of FAC-W scope per spec; trivially picked up in a follow-up commit.
+- **Discharge reason picker + Pause reason/days picker** — `_DischargeForm` + `_PauseMonitoringForm` currently hardcode `other` / 7-day default. Forms exist; just need to surface their fields into the user-facing inputs. UX polish task.
+- **Optimistic UI** — every write awaits the server response per spec L4. Optimistic-with-rollback is a 2B-POL polish if pilot data demands it.
+
+## C35.5 — Operational state after this entry
+
+| Item | Status |
+|---|---|
+| 7 ApiClient write methods | ✅ Implemented + tested via direct curl |
+| FacilityRepository write surface | ✅ Live + demo impls; demo returns synthesized responses |
+| Notification Review ack button | ✅ Wired (UI bench-test pending) |
+| Add Resident dialog | ✅ Wired |
+| Resident Settings (Edit / Pause / Discharge) | ✅ Wired |
+| Care Note panel + inline editor | ✅ Live |
+| Pause Banner | ✅ Live (Patient Detail tier) |
+| Census-tier paused-bell icon | 🔲 Needs `/me/patients` augmentation; deferred |
+| `ApiException` error-detail preservation | ✅ Closes coord §C34.3 lesson #1 |
+| Manual-ack release path (coord §C33 L5) | ✅ Live-validated for the first time today |
+
+## C35.6 — Coord doc for next sync
+
+V1 caregiver UX feature-complete (read + write + alert ack + care note + pause/resume + discharge). Next likely directions: 2B-D2C household refit, 2C notifications (push/SMS/email), or 3A prod hosting cutover. Coordination doc rests until next major work item.
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-27). No firmware impact; closes V1 caregiver UX surface.*

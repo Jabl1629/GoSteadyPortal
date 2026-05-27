@@ -112,25 +112,40 @@ class ApiClient {
     return CensusRosterResponse.fromJson(body);
   }
 
-  // ── 2A-AA + 2A-DL writes (deployed; wiring in 2B-FAC-W) ────────
+  // ── 2A-AA writes (deployed 2026-05-23; wired in 2B-FAC-W) ───────
 
-  Future<void> ackAlert(
+  /// `PATCH /api/v1/alerts/{patientId}/{compoundSk}` — caregiver ack.
+  /// The compound SK is `{eventTs}#{alertType}` and contains `#` which
+  /// must be percent-encoded for safe URL routing.
+  Future<AckAlertResponse> ackAlert(
     String patientId,
     String compoundSk, {
     String? notes,
   }) async {
-    throw UnimplementedError('Wiring in 2B-FAC-W');
+    final encoded = Uri.encodeComponent(compoundSk);
+    final body = await _request(
+      'PATCH',
+      '/api/v1/alerts/$patientId/$encoded',
+      body: {if (notes != null) 'notes': notes},
+    );
+    return AckAlertResponse.fromJson(body);
   }
 
+  // ── 2A-DL writes (deployed; wired in 2B-FAC-W follow-ups) ──────
+
   Future<DeviceResponse> provisionDevice(String serial, String patientId) async {
-    throw UnimplementedError('Wiring in 2B-FAC-W');
+    // Deferred — 2B-FAC-W ships add-with-device via POST /patients (atomic);
+    // standalone provision is a "Replace Device" UX surface for later.
+    throw UnimplementedError(
+      'Standalone provision is 2B-FAC-W follow-up; add-with-device uses POST /patients',
+    );
   }
 
   Future<DeviceResponse> endAssignment(String serial) async {
-    throw UnimplementedError('Wiring in 2B-FAC-W');
+    throw UnimplementedError('Replace-device flow is 2B-FAC-W follow-up');
   }
 
-  // ── 2A-UM-P writes (deployed dev 2026-05-24; wiring in 2B-FAC-W) ──
+  // ── 2A-UM-P writes (deployed dev 2026-05-24; wired in 2B-FAC-W) ──
 
   Future<PatientDetailResponse> createPatient({
     required String displayName,
@@ -138,7 +153,18 @@ class ApiClient {
     required String room,
     String? deviceSerial,
   }) async {
-    throw UnimplementedError('Wiring in 2B-FAC-W');
+    final body = await _request(
+      'POST',
+      '/api/v1/patients',
+      body: {
+        'displayName': displayName,
+        'censusId': censusId,
+        'room': room,
+        if (deviceSerial != null && deviceSerial.isNotEmpty)
+          'deviceSerial': deviceSerial,
+      },
+    );
+    return PatientDetailResponse.fromJson(body);
   }
 
   Future<PatientDetailResponse> updatePatient(
@@ -147,34 +173,67 @@ class ApiClient {
     String? censusId,
     String? room,
   }) async {
-    throw UnimplementedError('Wiring in 2B-FAC-W');
+    final patch = <String, dynamic>{};
+    if (displayName != null) patch['displayName'] = displayName;
+    if (censusId != null) patch['censusId'] = censusId;
+    if (room != null) patch['room'] = room;
+    final body = await _request(
+      'PATCH',
+      '/api/v1/patients/$patientId',
+      body: patch,
+    );
+    return PatientDetailResponse.fromJson(body);
   }
 
-  Future<void> dischargePatient(
+  Future<DischargeResponse> dischargePatient(
     String patientId, {
     required String reason,
     String? notes,
   }) async {
-    throw UnimplementedError('Wiring in 2B-FAC-W');
+    final body = await _request(
+      'POST',
+      '/api/v1/patients/$patientId/discharge',
+      body: {
+        'reason': reason,
+        if (notes != null && notes.isNotEmpty) 'notes': notes,
+      },
+    );
+    return DischargeResponse.fromJson(body);
   }
 
-  Future<void> pauseNotifications(
+  Future<NotificationsPauseResponse> pauseNotifications(
     String patientId, {
     required int days,
     required String reason,
   }) async {
-    throw UnimplementedError('Wiring in 2B-FAC-W');
+    final body = await _request(
+      'POST',
+      '/api/v1/patients/$patientId/notifications/pause',
+      body: {'days': days, 'reason': reason},
+    );
+    return NotificationsPauseResponse.fromJson(body);
   }
 
-  Future<void> resumeNotifications(String patientId) async {
-    throw UnimplementedError('Wiring in 2B-FAC-W');
+  Future<NotificationsPauseResponse> resumeNotifications(
+    String patientId,
+  ) async {
+    final body = await _request(
+      'DELETE',
+      '/api/v1/patients/$patientId/notifications/pause',
+    );
+    return NotificationsPauseResponse.fromJson(body);
   }
 
-  Future<PatientDetailResponse> updateCareNote(
+  Future<CareNoteResponse> updateCareNote(
     String patientId,
     String text,
   ) async {
-    throw UnimplementedError('Wiring in 2B-FAC-W');
+    final body = await _request(
+      'PATCH',
+      '/api/v1/patients/$patientId/care-note',
+      body: {'text': text},
+    );
+    return CareNoteResponse.fromJson(body);
   }
 
   // ── Internals ─────────────────────────────────────────────────
@@ -226,10 +285,13 @@ class ApiClient {
         default:
           throw StateError('Unsupported method: $method');
       }
-    } on TimeoutException catch (_) {
-      throw ApiException.network();
-    } catch (_) {
-      throw ApiException.network();
+    } on TimeoutException catch (e) {
+      throw ApiException.network(detail: 'Timeout: ${e.duration}');
+    } catch (e) {
+      // Preserve underlying type/message so CORS / preflight / browser-
+      // side sync errors aren't indistinguishable from real network
+      // outages. Per coord §C34.3 lesson #1.
+      throw ApiException.network(detail: '${e.runtimeType}: $e');
     }
 
     final status = resp.statusCode;

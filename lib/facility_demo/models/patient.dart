@@ -1,3 +1,5 @@
+import '../../api/api_models.dart' as api;
+
 enum PatientStatus { active, discharged }
 
 /// A walker user being monitored. Patient-centric model matches the
@@ -12,6 +14,11 @@ class Patient {
   final String room;
   final String? deviceSerial;
   final PatientStatus status;
+  // 2B-FAC-W additions — surfaced from PatientFull on Patient Detail.
+  // Both null when unset on the server row; nullability mirrors the
+  // 2A-RD GET /patients/{id} response shape extension from 2A-UM-P L8.
+  final api.CareNote? careNote;
+  final api.NotificationsPaused? notificationsPaused;
 
   const Patient({
     required this.id,
@@ -21,6 +28,8 @@ class Patient {
     required this.room,
     this.deviceSerial,
     this.status = PatientStatus.active,
+    this.careNote,
+    this.notificationsPaused,
   });
 }
 

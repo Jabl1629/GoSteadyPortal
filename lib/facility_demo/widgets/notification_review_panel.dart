@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../api/api_exception.dart';
+import '../../data/facility_repository.dart';
 import '../../theme/app_theme.dart';
 import '../models/notification.dart';
 import '../state/notification_state.dart';
@@ -13,11 +15,23 @@ class NotificationReviewPanel extends StatelessWidget {
     super.key,
     required this.notifications,
     required this.state,
+    required this.data,
+    this.onAcked,
   });
 
   /// Active (i.e. not-yet-dismissed) notifications for the patient.
   final List<PatientNotification> notifications;
   final NotificationState state;
+
+  /// Repository used to call `PATCH /alerts/{patientId}/{sk}` per
+  /// phase-2b-fac-w L2. Demo path is a no-op; live path triggers the
+  /// manual-ack-release flow from coord §C33 L5.
+  final FacilityRepository data;
+
+  /// Optional callback after a successful ack. Patient Detail uses
+  /// this to refresh the bundle so the acked row disappears from the
+  /// list immediately (rather than waiting for the next polling tick).
+  final VoidCallback? onAcked;
 
   @override
   Widget build(BuildContext context) {
@@ -54,7 +68,12 @@ class NotificationReviewPanel extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           for (final n in notifications)
-            _NotificationCard(notification: n, state: state),
+            _NotificationCard(
+              notification: n,
+              state: state,
+              data: data,
+              onAcked: onAcked,
+            ),
         ],
       ),
     );
@@ -67,9 +86,16 @@ class NotificationReviewPanel extends StatelessWidget {
 }
 
 class _NotificationCard extends StatefulWidget {
-  const _NotificationCard({required this.notification, required this.state});
+  const _NotificationCard({
+    required this.notification,
+    required this.state,
+    required this.data,
+    this.onAcked,
+  });
   final PatientNotification notification;
   final NotificationState state;
+  final FacilityRepository data;
+  final VoidCallback? onAcked;
 
   @override
   State<_NotificationCard> createState() => _NotificationCardState();
@@ -78,6 +104,8 @@ class _NotificationCard extends StatefulWidget {
 class _NotificationCardState extends State<_NotificationCard> {
   late final TextEditingController _noteCtrl;
   bool _hasText = false;
+  bool _submitting = false;
+  String? _errorMessage;
 
   @override
   void initState() {
@@ -95,14 +123,44 @@ class _NotificationCardState extends State<_NotificationCard> {
     super.dispose();
   }
 
-  void _submitNote() {
+  Future<void> _submitNote() async {
     final text = _noteCtrl.text.trim();
     if (text.isEmpty) return;
-    // Acknowledge + Save Note: persist the note, then dismiss the
-    // notification. Adding context is the act of reviewing.
-    widget.state.addNote(widget.notification, text);
-    _noteCtrl.clear();
-    widget.state.dismiss(widget.notification);
+    final n = widget.notification;
+    setState(() {
+      _submitting = true;
+      _errorMessage = null;
+    });
+    try {
+      // Phase 2B-FAC-W L2 — repository owns the write path. In live
+      // mode this hits PATCH /alerts/{patientId}/{sk} and (per coord
+      // §C33 L5) the server-side ack handler releases the
+      // openAlerts.<alertType> slot on the Patient row. Demo impl is
+      // a no-op returning a synthesized response.
+      if (n.sk != null) {
+        await widget.data.ackAlert(
+          patientId: n.patientId,
+          sk: n.sk!,
+          notes: text,
+        );
+      }
+      if (!mounted) return;
+      // Persist the note locally (kept for demo continuity) + dismiss.
+      // Parent then refreshes the bundle so the row disappears.
+      widget.state.addNote(n, text);
+      widget.state.dismiss(n);
+      _noteCtrl.clear();
+      widget.onAcked?.call();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e is ApiException
+            ? '${e.code}: ${e.message}'
+            : 'Could not save: $e';
+      });
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
   }
 
   @override
@@ -170,8 +228,48 @@ class _NotificationCardState extends State<_NotificationCard> {
           const SizedBox(height: 8),
           _NoteInput(
             controller: _noteCtrl,
-            canSubmit: _hasText,
+            canSubmit: _hasText && !_submitting,
+            submitting: _submitting,
             onSubmit: _submitNote,
+          ),
+          if (_errorMessage != null) ...[
+            const SizedBox(height: 8),
+            _ErrorBanner(message: _errorMessage!),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ErrorBanner extends StatelessWidget {
+  const _ErrorBanner({required this.message});
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      decoration: BoxDecoration(
+        color: AppTheme.statusAlert.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppTheme.statusAlert.withOpacity(0.35)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.error_outline_rounded,
+              size: 16, color: AppTheme.statusAlert),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(
+                color: AppTheme.statusAlert,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
           ),
         ],
       ),
@@ -232,11 +330,13 @@ class _NoteInput extends StatelessWidget {
   const _NoteInput({
     required this.controller,
     required this.canSubmit,
+    required this.submitting,
     required this.onSubmit,
   });
 
   final TextEditingController controller;
   final bool canSubmit;
+  final bool submitting;
   final VoidCallback onSubmit;
 
   @override
@@ -276,7 +376,11 @@ class _NoteInput extends StatelessWidget {
             ),
           ),
         );
-        final button = _AcknowledgeButton(enabled: canSubmit, onTap: onSubmit);
+        final button = _AcknowledgeButton(
+          enabled: canSubmit,
+          submitting: submitting,
+          onTap: onSubmit,
+        );
 
         if (stack) {
           return Column(
@@ -302,8 +406,13 @@ class _NoteInput extends StatelessWidget {
 }
 
 class _AcknowledgeButton extends StatefulWidget {
-  const _AcknowledgeButton({required this.enabled, required this.onTap});
+  const _AcknowledgeButton({
+    required this.enabled,
+    required this.submitting,
+    required this.onTap,
+  });
   final bool enabled;
+  final bool submitting;
   final VoidCallback onTap;
 
   @override
@@ -335,16 +444,28 @@ class _AcknowledgeButtonState extends State<_AcknowledgeButton> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                Icons.check_rounded,
-                size: 16,
-                color: enabled ? Colors.white : AppTheme.textSoft,
-              ),
+              if (widget.submitting)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                  ),
+                )
+              else
+                Icon(
+                  Icons.check_rounded,
+                  size: 16,
+                  color: enabled ? Colors.white : AppTheme.textSoft,
+                ),
               const SizedBox(width: 6),
               Text(
-                'Acknowledge + Save Note',
+                widget.submitting ? 'Acknowledging…' : 'Acknowledge + Save Note',
                 style: TextStyle(
-                  color: enabled ? Colors.white : AppTheme.textSoft,
+                  color: enabled || widget.submitting
+                      ? Colors.white
+                      : AppTheme.textSoft,
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
                   letterSpacing: 0.1,

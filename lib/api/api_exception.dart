@@ -28,10 +28,16 @@ class ApiException implements Exception {
     this.details,
   });
 
-  factory ApiException.network() => const ApiException(
+  /// Network-class failure (no HTTP response received). Optional
+  /// [detail] preserves the underlying error string so CORS / preflight
+  /// / sync exceptions don't all collapse to "Connection lost" in the
+  /// UI — surfaces as `details: {inner: <detail>}` and is included in
+  /// [toString] for log diagnosis. Per coord §C34.3 lesson #1.
+  factory ApiException.network({String? detail}) => ApiException(
         code: 'NETWORK',
         message: 'Connection lost. Retry?',
         httpStatus: 0,
+        details: detail == null ? null : {'inner': detail},
       );
 
   factory ApiException.unauthenticated() => const ApiException(
@@ -41,5 +47,9 @@ class ApiException implements Exception {
       );
 
   @override
-  String toString() => 'ApiException($code, $httpStatus): $message';
+  String toString() {
+    final inner = details?['inner'];
+    final suffix = inner == null ? '' : ' [inner: $inner]';
+    return 'ApiException($code, $httpStatus): $message$suffix';
+  }
 }

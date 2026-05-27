@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import '../../api/api_models.dart' as api;
 import '../../data/facility_repository.dart';
 import '../../models/activity.dart';
 import '../../models/device.dart';
@@ -225,6 +226,134 @@ class FacilityMockData implements FacilityRepository {
       stepsToday: today.totalSteps,
       activeMinutesToday: today.totalTimeInMotionMinutes,
       hasDataToday: hasData,
+    );
+  }
+
+  // ── Writes (2B-FAC-W) — demo no-ops returning synthesized responses
+  //
+  // Each method returns a shape that matches the live API but doesn't
+  // actually mutate the mock state. Per phase-2b-fac-w L2: marketing
+  // demo is non-interactive at the data layer; what matters is that
+  // the UI flows compile + run without exceptions. A future polish
+  // pass could make these actually mutate the seed if demo
+  // interactivity becomes important.
+
+  @override
+  Future<api.AckAlertResponse> ackAlert({
+    required String patientId,
+    required String sk,
+    String? notes,
+  }) async {
+    return api.AckAlertResponse(
+      alert: api.AlertRow(
+        eventTimestamp: DateTime.now(),
+        eventTimestampRaw: sk.split('#').first,
+        alertType: sk.split('#').last,
+        severity: 'standard',
+        acknowledged: true,
+      ),
+      wasAlreadyAcknowledged: false,
+    );
+  }
+
+  @override
+  Future<api.PatientDetailResponse> createPatient({
+    required String displayName,
+    required String censusId,
+    required String room,
+    String? deviceSerial,
+  }) async {
+    final id = 'pat_demo_${DateTime.now().millisecondsSinceEpoch}';
+    return api.PatientDetailResponse(
+      patient: api.PatientFull(
+        patientId: id,
+        displayName: displayName,
+        status: 'active',
+        censusId: censusId,
+        room: room,
+        currentDevice: deviceSerial == null
+            ? null
+            : api.CurrentDevice(
+                serialNumber: deviceSerial,
+                status: 'provisioned',
+              ),
+      ),
+    );
+  }
+
+  @override
+  Future<api.PatientDetailResponse> updatePatient({
+    required String patientId,
+    String? displayName,
+    String? censusId,
+    String? room,
+  }) async {
+    return api.PatientDetailResponse(
+      patient: api.PatientFull(
+        patientId: patientId,
+        displayName: displayName ?? '',
+        status: 'active',
+        censusId: censusId,
+        room: room,
+      ),
+    );
+  }
+
+  @override
+  Future<api.DischargeResponse> dischargePatient({
+    required String patientId,
+    required String reason,
+    String? notes,
+  }) async {
+    return api.DischargeResponse(
+      patient: api.PatientFull(
+        patientId: patientId,
+        displayName: '',
+        status: 'discharged',
+      ),
+      cascade: const api.DischargeCascadeInfo(
+        devicesEnded: 0,
+        deviceSerials: [],
+        wipeRequested: false,
+      ),
+    );
+  }
+
+  @override
+  Future<api.NotificationsPauseResponse> pauseNotifications({
+    required String patientId,
+    required int days,
+    required String reason,
+  }) async {
+    return api.NotificationsPauseResponse(
+      notificationsPaused: api.NotificationsPaused(
+        until: DateTime.now().add(Duration(days: days)),
+        reason: reason,
+        pausedAt: DateTime.now(),
+      ),
+    );
+  }
+
+  @override
+  Future<api.NotificationsPauseResponse> resumeNotifications(
+    String patientId,
+  ) async {
+    return const api.NotificationsPauseResponse();
+  }
+
+  @override
+  Future<api.CareNoteResponse> updateCareNote({
+    required String patientId,
+    required String text,
+  }) async {
+    if (text.isEmpty) return const api.CareNoteResponse();
+    return api.CareNoteResponse(
+      careNote: api.CareNote(
+        text: text,
+        updatedBy: 'demo_user',
+        updatedByName: 'Demo Caregiver',
+        updatedAt: DateTime.now(),
+      ),
     );
   }
 

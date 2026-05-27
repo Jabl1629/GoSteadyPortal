@@ -63,11 +63,18 @@ class PatientNotification {
   final String
       detail; // one-line context, e.g. "0 steps today · last data 9h ago"
 
+  /// Compound SK `{eventTimestamp}#{alertType}` from the Alert History
+  /// row in live mode. Required for `PATCH /alerts/{patientId}/{sk}`
+  /// in 2B-FAC-W. Null in demo mode (no live row to ack); the ack
+  /// button falls back to the local NotificationState dismiss path.
+  final String? sk;
+
   const PatientNotification({
     required this.patientId,
     required this.type,
     required this.severity,
     required this.detail,
+    this.sk,
   });
 
   /// Stable key for dismissal/notes lookups.

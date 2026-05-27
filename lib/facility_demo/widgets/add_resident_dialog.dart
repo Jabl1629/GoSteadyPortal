@@ -1,22 +1,38 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../api/api_exception.dart';
+import '../../data/facility_repository.dart';
 import '../../theme/app_theme.dart';
 import '../data/facility_seed.dart';
 import '../models/facility.dart';
 import '../models/unit.dart';
 import 'form_fields.dart';
 
-/// Cosmetic "Add Resident" intake form. Submits to a SnackBar — there is
-/// no persistence layer yet. When the AWS write path lands, swap the
-/// no-op `_submit` for an `ApiClient.createPatient(...)` call.
+/// "Add Resident" intake form. Submits via the FacilityRepository
+/// per phase-2b-fac-w-facility-writes.md L2 — live impl hits
+/// `POST /patients` (atomic with provisioning when a deviceSerial is
+/// present); demo impl returns a synthesized response.
 class AddResidentDialog extends StatefulWidget {
-  const AddResidentDialog({super.key});
+  const AddResidentDialog({super.key, required this.data, this.onCreated});
 
-  static Future<void> show(BuildContext context) => showDialog<void>(
+  /// Repository used to call `POST /patients`. Required for both
+  /// builds (demo path is a no-op via FacilityMockData).
+  final FacilityRepository data;
+
+  /// Optional callback after a successful create. Census view uses
+  /// this to refresh the patient list so the new resident appears.
+  final VoidCallback? onCreated;
+
+  static Future<void> show(
+    BuildContext context, {
+    required FacilityRepository data,
+    VoidCallback? onCreated,
+  }) =>
+      showDialog<void>(
         context: context,
         barrierColor: Colors.black.withOpacity(0.45),
-        builder: (_) => const AddResidentDialog(),
+        builder: (_) => AddResidentDialog(data: data, onCreated: onCreated),
       );
 
   @override
@@ -33,6 +49,23 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
   Facility? _facility;
   Unit? _unit;
 
+  bool _submitting = false;
+  String? _errorMessage;
+
+  late final List<Facility> _facilities;
+
+  @override
+  void initState() {
+    super.initState();
+    // Live impl: facilities/units derived from the cached
+    // /me/patients response (per 2B-FAC-R L2). Demo impl: same data
+    // shape via FacilityMockData. Either way, the seed fallback is
+    // available if the repository returns empty (e.g. patient with
+    // no scope — unlikely in practice).
+    final fromRepo = widget.data.allFacilities();
+    _facilities = fromRepo.isNotEmpty ? fromRepo : FacilitySeed.facilities;
+  }
+
   @override
   void dispose() {
     _firstName.dispose();
@@ -44,30 +77,64 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
 
   List<Unit> get _unitsForFacility {
     if (_facility == null) return const [];
+    final fromRepo = widget.data.unitsForFacility(_facility!.id);
+    if (fromRepo.isNotEmpty) return fromRepo;
     return FacilitySeed.units
         .where((u) => u.facilityId == _facility!.id)
         .toList();
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     if (_facility == null || _unit == null) return;
 
     final fullName = '${_firstName.text.trim()} ${_lastName.text.trim()}';
-    final unitName = _unit!.displayName;
+    final censusId = _unit!.id;
     final room = _room.text.trim();
+    final rawSerial = _deviceId.text.trim();
+    // Per 2A-UM-P L3, server expects the GoSteady-prefixed serial.
+    // The form is a 10-digit input; prepend "GS" if not already
+    // present. Both forms are accepted by the server (it
+    // canonicalizes), but be explicit.
+    final deviceSerial = rawSerial.isEmpty
+        ? null
+        : (rawSerial.startsWith('GS') ? rawSerial : 'GS$rawSerial');
 
-    // Cache the messenger before popping — context becomes invalid after.
-    final messenger = ScaffoldMessenger.of(context);
-    Navigator.of(context).pop();
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text('$fullName registered in $unitName · Rm $room'),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: AppTheme.sage,
-        duration: const Duration(seconds: 3),
-      ),
-    );
+    setState(() {
+      _submitting = true;
+      _errorMessage = null;
+    });
+
+    try {
+      await widget.data.createPatient(
+        displayName: fullName,
+        censusId: censusId,
+        room: room,
+        deviceSerial: deviceSerial,
+      );
+      if (!mounted) return;
+      widget.onCreated?.call();
+      final messenger = ScaffoldMessenger.of(context);
+      Navigator.of(context).pop();
+      messenger.showSnackBar(
+        SnackBar(
+          content:
+              Text('$fullName registered in ${_unit!.displayName} · Rm $room'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: AppTheme.sage,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e is ApiException
+            ? '${e.code}: ${e.message}'
+            : 'Could not add resident: $e';
+      });
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
   }
 
   @override
@@ -147,7 +214,7 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
                   label: 'Facility',
                   hint: 'Select facility',
                   value: _facility,
-                  options: FacilitySeed.facilities,
+                  options: _facilities,
                   optionLabel: (f) => f.displayName,
                   onChanged: (f) => setState(() {
                     _facility = f;
@@ -177,12 +244,44 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
                   hint: 'e.g. 203, 12A, R-4',
                   validator: _requiredText,
                 ),
+                if (_errorMessage != null) ...[
+                  const SizedBox(height: 16),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: AppTheme.statusAlert.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                          color: AppTheme.statusAlert.withOpacity(0.35)),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.error_outline_rounded,
+                            size: 16, color: AppTheme.statusAlert),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _errorMessage!,
+                            style: TextStyle(
+                              color: AppTheme.statusAlert,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 24),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.end,
                   children: [
                     TextButton(
-                      onPressed: () => Navigator.of(context).pop(),
+                      onPressed: _submitting
+                          ? null
+                          : () => Navigator.of(context).pop(),
                       style: TextButton.styleFrom(
                         foregroundColor: AppTheme.textSoft,
                         padding: const EdgeInsets.symmetric(
@@ -195,7 +294,7 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
                     ),
                     const SizedBox(width: 8),
                     FilledButton(
-                      onPressed: _submit,
+                      onPressed: _submitting ? null : _submit,
                       style: FilledButton.styleFrom(
                         backgroundColor: AppTheme.sage,
                         foregroundColor: Colors.white,
@@ -209,7 +308,17 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-                      child: const Text('Add Resident'),
+                      child: _submitting
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor:
+                                    AlwaysStoppedAnimation<Color>(Colors.white),
+                              ),
+                            )
+                          : const Text('Add Resident'),
                     ),
                   ],
                 ),

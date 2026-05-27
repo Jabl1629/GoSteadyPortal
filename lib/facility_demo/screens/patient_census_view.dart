@@ -150,6 +150,22 @@ class _PatientCensusViewState extends State<PatientCensusView> {
     _rebuild();
   }
 
+  /// Called after Add Resident successfully creates a new patient.
+  /// Refresh the /me/patients slice + clear per-row caches so the
+  /// new row appears in the Census on next build.
+  Future<void> _onResidentCreated() async {
+    try {
+      await widget.data.refreshCensus();
+    } catch (_) {/* non-fatal — next poll tick catches up */}
+    if (!mounted) return;
+    setState(() {
+      _loaded.clear();
+      _inFlight.clear();
+      _rowQueue.clear();
+    });
+    _enqueueAllVisible();
+  }
+
   /// Polling tick: refresh the cached `/me/patients` slice, then
   /// re-fetch stats for any previously-loaded rows. We can't rely on
   /// each row's [MaybeVisible.onFirstVisible] firing a second time —
@@ -232,6 +248,8 @@ class _PatientCensusViewState extends State<PatientCensusView> {
             totalShown: filtered.length,
             totalSelected: summaries.length,
             selection: widget.selection,
+            data: widget.data,
+            onResidentCreated: _onResidentCreated,
           ),
           const SizedBox(height: 18),
           if (filtered.isEmpty)
@@ -326,11 +344,15 @@ class _Header extends StatelessWidget {
     required this.totalShown,
     required this.totalSelected,
     required this.selection,
+    required this.data,
+    required this.onResidentCreated,
   });
 
   final int totalShown;
   final int totalSelected;
   final FacilitySelection selection;
+  final FacilityRepository data;
+  final VoidCallback onResidentCreated;
 
   String _countLabel() {
     if (totalShown == totalSelected) {
@@ -408,16 +430,19 @@ class _Header extends StatelessWidget {
             children: [
               Expanded(child: controls),
               const SizedBox(width: 16),
-              const _AddResidentButton(),
+              _AddResidentButton(data: data, onCreated: onResidentCreated),
             ],
           );
         }
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Align(
+            Align(
               alignment: Alignment.centerRight,
-              child: _AddResidentButton(),
+              child: _AddResidentButton(
+                data: data,
+                onCreated: onResidentCreated,
+              ),
             ),
             const SizedBox(height: 14),
             controls,
@@ -429,12 +454,16 @@ class _Header extends StatelessWidget {
 }
 
 class _AddResidentButton extends StatelessWidget {
-  const _AddResidentButton();
+  const _AddResidentButton({required this.data, required this.onCreated});
+
+  final FacilityRepository data;
+  final VoidCallback onCreated;
 
   @override
   Widget build(BuildContext context) {
     return FilledButton.icon(
-      onPressed: () => AddResidentDialog.show(context),
+      onPressed: () =>
+          AddResidentDialog.show(context, data: data, onCreated: onCreated),
       icon: const Icon(Icons.add_rounded, size: 18),
       label: const Text('Add Resident'),
       style: FilledButton.styleFrom(
