@@ -357,6 +357,29 @@ class FacilityMockData implements FacilityRepository {
     );
   }
 
+  @override
+  Future<api.DeviceResponse> replaceDevice({
+    required String patientId,
+    required String? currentSerial,
+    required String newSerial,
+  }) async {
+    return api.DeviceResponse(
+      serialNumber: newSerial,
+      status: 'provisioned',
+    );
+  }
+
+  @override
+  Future<api.DeviceResponse> discontinueDevice({
+    required String patientId,
+    required String serial,
+  }) async {
+    return api.DeviceResponse(
+      serialNumber: serial,
+      status: 'discontinued',
+    );
+  }
+
   _PatientGenerated _gen(String patientId) {
     return _cache.putIfAbsent(patientId, () => _generateFor(patientId));
   }

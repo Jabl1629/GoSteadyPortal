@@ -351,6 +351,7 @@ class _DataRowState extends State<_DataRow> {
                 child: _ResidentCell(
                   name: r.patient.displayName,
                   severity: r.highestSeverity,
+                  paused: r.patient.notificationsPaused?.isActive ?? false,
                 ),
               ),
               _cell(
@@ -502,9 +503,14 @@ String? _headlineLabel(List<PatientNotification> notifications) {
 // ── Cell widgets ───────────────────────────────────────────────────────
 
 class _ResidentCell extends StatelessWidget {
-  const _ResidentCell({required this.name, this.severity});
+  const _ResidentCell({
+    required this.name,
+    this.severity,
+    this.paused = false,
+  });
   final String name;
   final NotificationSeverity? severity;
+  final bool paused;
 
   @override
   Widget build(BuildContext context) {
@@ -537,6 +543,17 @@ class _ResidentCell extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
           ),
         ),
+        if (paused) ...[
+          const SizedBox(width: 6),
+          Tooltip(
+            message: 'Notifications paused',
+            child: Icon(
+              Icons.notifications_paused_outlined,
+              size: 16,
+              color: AppTheme.textSoft,
+            ),
+          ),
+        ],
       ],
     );
   }

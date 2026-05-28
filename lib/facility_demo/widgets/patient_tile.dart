@@ -95,6 +95,17 @@ class PatientTile extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  if (patient.notificationsPaused?.isActive ?? false) ...[
+                    const SizedBox(width: 8),
+                    Tooltip(
+                      message: 'Notifications paused',
+                      child: Icon(
+                        Icons.notifications_paused_outlined,
+                        size: 20,
+                        color: AppTheme.textSoft,
+                      ),
+                    ),
+                  ],
                   if (alertColor != null) ...[
                     const SizedBox(width: 8),
                     Icon(

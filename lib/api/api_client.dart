@@ -134,15 +134,25 @@ class ApiClient {
   // ── 2A-DL writes (deployed; wired in 2B-FAC-W follow-ups) ──────
 
   Future<DeviceResponse> provisionDevice(String serial, String patientId) async {
-    // Deferred — 2B-FAC-W ships add-with-device via POST /patients (atomic);
-    // standalone provision is a "Replace Device" UX surface for later.
-    throw UnimplementedError(
-      'Standalone provision is 2B-FAC-W follow-up; add-with-device uses POST /patients',
+    final body = await _request(
+      'POST',
+      '/api/v1/devices/$serial/provision',
+      body: {'patientId': patientId},
+    );
+    return DeviceResponse.fromJson(
+      (body['device'] as Map<String, dynamic>?) ?? const {},
     );
   }
 
   Future<DeviceResponse> endAssignment(String serial) async {
-    throw UnimplementedError('Replace-device flow is 2B-FAC-W follow-up');
+    final body = await _request(
+      'POST',
+      '/api/v1/devices/$serial/end-assignment',
+      body: const <String, dynamic>{},
+    );
+    return DeviceResponse.fromJson(
+      (body['device'] as Map<String, dynamic>?) ?? const {},
+    );
   }
 
   // ── 2A-UM-P writes (deployed dev 2026-05-24; wired in 2B-FAC-W) ──

@@ -169,4 +169,28 @@ abstract class FacilityRepository {
     required String patientId,
     required String text,
   });
+
+  /// Swap a patient's currently-assigned walker cap for a new one.
+  /// Live impl calls `POST /devices/{currentSerial}/end-assignment`
+  /// then `POST /devices/{newSerial}/provision`; if the second leg
+  /// fails the patient is left device-less and the caller surfaces
+  /// the error. Patient detail is evicted so the new device renders
+  /// on next read.
+  ///
+  /// [currentSerial] may be null if the patient has no current
+  /// assignment (rare — the UI only surfaces Replace when a device
+  /// is already on the patient, but we tolerate the no-op).
+  Future<api.DeviceResponse> replaceDevice({
+    required String patientId,
+    required String? currentSerial,
+    required String newSerial,
+  });
+
+  /// Unassign a patient's walker cap without provisioning a
+  /// replacement. Live impl calls
+  /// `POST /devices/{serial}/end-assignment` and evicts patient detail.
+  Future<api.DeviceResponse> discontinueDevice({
+    required String patientId,
+    required String serial,
+  });
 }

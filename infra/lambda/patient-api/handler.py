@@ -135,14 +135,32 @@ def _patient_view(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _patient_row_view(p: dict[str, Any]) -> dict[str, Any]:
-    """Projection for /me/patients and census-roster rows (lighter than detail)."""
-    return {
+    """Projection for /me/patients and census-roster rows (lighter than detail).
+
+    Includes `notificationsPaused` (active-only, same shape as the detail
+    view) so the Census tile / list row can render the US-31 paused-bell
+    icon without a per-row patient-detail fetch. Mirrors the projection
+    in `_patient_view` — same nullable-when-not-active semantics.
+    """
+    out = {
         "patientId": p.get("patientId"),
         "displayName": p.get("displayName"),
         "status": p.get("status"),
         "facilityId": p.get("facilityId"),
         "censusId": p.get("censusId"),
     }
+    if is_currently_paused(p):
+        pause = p.get("notificationsPaused") or {}
+        out["notificationsPaused"] = {
+            "until": pause.get("until"),
+            "reason": pause.get("reason"),
+            "pausedAt": pause.get("pausedAt"),
+            "pausedBy": pause.get("pausedBy"),
+            "daysRemaining": days_remaining(p),
+        }
+    else:
+        out["notificationsPaused"] = None
+    return out
 
 
 def _activity_view(row: dict[str, Any]) -> dict[str, Any]:

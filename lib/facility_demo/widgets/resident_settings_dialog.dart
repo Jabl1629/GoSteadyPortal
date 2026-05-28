@@ -162,8 +162,13 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
           patient: widget.patient,
           onBack: _back,
           onClose: _close,
-          onSubmit: (newId) => _toastAndClose(
-            'Device replaced — ${widget.patient.displayName} is now on $newId.',
+          onSubmit: (newSerial) => _runWrite(
+            'Device replaced — ${widget.patient.displayName} is now on $newSerial.',
+            () => widget.data.replaceDevice(
+              patientId: widget.patient.id,
+              currentSerial: widget.patient.deviceSerial,
+              newSerial: newSerial,
+            ),
           ),
         );
       case _View.discontinueDevice:
@@ -171,9 +176,24 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
           patient: widget.patient,
           onBack: _back,
           onClose: _close,
-          onConfirm: () => _toastAndClose(
-            'Device discontinued for ${widget.patient.displayName}.',
-          ),
+          onConfirm: () {
+            final serial = widget.patient.deviceSerial;
+            if (serial == null || serial.isEmpty) {
+              // No assigned device — surface as a no-op toast rather than
+              // bouncing a 4xx off the server.
+              _toastAndClose(
+                'No device assigned to ${widget.patient.displayName}.',
+              );
+              return;
+            }
+            _runWrite(
+              'Device discontinued for ${widget.patient.displayName}.',
+              () => widget.data.discontinueDevice(
+                patientId: widget.patient.id,
+                serial: serial,
+              ),
+            );
+          },
         );
       case _View.editInfo:
         return _EditInfoForm(
@@ -194,17 +214,13 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
           patient: widget.patient,
           onBack: _back,
           onClose: _close,
-          onSubmit: (days) => _runWrite(
+          onSubmit: (days, reason) => _runWrite(
             'Monitoring paused for ${widget.patient.displayName} '
             'for $days day${days == 1 ? '' : 's'}.',
             () => widget.data.pauseNotifications(
               patientId: widget.patient.id,
               days: days,
-              // The current form doesn't collect reason; default to
-              // `other` until the form picks one up. Per 2A-UM-P L6
-              // the enum is required server-side — `other` is a valid
-              // fallback that the audit log can still differentiate.
-              reason: PauseReason.other.wireValue,
+              reason: reason.wireValue,
             ),
           ),
         );
@@ -213,15 +229,13 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
           patient: widget.patient,
           onBack: _back,
           onClose: _close,
-          onConfirm: () => _runWrite(
+          onConfirm: (reason, notes) => _runWrite(
             '${widget.patient.displayName} discharged. '
             'Activity history preserved.',
             () => widget.data.dischargePatient(
               patientId: widget.patient.id,
-              // Same — form doesn't pick a reason yet. Use `other`
-              // until the form prompts. Server stores notes only if
-              // provided; we don't here.
-              reason: DischargeReason.other.wireValue,
+              reason: reason.wireValue,
+              notes: notes,
             ),
           ),
         );
@@ -751,7 +765,11 @@ class _ReplaceDeviceFormState extends State<_ReplaceDeviceForm> {
   void _submit() {
     if (!_formKey.currentState!.validate()) return;
     if (_reason == null) return;
-    widget.onSubmit(_newId.text);
+    // Server expects the GS-prefixed full serial; the input is just
+    // the printed 10-digit suffix. Mirrors add_resident_dialog.
+    final raw = _newId.text.trim();
+    final serial = raw.startsWith('GS') ? raw : 'GS$raw';
+    widget.onSubmit(serial);
   }
 
   @override
@@ -994,7 +1012,7 @@ class _PauseMonitoringForm extends StatefulWidget {
   final Patient patient;
   final VoidCallback onBack;
   final VoidCallback onClose;
-  final ValueChanged<int> onSubmit;
+  final void Function(int days, PauseReason reason) onSubmit;
 
   @override
   State<_PauseMonitoringForm> createState() => _PauseMonitoringFormState();
@@ -1003,15 +1021,7 @@ class _PauseMonitoringForm extends StatefulWidget {
 class _PauseMonitoringFormState extends State<_PauseMonitoringForm> {
   final _formKey = GlobalKey<FormState>();
   final _days = TextEditingController(text: '7');
-  String? _reason;
-
-  static const _reasons = [
-    'In hospital',
-    'At rehab elsewhere',
-    'Family visit / off-site',
-    'On vacation',
-    'Other',
-  ];
+  PauseReason? _reason;
 
   @override
   void dispose() {
@@ -1023,7 +1033,7 @@ class _PauseMonitoringFormState extends State<_PauseMonitoringForm> {
     if (!_formKey.currentState!.validate()) return;
     if (_reason == null) return;
     final n = int.tryParse(_days.text) ?? 0;
-    widget.onSubmit(n);
+    widget.onSubmit(n, _reason!);
   }
 
   @override
@@ -1067,13 +1077,13 @@ class _PauseMonitoringFormState extends State<_PauseMonitoringForm> {
             },
           ),
           const SizedBox(height: 14),
-          LabeledDropdown<String>(
+          LabeledDropdown<PauseReason>(
             label: 'Reason',
             hint: 'Select reason',
             value: _reason,
-            options: _reasons,
-            optionLabel: (s) => s,
-            onChanged: (s) => setState(() => _reason = s),
+            options: PauseReason.values,
+            optionLabel: (r) => r.label,
+            onChanged: (r) => setState(() => _reason = r),
             validator: (v) => v == null ? 'Required' : null,
           ),
           const SizedBox(height: 24),
@@ -1104,7 +1114,7 @@ class _DischargeForm extends StatefulWidget {
   final Patient patient;
   final VoidCallback onBack;
   final VoidCallback onClose;
-  final VoidCallback onConfirm;
+  final void Function(DischargeReason reason, String? notes) onConfirm;
 
   @override
   State<_DischargeForm> createState() => _DischargeFormState();
@@ -1113,15 +1123,7 @@ class _DischargeForm extends StatefulWidget {
 class _DischargeFormState extends State<_DischargeForm> {
   final _formKey = GlobalKey<FormState>();
   final _notes = TextEditingController();
-  String? _reason;
-
-  static const _reasons = [
-    'Transferred to another facility',
-    'Moved home',
-    'Hospital admission (long-term)',
-    'Deceased',
-    'Other',
-  ];
+  DischargeReason? _reason;
 
   @override
   void dispose() {
@@ -1132,7 +1134,8 @@ class _DischargeFormState extends State<_DischargeForm> {
   void _submit() {
     if (!_formKey.currentState!.validate()) return;
     if (_reason == null) return;
-    widget.onConfirm();
+    final notes = _notes.text.trim();
+    widget.onConfirm(_reason!, notes.isEmpty ? null : notes);
   }
 
   @override
@@ -1160,13 +1163,13 @@ class _DischargeFormState extends State<_DischargeForm> {
                 'and remains exportable. To re-admit, contact support.',
           ),
           const SizedBox(height: 16),
-          LabeledDropdown<String>(
+          LabeledDropdown<DischargeReason>(
             label: 'Reason for discharge',
             hint: 'Select reason',
             value: _reason,
-            options: _reasons,
-            optionLabel: (s) => s,
-            onChanged: (s) => setState(() => _reason = s),
+            options: DischargeReason.values,
+            optionLabel: (r) => r.label,
+            onChanged: (r) => setState(() => _reason = r),
             validator: (v) => v == null ? 'Required' : null,
           ),
           const SizedBox(height: 14),

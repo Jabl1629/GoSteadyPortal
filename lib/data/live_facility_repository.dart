@@ -365,6 +365,10 @@ class LiveFacilityRepository implements FacilityRepository {
         status: p.status == 'discharged'
             ? PatientStatus.discharged
             : PatientStatus.active,
+        // US-31: paused-bell icon at Census tier sources from the same
+        // server projection as Patient Detail. Active-only — server
+        // returns null when pause has expired.
+        notificationsPaused: p.notificationsPaused,
       ),
       stepsToday: 0,
       activeMinutesToday: 0,
@@ -526,6 +530,36 @@ class LiveFacilityRepository implements FacilityRepository {
   }) async {
     final resp = await _api.updateCareNote(patientId, text);
     _patientDetailCache.evict(patientId);
+    return resp;
+  }
+
+  @override
+  Future<DeviceResponse> replaceDevice({
+    required String patientId,
+    required String? currentSerial,
+    required String newSerial,
+  }) async {
+    if (currentSerial != null && currentSerial.isNotEmpty) {
+      await _api.endAssignment(currentSerial);
+    }
+    final resp = await _api.provisionDevice(newSerial, patientId);
+    _patientDetailCache.evict(patientId);
+    try {
+      await refreshCensus();
+    } catch (_) {/* non-fatal */}
+    return resp;
+  }
+
+  @override
+  Future<DeviceResponse> discontinueDevice({
+    required String patientId,
+    required String serial,
+  }) async {
+    final resp = await _api.endAssignment(serial);
+    _patientDetailCache.evict(patientId);
+    try {
+      await refreshCensus();
+    } catch (_) {/* non-fatal */}
     return resp;
   }
 }

@@ -46,6 +46,10 @@ class MePatientSummary {
   final String? currentDeviceSerial;
   final DateTime? lastActivityAt;
   final int openAlertCount;
+  // US-31: active-only; null when not currently paused. Server projects
+  // the same shape as the detail view so client deserialization is
+  // symmetric across tiers.
+  final NotificationsPaused? notificationsPaused;
 
   const MePatientSummary({
     required this.patientId,
@@ -58,9 +62,11 @@ class MePatientSummary {
     this.currentDeviceSerial,
     this.lastActivityAt,
     required this.openAlertCount,
+    this.notificationsPaused,
   });
 
   factory MePatientSummary.fromJson(Map<String, dynamic> json) {
+    final paused = json['notificationsPaused'] as Map<String, dynamic>?;
     return MePatientSummary(
       patientId: (json['patientId'] as String?) ?? '',
       displayName: (json['displayName'] as String?) ?? '',
@@ -72,6 +78,8 @@ class MePatientSummary {
       currentDeviceSerial: json['currentDeviceSerial'] as String?,
       lastActivityAt: _parseTs(json['lastActivityAt']),
       openAlertCount: _parseInt(json['openAlertCount']) ?? 0,
+      notificationsPaused:
+          paused == null ? null : NotificationsPaused.fromJson(paused),
     );
   }
 }
@@ -205,10 +213,15 @@ class NotificationsPaused {
   });
 
   factory NotificationsPaused.fromJson(Map<String, dynamic> json) {
+    // Server stores `until` / `pausedAt` as Unix epoch seconds (see
+    // patient-mgmt _shared/pause_check.compute_until_epoch). DDB
+    // serializes Numbers as JSON strings, so we may get either a
+    // numeric or a string-of-digits. `_parseEpochOrTs` handles both
+    // alongside ISO 8601 for forward compat.
     return NotificationsPaused(
-      until: _parseTs(json['until']) ?? DateTime.now(),
+      until: _parseEpochOrTs(json['until']) ?? DateTime.now(),
       reason: (json['reason'] as String?) ?? 'other',
-      pausedAt: _parseTs(json['pausedAt']),
+      pausedAt: _parseEpochOrTs(json['pausedAt']),
       pausedBy: json['pausedBy'] as String?,
     );
   }
@@ -553,6 +566,32 @@ DateTime? _parseTs(Object? raw) {
   final s = raw.toString();
   if (s.isEmpty) return null;
   return DateTime.tryParse(s);
+}
+
+/// Accepts Unix epoch (seconds or ms, int or stringified-int) AND ISO
+/// 8601. Useful for DDB-sourced timestamps that round-trip through
+/// `Decimal -> JSON string`. Tries ISO first; falls back to epoch
+/// interpretation. 10-digit values are treated as seconds, 13-digit as
+/// milliseconds — sufficient for all realistic timestamps.
+DateTime? _parseEpochOrTs(Object? raw) {
+  if (raw == null) return null;
+  if (raw is num) {
+    final n = raw.toInt();
+    return DateTime.fromMillisecondsSinceEpoch(
+      n.abs() < 100000000000 ? n * 1000 : n,
+      isUtc: true,
+    );
+  }
+  final s = raw.toString();
+  if (s.isEmpty) return null;
+  final iso = DateTime.tryParse(s);
+  if (iso != null) return iso;
+  final asInt = int.tryParse(s);
+  if (asInt == null) return null;
+  return DateTime.fromMillisecondsSinceEpoch(
+    asInt.abs() < 100000000000 ? asInt * 1000 : asInt,
+    isUtc: true,
+  );
 }
 
 /// Tolerant int parser — handles raw int, num, AND JSON-string-encoded

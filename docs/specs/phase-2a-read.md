@@ -175,7 +175,14 @@ the audit-stack subscription filter add into the same deploy per 2A-0 D9).
       "censusName": "East Wing",
       "currentDeviceSerial": "GS0000001234" | null,
       "lastActivityAt": "2026-05-23T14:18:00Z" | null,
-      "openAlertCount": 1
+      "openAlertCount": 1,
+      "notificationsPaused": {            // null when not currently paused
+        "until": 1780358615,              // epoch seconds (DDB Number)
+        "reason": "in_hospital",
+        "pausedAt": 1779926615,
+        "pausedBy": "<userId>",
+        "daysRemaining": 5
+      }
     },
     ...
   ],
@@ -204,13 +211,20 @@ the audit-stack subscription filter add into the same deploy per 2A-0 D9).
       "status": "active",
       "currentDeviceSerial": "GS0000001234" | null,
       "lastActivityAt": "2026-05-23T14:18:00Z" | null,
-      "openAlertCount": 1
+      "openAlertCount": 1,
+      "notificationsPaused": { ... } | null   // same projection as /me/patients
     },
     ...
   ],
   "nextCursor": null
 }
 ```
+
+> **2026-05-27 amendment (US-31).** `notificationsPaused` added to the
+> shared `_patient_row_view` projection so Census tile / list row can
+> render the paused-bell icon without a per-row patient-detail fetch.
+> Same active-only nullable shape as the detail view's projection — null
+> when not currently paused. Single Lambda code change; no infra delta.
 
 #### Error envelope (extends 2A-0 catalog)
 

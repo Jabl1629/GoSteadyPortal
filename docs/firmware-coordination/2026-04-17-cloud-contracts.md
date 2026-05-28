@@ -8381,3 +8381,93 @@ V1 caregiver UX feature-complete (read + write + alert ack + care note + pause/r
 ---
 
 *Entry owner: Claude (portal session, 2026-05-27). No firmware impact; closes V1 caregiver UX surface.*
+
+---
+
+# §C36 — 2B-FAC-W follow-up bundle: reason pickers + device replace/discontinue + US-31 census paused-bell (2026-05-27)
+
+Entry owner: Claude (portal session) | Trigger: knock out the deferred items from §C35.4 in one bundled commit. **Zero firmware-facing impact** — pure portal + a single Lambda code-asset swap on `gosteady-dev-patient-api`.
+
+## C36.1 — What landed
+
+Four follow-ups deferred at §C35.4 picked up:
+
+- **Discharge reason picker (`_DischargeForm`)** — replaced hardcoded `DischargeReason.other` with a real dropdown sourced from the `DischargeReason` enum (`transferred` / `moved_home` / `hospital_admission` / `deceased` / `other`). Also surfaced the existing notes field through to `data.dischargePatient(..., notes: ...)` — previously collected but never sent (silent UX-bug).
+- **Pause reason picker (`_PauseMonitoringForm`)** — same treatment for `PauseReason` enum (`in_hospital` / `at_rehab` / `family_visit_offsite` / `on_vacation` / `other`). Days input was already wired; reason was hardcoded to `other`.
+- **Replace / Discontinue Device wiring (`resident_settings_dialog`)** — replaced the no-op stub callbacks with real `_runWrite` flows backed by new repo methods `FacilityRepository.replaceDevice` + `discontinueDevice`. `ApiClient.provisionDevice` + `endAssignment` switched from `UnimplementedError` stubs to real `POST /devices/{serial}/provision` + `POST /devices/{serial}/end-assignment` calls against the 2A-DL endpoints (deployed §C24). Replace orchestrates as end-assignment-then-provision; Discontinue is just end-assignment. Cache eviction mirrors the other 2B-FAC-W writes (patient detail + Census refresh).
+- **US-31 census-tier paused-bell icon** — landed end-to-end with a small server projection extension:
+  - **Server (`patient-api/handler.py`):** `_patient_row_view` (shared by `/me/patients` and `/facilities/{f}/censuses/{c}/patients`) now includes `notificationsPaused` using the same active-only nullable projection as the detail-view `_patient_view`. Same `is_currently_paused` + `days_remaining` helpers from `_shared/pause_check.py`. Zero infra delta — Lambda code-asset swap only.
+  - **Client (`api_models.dart`):** `MePatientSummary` gained `NotificationsPaused? notificationsPaused`. Threaded into the `Patient` model via `LiveFacilityRepository._mePatientToSummary`. `Patient.notificationsPaused.isActive` drives the bell.
+  - **UI:** subdued `notifications_paused_outlined` icon with a "Notifications paused" Tooltip, rendered next to the resident name in both Census tile (`patient_tile.dart`) and list-row (`patient_list_view.dart`).
+
+### Adjacent pre-existing client bug fixed
+
+- **Epoch timestamp parse (`NotificationsPaused.fromJson`)** — server stores `until` / `pausedAt` as Unix epoch seconds; DDB serializes Numbers as JSON strings (e.g. `"1780358615"`). Client's old `_parseTs` only attempts ISO 8601, silently falling back to `DateTime.now()` for any epoch value. Result: `NotificationsPaused.isActive` was always **false** because `until ≈ DateTime.now()` is never strictly after `DateTime.now()`. Pause Banner on Patient Detail was effectively invisible whenever pause was set. New `_parseEpochOrTs` accepts numeric, stringified-int, AND ISO 8601 — disambiguates seconds (<13 digits) from milliseconds. Pre-existing bug surfaced only because US-31 added a second consumer of the same field; would have bitten anyone trying the existing Pause Banner with a paused patient. Closes a silent gap that §C35.2 didn't catch (FAC-W live-validation paused a patient via direct curl but never re-rendered Patient Detail under the post-pause state).
+
+## C36.2 — Deploy chronology
+
+- 18:00 ET — Portal code changes committed locally (5 files: 4 client + 1 server handler).
+- 18:01 ET — `npm run build` (CDK TS compile, 0 warnings).
+- 18:01 ET — `npx cdk diff GoSteady-Dev-Api` shows clean diff: only `PatientApi/Function` asset hash changed (`4d5d3532… → cc17bb61…`). No infra / IAM / CORS / authorizer changes. Per §C34 lesson #2 + CDK deploy-hygiene memory: `--force` not required for code-only swaps, but `npm run build` first to refresh `cdk.out` is the prophylactic.
+- 18:01 ET — `npx cdk deploy GoSteady-Dev-Api --context env=dev --require-approval never`. Single-resource UPDATE_COMPLETE in 8s; total stack time 46s.
+
+## C36.3 — Live validation against pt_bench_98
+
+Direct curl from `dev-pilot-caregiver` JWT:
+
+```
+BEFORE pause:
+  GET /api/v1/me/patients
+    → patient pt_bench_98 → notificationsPaused: None  ✅  (server projects null, not missing)
+
+POST /api/v1/patients/pt_bench_98/notifications/pause
+  body: {"days": 5, "reason": "in_hospital"}
+  → 200 {"notificationsPaused": {"until": 1780358615, "reason": "in_hospital",
+                                  "pausedAt": 1779926615, "pausedBy": <caregiver sub>,
+                                  "daysRemaining": 5}}
+
+AFTER pause:
+  GET /api/v1/me/patients
+    → patient pt_bench_98 → notificationsPaused: {until: "1780358615",
+                                                   reason: "in_hospital",
+                                                   pausedAt: "1779926615",
+                                                   pausedBy: <sub>,
+                                                   daysRemaining: 4}  ✅
+
+  GET /api/v1/patients/pt_bench_98
+    → same projection shape on detail view (regression check — no behavioral change)  ✅
+
+DELETE /api/v1/patients/pt_bench_98/notifications/pause
+  → 200 {"notificationsPaused": null}  ✅  (cleanup so the bench patient isn't left paused)
+```
+
+US-31 acceptance: the bell icon will now render at Census tier for any patient whose `notificationsPaused.until` is in the future. The detail-tier Pause Banner is also no longer silently broken (epoch parse fix).
+
+## C36.4 — Known surface
+
+- **`form_input` quirk (carried from §C35.3)** — still applies; Chrome MCP DOM-value injection doesn't fire Flutter onChange. Validation here was direct-curl-only for the same reason. UI rendering of the new bell + reason pickers will need a real-keyboard pass when next at a browser.
+- **Demo build (`facility_mock_data.dart`)** — `replaceDevice` + `discontinueDevice` return synthesized `DeviceResponse`s and don't mutate the in-memory seed list. Matches the precedent set by `dischargePatient` / `pauseNotifications` in §C35 — marketing demo's UX stays correct without going out-of-network, but in-place state mutation is deferred to whichever pass adds full interactivity to the seed model.
+- **`device-api` rollback path** — Replace Device is a non-atomic two-step (end-then-provision). If the second leg fails the patient is left device-less; the UI surfaces the provision error but doesn't roll back the end-assignment. Reverting an end-assignment requires firmware-side wipe-ack reversal which isn't a supported path. V1 acceptance: caregiver re-provisions the same or different serial on retry. Same posture as the atomic-create flow in 2A-UM-P L3 (single-leg atomic only when wrapping into POST /patients).
+
+## C36.5 — Operational state after this entry
+
+| Item | Status |
+|---|---|
+| Discharge reason picker | ✅ surfaced via DischargeReason enum |
+| Pause reason picker | ✅ surfaced via PauseReason enum |
+| Discharge notes wiring | ✅ now actually sent to server (was UI-dead) |
+| Replace Device | ✅ wired (end + provision orchestration) |
+| Discontinue Device | ✅ wired (end-assignment only) |
+| ApiClient provisionDevice / endAssignment | ✅ implemented (were `UnimplementedError` stubs) |
+| US-31 census-tier paused-bell | ✅ live (`/me/patients` + roster projection + UI in tile & list) |
+| NotificationsPaused epoch parse | ✅ fixed — Pause Banner remaining-days now actually renders |
+| `GoSteady-Dev-Api` stack | ✅ deployed (single-resource UPDATE, patient-api Lambda) |
+| Coord doc + phase-2a-read.md spec | ✅ amended in this commit |
+
+## C36.6 — Coord doc for next sync
+
+All four §C35.4-deferred items are closed. V1 caregiver UX surface now fully complete and bell icons live across tiers. Next likely directions unchanged from §C35.6: 2B-D2C household refit, 2C notifications, or 3A prod hosting cutover. Coord doc rests until next major work item.
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-27). Single-Lambda code swap on `gosteady-dev-patient-api`; no infra, no firmware impact.*
