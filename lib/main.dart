@@ -23,7 +23,13 @@ import 'state/build_mode.dart';
 /// Per phase-2b-0-foundation.md §Scope > Build invocations.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  setPathUrlStrategy();
+  // Path URLs by default. GH Pages can't rewrite arbitrary paths to
+  // index.html, so the wireframe-preview deployment uses hash routing.
+  // Pass `--dart-define=USE_HASH_URLS=true` at build time to opt in.
+  const useHashUrls = bool.fromEnvironment('USE_HASH_URLS', defaultValue: false);
+  if (!useHashUrls) {
+    setPathUrlStrategy();
+  }
 
   final mode = BuildMode.current;
 
