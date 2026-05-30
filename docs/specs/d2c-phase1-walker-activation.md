@@ -200,7 +200,7 @@ Walker user: dashboard polls /me/patients + /patients/{id}/activity →
 - ✅ `d2c-custom-auth` Lambda — SMS-OTP Define/Create/Verify.
 - ✅ `d2c-pre-token` Lambda — dtc_* claims with pre-claim bootstrap default.
 - ✅ `d2c-claim` Lambda handler — **defect resolved (Option B, commit
-  `8d1f218`)**. The earlier `_shared.provision.provision_device` import
+  `6533f12`)**. The earlier `_shared.provision.provision_device` import
   (module didn't exist) is replaced with an inline `_provision_inline` —
   a deliberate third copy mirroring `device-api._action_provision` +
   `patient-mgmt._provision_inline`. Keeps D2C isolated from the two
