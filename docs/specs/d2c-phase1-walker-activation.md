@@ -211,14 +211,11 @@ Walker user: dashboard polls /me/patients + /patients/{id}/activity →
   `require_authenticated`, `device.*` audit constants). `py_compile` clean.
 
 **Remaining for Phase 1 (next session):**
-1. **Provision reuse decision (do this first).** Either (a) extract
-   `_shared/provision.py` from the two existing inline copies and point
-   device-api + patient-mgmt + d2c-claim at it (cleanest, but surgery on
-   two deployed handlers — diff + redeploy + re-smoke both), or (b) add a
-   third inline copy in d2c-claim (pragmatic, matches current pattern,
-   zero risk to deployed handlers). **Recommend (b) for Phase 1**, then
-   schedule the (a) refactor as separate tech-debt once D2C is proven.
-   Until resolved, `d2c-claim` will not run.
+1. ✅ **Provision reuse decision — DONE (Option B, commit `6533f12`).**
+   Chose the inline third copy in `d2c-claim`: pragmatic, matches the
+   existing pattern, zero risk to the two deployed handlers. **Scheduled
+   tech-debt:** extract `_shared/provision.py` and consolidate all three
+   callers once D2C Phase 1–4 are validated on real hardware.
 2. **Device Registry `walkerId` + `by-walker-id` GSI** (DataStack) — the
    opaque-ID lookup the claim + public endpoints depend on. New attribute
    + GSI; backfill the bench device's walkerId.
