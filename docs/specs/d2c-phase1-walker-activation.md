@@ -210,27 +210,54 @@ Walker user: dashboard polls /me/patients + /patients/{id}/activity →
   (`get_logger()`, `emit_audit` kwargs, `extract_claims` /
   `require_authenticated`, `device.*` audit constants). `py_compile` clean.
 
-**Remaining for Phase 1 (next session):**
-1. ✅ **Provision reuse decision — DONE (Option B, commit `6533f12`).**
-   Chose the inline third copy in `d2c-claim`: pragmatic, matches the
-   existing pattern, zero risk to the two deployed handlers. **Scheduled
-   tech-debt:** extract `_shared/provision.py` and consolidate all three
-   callers once D2C Phase 1–4 are validated on real hardware.
-2. **Device Registry `walkerId` + `by-walker-id` GSI** (DataStack) — the
-   opaque-ID lookup the claim + public endpoints depend on. New attribute
-   + GSI; backfill the bench device's walkerId.
-3. **Second JWT authorizer in ApiStack** — `HttpUserPoolAuthorizer` bound
-   to the D2C pool; attach to `POST /api/v1/claim` only. Public
-   `GET /api/v1/public/walkers/{walkerId}` route gets **no** authorizer.
-   d2c-claim Lambda needs grants: RW Devices + DeviceAssignments +
-   Patients + Organizations + RoleAssignments, iot:Publish on `gs/*/cmd`,
-   iot:UpdateThingShadow, + the audit log-group subscription filter.
-4. **SNS SMS sandbox setup** — verify the test phone number in the SNS
-   console (or move the account out of the SMS sandbox) so the OTP
-   actually sends in dev.
-5. **Flutter live wiring** — D2C auth service (CUSTOM_AUTH/SMS-OTP),
-   `D2CRepository` live impl, swap mock→live in `lib/d2c/`.
-6. **Deploy + real-hardware exit test** (§7).
+**Backend — DONE & DEPLOYED to dev (2026-05-30):**
+1. ✅ Provision reuse — Option B inline copy (commit `6533f12`).
+2. ✅ `walkerId` + `by-walker-id` GSI on Device Registry (DataStack).
+   Deployed (in-place GSI add, no table replace).
+3. ✅ Second JWT authorizer + `d2c-claim` Lambda + 2 routes + grants +
+   audit subscription filter (ApiStack). Deployed.
+
+**Deployed dev resources:**
+- D2C User Pool: `us-east-1_Ab3Cd5Ef7`
+- D2C-Portal client: `3da7n2k9p4m8q1r5t6w0y3z8b2`
+- API base: `https://eg06m6p2k5.execute-api.us-east-1.amazonaws.com`
+- claim Lambda: `gosteady-dev-d2c-claim`
+
+**Synthetic end-to-end test — ALL PASS** (against deployed infra; SMS-OTP-
+through-Cognito deferred to the real-device session):
+
+| # | Test | Result |
+|---|---|---|
+| T1a | `GET /public/walkers/{id}` unclaimed (no auth) | `{"status":"unclaimed"}` 200 ✅ |
+| T1b | Unknown walkerId | `{"status":"unknown"}` 200 ✅ (no existence leak) |
+| T1c | `POST /claim` no JWT | `401 Unauthorized` ✅ (D2C authorizer enforcing) |
+| T2 | `POST /claim` synthetic claims (direct invoke) | `201`, patient created ✅ |
+| T2-fx | Side effects | device→`provisioned` + owner set + `outstandingActivationCmds` entry; DeviceAssignments active row; RoleAssignments `household_owner`+`isWalkerUser`; Organizations household; Shadow `desired.activated_at` = ts ✅ |
+| T2-idem | Re-claim same user/walker | `200 alreadyClaimed:true` ✅ |
+| T3a | Lookup after claim | `{"status":"claimed",...}` ✅ |
+| T3b | Different user claims same device | `409 DEVICE_UNAVAILABLE` ✅ (race guard) |
+| T3c | Audit events | `d2c.household_created`, `d2c.device_claimed`, `device.claimed/assigned/activation_sent` all in audit pipeline ✅ |
+
+Synthetic data cleaned up after (incl. one orphan patient row caught on a
+cleanup re-verify).
+
+**Minor follow-ups (non-blocking):**
+- `_masked_owner` → "another account" because RoleAssignments has no
+  `email`; pre-claim masked hint is cosmetic. Add `email` to the claim's
+  RoleAssignments PutItem to show `s•••@gmail.com`.
+- Idempotent re-claim re-runs `_ensure_household` (harmless idempotent
+  puts; emits a 2nd `d2c.household_created` audit). Could guard with an
+  early "already owns it" return before household ensure — trivial.
+
+**Remaining before real-device exit test (needs Jace + hardware):**
+4. **SNS SMS sandbox** — verify the test phone (or exit sandbox) so OTP
+   sends. (Custom-auth Lambda currently SNS-publishes; sandbox blocks
+   un-verified numbers.)
+5. **Flutter live wiring** — D2C auth service (CUSTOM_AUTH/SMS-OTP) +
+   `D2CRepository` live impl; swap mock→live in `lib/d2c/`.
+6. **Real device** (§7) — flash Thingy:91 X, assign+sticker a `walkerId`
+   QR, real signup via SMS-OTP, claim, power-on activation, walk, confirm
+   activity renders. **← loop Jace in here.**
 
 ## 10. Changelog
 
