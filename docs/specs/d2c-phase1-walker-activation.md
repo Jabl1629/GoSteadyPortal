@@ -190,6 +190,51 @@ Walker user: dashboard polls /me/patients + /patients/{id}/activity →
 
 ---
 
-## 9. Changelog
+## 9. Implementation status (live tracking)
+
+**Built + committed (feature/infra-scaffold):**
+- ✅ `D2CAuthStack` (`infra/lib/stacks/d2c-auth-stack.ts`) — separate pool,
+  D2C-Portal client (CUSTOM_AUTH only), wired into `bin/gosteady.ts`.
+  `tsc` clean; `cdk synth GoSteady-Dev-D2C-Auth` clean (3 custom-auth
+  triggers + PreTokenGenerationConfig + scoped SNS publish verified).
+- ✅ `d2c-custom-auth` Lambda — SMS-OTP Define/Create/Verify.
+- ✅ `d2c-pre-token` Lambda — dtc_* claims with pre-claim bootstrap default.
+- 🟡 `d2c-claim` Lambda handler — **has a known defect**: imports
+  `_shared.provision.provision_device`, which **does not exist yet**. The
+  provision chain is currently duplicated inline in `device-api/
+  handler.py::_action_provision` and `patient-mgmt/handler.py::
+  _provision_inline` (both flagged TODO-refactor). `py_compile` passes
+  (no import resolution) but it would fail at runtime.
+
+**Remaining for Phase 1 (next session):**
+1. **Provision reuse decision (do this first).** Either (a) extract
+   `_shared/provision.py` from the two existing inline copies and point
+   device-api + patient-mgmt + d2c-claim at it (cleanest, but surgery on
+   two deployed handlers — diff + redeploy + re-smoke both), or (b) add a
+   third inline copy in d2c-claim (pragmatic, matches current pattern,
+   zero risk to deployed handlers). **Recommend (b) for Phase 1**, then
+   schedule the (a) refactor as separate tech-debt once D2C is proven.
+   Until resolved, `d2c-claim` will not run.
+2. **Device Registry `walkerId` + `by-walker-id` GSI** (DataStack) — the
+   opaque-ID lookup the claim + public endpoints depend on. New attribute
+   + GSI; backfill the bench device's walkerId.
+3. **Second JWT authorizer in ApiStack** — `HttpUserPoolAuthorizer` bound
+   to the D2C pool; attach to `POST /api/v1/claim` only. Public
+   `GET /api/v1/public/walkers/{walkerId}` route gets **no** authorizer.
+   d2c-claim Lambda needs grants: RW Devices + DeviceAssignments +
+   Patients + Organizations + RoleAssignments, iot:Publish on `gs/*/cmd`,
+   iot:UpdateThingShadow, + the audit log-group subscription filter.
+4. **SNS SMS sandbox setup** — verify the test phone number in the SNS
+   console (or move the account out of the SMS sandbox) so the OTP
+   actually sends in dev.
+5. **Flutter live wiring** — D2C auth service (CUSTOM_AUTH/SMS-OTP),
+   `D2CRepository` live impl, swap mock→live in `lib/d2c/`.
+6. **Deploy + real-hardware exit test** (§7).
+
+## 10. Changelog
 
 - **2026-05-28** — Initial draft.
+- **2026-05-30** — D2C-Auth stack + custom-auth + pre-token built &
+  synth-verified. d2c-claim handler drafted (known `_shared.provision`
+  import defect — see §9). Wiring (authorizer, GSI, grants, Flutter)
+  deferred to next session.
