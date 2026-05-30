@@ -88746,18 +88746,18 @@ A.yz.prototype={
 q(a){var s=null,r=A.G(31,B.h.l()>>>16&255,B.h.l()>>>8&255,B.h.l()&255)
 return A.aC(A.a([A.at(B.ae,A.P(this.c,s,s,s,B.Xz,s,s),B.n,s,s,new A.ac(r,s,s,s,s,s,B.bd),s,26,s,s,s,s,s,26),B.bs,A.bs(new A.aS(B.Jo,A.P(this.d,s,s,s,B.a_S,s,s),s),1)],t.p),B.w,B.f,B.o)}}
 A.WW.prototype={
-a7L(){var s,r,q="#,##0",p=this.c,o=p.c,n=p.b,m=p.a.r,l=m?"You're":n.c+"'s",k=m?"your":"her",j=m?"your":n.c+"'s"
-p=o.w
-if(p>=3&&o.a>=o.f){p=""+p
-p=m?p+" days running above "+k+" pace.":n.c+" \u2014 "+p+" days running above pace."
-return new A.oZ(p,A.kC(q).em(o.a)+" so far today. Keep the rhythm going.")}p=o.a
-s=o.f
-if(p>=s&&s>0){r=B.c.W((p-s)/s*100)
-s=m?l+" above "+k+" weekly pace.":n.c+" is above her weekly pace."
-return new A.oZ(s,A.kC(q).em(p)+" steps so far \xb7 "+r+"% over "+j+" 7-day average.")}if(p>0&&p<s){r=B.c.W((s-p)/s*100)
-s=m?"A lighter day so far.":"Lighter day for "+n.c+" so far."
-return new A.oZ(s,A.kC(q).em(p)+" steps \xb7 "+r+"% below "+j+" weekly pace.")}if(A.iM(new A.bC(Date.now(),0,!1))<12)return new A.oZ(m?"Quiet morning so far.":"Quiet morning for "+n.c+".","No walks logged yet.")
-return new A.oZ(m?"A rest day so far.":"A rest day for "+n.c+" so far.","No activity logged today.")},
+a7L(){var s,r,q="#,##0",p=" steady days in a row.",o=this.c,n=o.c,m=o.b,l=o.a.r,k=l?"your":m.c+"'s"
+o=n.w
+if(o>=3&&n.a>=n.f){o=""+o
+o=l?o+p:m.c+" \u2014 "+o+p
+return new A.oZ(o,A.kC(q).em(n.a)+" steps so far, above "+k+" usual again. Nice and steady.")}o=n.a
+s=n.f
+if(o>=s&&s>0){r=B.c.W((o-s)/s*100)
+s=l?"You're ahead of your usual today.":m.c+" is ahead of her usual today."
+return new A.oZ(s,A.kC(q).em(o)+" steps so far \xb7 "+r+"% above a typical day.")}if(o>0&&o<s){r=B.c.W((s-o)/s*100)
+s=l?"A quieter day so far.":"A quieter day for "+m.c+" so far."
+return new A.oZ(s,A.kC(q).em(o)+" steps \xb7 "+r+"% below a typical day.")}if(A.iM(new A.bC(Date.now(),0,!1))<12)return new A.oZ(l?"Quiet morning so far.":"Quiet morning for "+m.c+".","No walks logged yet.")
+return new A.oZ(l?"A restful day so far.":"A restful day for "+m.c+" so far.","No activity logged today.")},
 q(a){var s,r=null,q=this.a7L(),p=A.G(15,B.h.l()>>>16&255,B.h.l()>>>8&255,B.h.l()&255),o=A.a9(20),n=A.cq(A.G(46,B.h.l()>>>16&255,B.h.l()>>>8&255,B.h.l()&255),1),m=A.H(a).p1.e
 m=m==null?r:m.zQ(26,1.15)
 s=t.p
