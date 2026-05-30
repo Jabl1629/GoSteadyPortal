@@ -199,12 +199,16 @@ Walker user: dashboard polls /me/patients + /patients/{id}/activity →
   triggers + PreTokenGenerationConfig + scoped SNS publish verified).
 - ✅ `d2c-custom-auth` Lambda — SMS-OTP Define/Create/Verify.
 - ✅ `d2c-pre-token` Lambda — dtc_* claims with pre-claim bootstrap default.
-- 🟡 `d2c-claim` Lambda handler — **has a known defect**: imports
-  `_shared.provision.provision_device`, which **does not exist yet**. The
-  provision chain is currently duplicated inline in `device-api/
-  handler.py::_action_provision` and `patient-mgmt/handler.py::
-  _provision_inline` (both flagged TODO-refactor). `py_compile` passes
-  (no import resolution) but it would fail at runtime.
+- ✅ `d2c-claim` Lambda handler — **defect resolved (Option B, commit
+  `8d1f218`)**. The earlier `_shared.provision.provision_device` import
+  (module didn't exist) is replaced with an inline `_provision_inline` —
+  a deliberate third copy mirroring `device-api._action_provision` +
+  `patient-mgmt._provision_inline`. Keeps D2C isolated from the two
+  deployed handlers (zero regression risk on facility provision).
+  Shared-module extraction scheduled as post-validation tech-debt (item 1
+  below). Helper usage corrected to real `_shared` signatures
+  (`get_logger()`, `emit_audit` kwargs, `extract_claims` /
+  `require_authenticated`, `device.*` audit constants). `py_compile` clean.
 
 **Remaining for Phase 1 (next session):**
 1. **Provision reuse decision (do this first).** Either (a) extract
