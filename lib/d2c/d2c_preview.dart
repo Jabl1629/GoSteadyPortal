@@ -79,6 +79,8 @@ const _groups = <_PreviewGroup>[
     _PreviewItem('Home — no activity yet', '/d2c/preview/dashboard-empty'),
     _PreviewItem(
         'Home — walker on the way', '/d2c/preview/dashboard-preactivation'),
+    _PreviewItem('History — 30 / 90 days', '/d2c/preview/history',
+        note: 'Behind the trend "See more"'),
   ]),
   _PreviewGroup('Care Team', [
     _PreviewItem('Care Team — admin view', '/d2c/preview/care-team',

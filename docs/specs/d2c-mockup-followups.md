@@ -9,6 +9,44 @@ Status legend: 🔴 blocks spec · 🟡 shapes UX · 🟢 nice-to-decide
 
 ---
 
+## ✅ Decisions (locked)
+
+**Review session 1**
+- Notification rows: everyone gets the same set at launch (no role-gating).
+- Last-Admin guard: can't remove/demote the only Admin. Enforced in mock.
+- QR landing URL = `portal.gosteady.co/setup/{walkerId}`, where `{walkerId}`
+  is an **opaque, random, non-sequential** ID (NOT the printed GS serial).
+- First-timer OTP: no email-OTP. New person signs up (enters phone) → SMS
+  to that number. Returning users: email → SMS to phone on file. Single
+  SMS-OTP path.
+- Dashboard is the same for caregiver + walker user; only copy adapts
+  ("you" vs name). Device card + alerts shown to everyone. Nav unified to
+  Activity / Care Team / Account.
+- Greeting copy: no "run / pace / rhythm" — use "steady" / "above your usual."
+- Bottom nav persistent across all top-level tabs; "Today" → "Activity."
+
+**Review session 2**
+- Care note visible to the walker user too (everyone sees the same note).
+- Only existing Admins can grant Admin; a plain Member cannot self-promote.
+- Relationship label = **free text** (not a fixed picker).
+- QR "request access" free-text note is **required**, ~200 char max.
+- Device transfer (resold/gifted) = **contact support** in V1 (no self-serve).
+- Quiet hours (do-not-disturb window): **deferred** past V1.
+- **History screen (30/90-day) — BUILD IT** (mock this round, behind the
+  trend's "See more" + an Activity-tab affordance).
+- Pre-claim QR landing shows a **masked owner email** ("s•••@gmail.com").
+- Walker-user-who-is-also-Admin: show **both** badges.
+- Access-request card wording: **drop "claims to be"** → "Tom Davis · Grandson";
+  the required note + admin approval are the trust signal.
+- TCPA SMS consent: standard consent line in the UI now; **legal review
+  before any real SMS sends**.
+- Welcome wizard is an **exception path** (only when ops didn't pre-fill the
+  walker's name/relationship); skipped for the 70–80% pre-bound-Admin flow.
+- Account "edit" pencils + real QR generation: wire at go-live (build detail).
+- Resolved/moot: battery-alert audience (everyone sees same dashboard now).
+
+---
+
 ## Account model / Care Circle
 
 - 🔴 **Last-Admin guard.** When removing an Admin or demoting the last

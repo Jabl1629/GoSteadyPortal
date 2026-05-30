@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../theme/app_theme.dart';
@@ -609,12 +610,15 @@ class _DayTrendCard extends StatelessWidget {
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              Text(
-                'See more',
-                style: TextStyle(
-                  color: AppTheme.sage,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
+              GestureDetector(
+                onTap: () => context.go('/d2c/preview/history'),
+                child: const Text(
+                  'See more',
+                  style: TextStyle(
+                    color: AppTheme.sage,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ],

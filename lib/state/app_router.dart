@@ -5,6 +5,7 @@ import '../auth/auth_service_interface.dart';
 import '../d2c/d2c_preview.dart';
 import '../d2c/screens/d2c_account_screens.dart';
 import '../d2c/screens/d2c_care_team_screen.dart';
+import '../d2c/screens/d2c_history_screen.dart';
 import '../d2c/screens/d2c_onboarding_screens.dart';
 import '../d2c/screens/d2c_state_screens.dart';
 import '../dev/me_smoke_screen.dart';
@@ -104,6 +105,10 @@ GoRouter buildAppRouter({
       GoRoute(
         path: '/d2c/preview/dashboard-preactivation',
         builder: (context, state) => const D2CDashboardPreActivationPreview(),
+      ),
+      GoRoute(
+        path: '/d2c/preview/history',
+        builder: (context, state) => const D2CHistoryScreen(),
       ),
       // Care Team
       GoRoute(

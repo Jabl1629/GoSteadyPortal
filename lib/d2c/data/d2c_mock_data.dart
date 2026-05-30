@@ -257,6 +257,19 @@ class NotificationPref {
   final bool deviceOperational;
 }
 
+/// One day of activity for the 30/90-day History view.
+class HistoryDay {
+  const HistoryDay({
+    required this.date,
+    required this.steps,
+    required this.activeMinutes,
+  });
+
+  final DateTime date;
+  final int steps;
+  final int activeMinutes;
+}
+
 /// One row in the customer-facing audit log ("who accessed Mom's data").
 class AuditEntry {
   const AuditEntry({
@@ -383,6 +396,36 @@ class D2CMockData {
           deviceOperational: true,
         ),
       ];
+
+  // ── Activity history (30 / 90-day view) ─────────────────────────
+
+  /// Deterministic daily history, newest-last. Gentle weekly rhythm
+  /// (weekends lighter) + a slow upward trend so the longer view tells
+  /// an encouraging "improving over time" story. Seeded so the mock is
+  /// stable across reloads.
+  static List<HistoryDay> history({int days = 90}) {
+    final out = <HistoryDay>[];
+    final today = DateTime.now();
+    final start = DateTime(today.year, today.month, today.day)
+        .subtract(Duration(days: days - 1));
+    for (var i = 0; i < days; i++) {
+      final date = start.add(Duration(days: i));
+      // Base trend: ramps from ~700 up to ~1,250 across the window.
+      final trend = 700 + (550 * (i / (days - 1)));
+      // Weekly rhythm: weekends (Sat=6, Sun=7) a bit lighter.
+      final wd = date.weekday;
+      final weekend = (wd == DateTime.saturday || wd == DateTime.sunday);
+      final rhythm = weekend ? 0.72 : 1.0;
+      // Deterministic wobble from the day-of-year.
+      final wobble = 0.85 + ((date.day * 37 + date.month * 13) % 30) / 100.0;
+      var steps = (trend * rhythm * wobble).round();
+      // A couple of seeded "rest days" near zero for realism.
+      if (i == days - 12 || i == days - 27) steps = (steps * 0.12).round();
+      final activeMin = (steps / 39).round();
+      out.add(HistoryDay(date: date, steps: steps, activeMinutes: activeMin));
+    }
+    return out;
+  }
 
   // ── Customer audit log ──────────────────────────────────────────
 
