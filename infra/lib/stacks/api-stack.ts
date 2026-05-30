@@ -15,6 +15,7 @@ import * as path from 'path';
 import { Construct } from 'constructs';
 import { GoSteadyEnvConfig } from '../config.js';
 import { AuthStack } from './auth-stack.js';
+import { D2CAuthStack } from './d2c-auth-stack.js';
 import { DataStack } from './data-stack.js';
 import { SecurityStack } from './security-stack.js';
 import { ProcessingLambda } from '../constructs/processing-lambda.js';
@@ -22,6 +23,8 @@ import { ProcessingLambda } from '../constructs/processing-lambda.js';
 export interface ApiStackProps extends cdk.StackProps {
   readonly config: GoSteadyEnvConfig;
   readonly authStack: AuthStack;
+  /** D2C Cognito pool — second JWT authorizer for the consumer claim flow. */
+  readonly d2cAuthStack: D2CAuthStack;
   readonly dataStack: DataStack;
   readonly securityStack: SecurityStack;
 }
@@ -61,7 +64,7 @@ export class ApiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
 
-    const { config, authStack, dataStack, securityStack } = props;
+    const { config, authStack, d2cAuthStack, dataStack, securityStack } = props;
     const env = config.prefix;
 
     // ── Cross-stack imports ────────────────────────────────────────
@@ -956,6 +959,107 @@ export class ApiStack extends cdk.Stack {
     });
     patientMgmtErrorPatternAlarm.addAlarmAction(snsAction);
 
+    // ════════════════════════════════════════════════════════════════
+    // D2C Phase 1 — walker-user claim + activation
+    // ════════════════════════════════════════════════════════════════
+    //
+    // A SECOND JWT authorizer bound to the D2C Cognito pool (d2c.md L5).
+    // The native HttpUserPoolAuthorizer binds one pool/issuer, so D2C
+    // gets its own authorizer attached ONLY to D2C-prefixed routes. The
+    // facility authorizer + all facility routes are untouched. Claims
+    // arrive in the same requestContext.authorizer.jwt.claims shape, so
+    // the d2c-claim handler uses the same _shared.extract_claims.
+    //
+    // Spec: docs/specs/d2c-phase1-walker-activation.md §3
+    const d2cAuthorizer = new HttpUserPoolAuthorizer(
+      'D2CUserPoolAuthorizer',
+      d2cAuthStack.userPool,
+      {
+        userPoolClients: [d2cAuthStack.portalClient],
+        identitySource: ['$request.header.Authorization'],
+      },
+    );
+
+    const d2cClaim = new ProcessingLambda(this, 'D2CClaim', {
+      config,
+      functionName: `gosteady-${env}-d2c-claim`,
+      handlerDir: path.join(__dirname, '..', '..', 'lambda', 'd2c-claim'),
+      description: 'D2C Phase 1 — bootstrap-on-claim + public /setup lookup',
+      memoryMb: config.patientMgmtMemoryMb,
+      timeoutSeconds: config.patientMgmtTimeoutSeconds,
+      powertoolsLayer,
+      tracingActive: true,
+      environment: {
+        ENVIRONMENT: env,
+        DEVICES_TABLE: dataStack.deviceTable.tableName,
+        DEVICE_ASSIGNMENTS_TABLE: dataStack.deviceAssignmentsTable.tableName,
+        PATIENTS_TABLE: dataStack.patientsTable.tableName,
+        ORGANIZATIONS_TABLE: dataStack.organizationsTable.tableName,
+        ROLE_ASSIGNMENTS_TABLE: authStack.roleAssignmentsTable.tableName,
+      },
+    });
+    // RW: claim creates Patient + Organizations + RoleAssignments rows and
+    // runs the inline provision chain (Devices conditional update +
+    // DeviceAssignments PutItem). RoleAssignments is RW here (unlike the
+    // read-only facility handlers) because claim WRITES the household_owner
+    // assignment row.
+    dataStack.deviceTable.grantReadWriteData(d2cClaim.function);
+    dataStack.deviceAssignmentsTable.grantReadWriteData(d2cClaim.function);
+    dataStack.patientsTable.grantReadWriteData(d2cClaim.function);
+    dataStack.organizationsTable.grantReadWriteData(d2cClaim.function);
+    authStack.roleAssignmentsTable.grantReadWriteData(d2cClaim.function);
+    // KMS — Patients / Organizations / DeviceAssignments / RoleAssignments
+    // are CMK-encrypted (0A-rev + 0B-rev); claim reads + writes them.
+    identityKey.grantEncryptDecrypt(d2cClaim.function);
+    auditKey.grantEncryptDecrypt(d2cClaim.function);
+    // IoT data plane — provision publishes activate cmd + Shadow desired.
+    d2cClaim.function.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:Publish'],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:topic/gs/*/cmd`],
+    }));
+    d2cClaim.function.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:UpdateThingShadow', 'iot:GetThingShadow'],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
+    }));
+
+    const d2cClaimIntegration = new HttpLambdaIntegration(
+      'D2CClaimIntegration',
+      d2cClaim.function,
+    );
+    // Authenticated claim — D2C pool authorizer.
+    this.httpApi.addRoutes({
+      path: '/api/v1/claim',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: d2cClaimIntegration,
+      authorizer: d2cAuthorizer,
+    });
+    // Public setup-lookup — NO authorizer (the QR landing page is
+    // unauthenticated; it leaks nothing, and claim still needs a JWT).
+    this.httpApi.addRoutes({
+      path: '/api/v1/public/walkers/{walkerId}',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: d2cClaimIntegration,
+    });
+
+    // d2c-claim alarms (mirror the per-handler pattern).
+    const d2cClaimErrorsAlarm = new cloudwatch.Alarm(this, 'D2CClaimErrors', {
+      alarmName: `gosteady-${env}-d2c-claim-errors`,
+      alarmDescription:
+        'd2c-claim Lambda Errors > 0 in 5 min — uncaught exception in the ' +
+        'D2C claim/setup handler. Check /aws/lambda/gosteady-{env}-d2c-claim.',
+      metric: d2cClaim.function.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    d2cClaimErrorsAlarm.addAlarmAction(snsAction);
+
     // ── 2A-DL outputs ──────────────────────────────────────────────
     new cdk.CfnOutput(this, 'DeviceApiName', {
       value: deviceApi.function.functionName,
@@ -983,6 +1087,11 @@ export class ApiStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'PatientMgmtName', {
       value: patientMgmt.function.functionName,
       exportName: `${env}-PatientMgmtName`,
+    });
+    // ── D2C Phase 1 outputs ────────────────────────────────────────
+    new cdk.CfnOutput(this, 'D2CClaimName', {
+      value: d2cClaim.function.functionName,
+      exportName: `${env}-D2CClaimName`,
     });
 
     // ── Outputs (existing 2A-0) ───────────────────────────────────

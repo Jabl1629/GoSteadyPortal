@@ -121,11 +121,13 @@ const api = new ApiStack(app, `${prefix}-Api`, {
   env,
   config,
   authStack: auth,
+  d2cAuthStack: d2cAuth,
   dataStack: data,
   securityStack: security,
   description: `GoSteady API — ${config.envName}`,
 });
 api.addDependency(auth);
+api.addDependency(d2cAuth); // D2C Phase 1: second JWT authorizer on the D2C pool
 api.addDependency(data);
 api.addDependency(security); // Phase 2A-DL: device-api + discharge-cascade need IdentityKey + AuditKey CMK grants
 

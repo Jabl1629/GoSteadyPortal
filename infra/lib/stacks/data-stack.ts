@@ -171,6 +171,18 @@ export class DataStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // D2C Phase 1: by-walker-id GSI. Resolves the opaque, non-sequential
+    // walkerId (printed on the QR sticker) → Device Registry row. The
+    // printed GS serial is never exposed to the unauthenticated /setup
+    // landing page (d2c.md L6); the public lookup + claim resolve
+    // walkerId → serial server-side. Sparse: only devices assigned a
+    // walkerId appear in the index.
+    this.deviceTable.addGlobalSecondaryIndex({
+      indexName: 'by-walker-id',
+      partitionKey: { name: 'walkerId', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // ── Activity Series ───────────────────────────────────────────
     // PK migrated: serialNumber → patientId.
     // SK: timestamp (sessionEnd UTC ISO 8601).

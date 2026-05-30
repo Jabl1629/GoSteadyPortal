@@ -188,6 +188,11 @@ export class AuditStack extends cdk.Stack {
       // patient.notifications.suppressed_paused +
       // behavioral.detector.run (1 per cron invocation summary).
       `gosteady-${env}-behavioral-detector`,
+      // D2C Phase 1 (2026-05-30): d2c-claim emits d2c.household_created +
+      // d2c.device_claimed + the device.* provision audits (claimed /
+      // assigned / activation_sent / provision_rollback). Bundled with
+      // the D2C deploy (Migration Pattern 18.8).
+      `gosteady-${env}-d2c-claim`,
     ];
 
     const forwarderDestination = new logsDestinations.LambdaDestination(forwarder.function);
