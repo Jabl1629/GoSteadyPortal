@@ -19,6 +19,7 @@ import { ENVIRONMENTS, GoSteadyEnvConfig } from '../lib/config.js';
 import { EnforceLogRetention } from '../lib/aspects/log-retention.js';
 import { SecurityStack } from '../lib/stacks/security-stack.js';
 import { AuthStack } from '../lib/stacks/auth-stack.js';
+import { D2CAuthStack } from '../lib/stacks/d2c-auth-stack.js';
 import { DataStack } from '../lib/stacks/data-stack.js';
 import { IngestionStack } from '../lib/stacks/ingestion-stack.js';
 import { ProcessingStack } from '../lib/stacks/processing-stack.js';
@@ -63,6 +64,17 @@ const auth = new AuthStack(app, `${prefix}-Auth`, {
   description: `GoSteady Auth — ${config.envName}`,
 });
 auth.addDependency(security);
+
+// D2C auth — separate Cognito pool for the consumer/household product
+// (d2c.md L5). Reuses the facility AuthStack's RoleAssignments table
+// (shared; tenancy boundary is clientId, not pool). Phase 1.
+const d2cAuth = new D2CAuthStack(app, `${prefix}-D2C-Auth`, {
+  env,
+  config,
+  authStack: auth,
+  description: `GoSteady D2C Auth — ${config.envName}`,
+});
+d2cAuth.addDependency(auth); // reads the shared RoleAssignments table
 
 const data = new DataStack(app, `${prefix}-Data`, {
   env,
