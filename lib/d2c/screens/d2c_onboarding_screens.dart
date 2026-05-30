@@ -492,7 +492,7 @@ class OtpScreen extends StatelessWidget {
           children: [
             _title(context, 'Enter your code'),
             const SizedBox(height: 10),
-            _body('We texted a 6-digit code to the phone ending in ••34.'),
+            _body('We texted a 6-digit code to your phone.'),
             const SizedBox(height: 24),
             const _OtpBoxes(),
             const SizedBox(height: 24),

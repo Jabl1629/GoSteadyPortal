@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../theme/app_theme.dart';
 import '../data/d2c_mock_data.dart';
+import '../widgets/d2c_bottom_nav.dart';
 
 /// Care Team (Care Circle) management screen.
 ///
@@ -50,10 +51,7 @@ class _D2CCareTeamScreenState extends State<D2CCareTeamScreen> {
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         scrolledUnderElevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_rounded, color: AppTheme.textDark),
-          onPressed: () => context.go('/d2c/preview/dashboard'),
-        ),
+        automaticallyImplyLeading: false,
         title: Text(
           'Care Team',
           style: Theme.of(context).textTheme.titleLarge?.copyWith(
@@ -63,6 +61,7 @@ class _D2CCareTeamScreenState extends State<D2CCareTeamScreen> {
               ),
         ),
       ),
+      bottomNavigationBar: const D2CBottomNav(active: D2CTab.careTeam),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 640),

@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../theme/app_theme.dart';
 import '../data/d2c_mock_data.dart';
+import '../widgets/d2c_bottom_nav.dart';
 
 /// D2C Home / Dashboard. Single household viewed by either an Admin
 /// caregiver or the walker user themselves (`isWalkerUser=true`).
@@ -50,7 +50,7 @@ class D2CDashboardScreen extends StatelessWidget {
             ),
           ),
         ),
-        bottomNavigationBar: _BottomNav(isWalkerUser: _isWalkerUser),
+        bottomNavigationBar: const D2CBottomNav(active: D2CTab.activity),
       );
     }
     return Scaffold(
@@ -81,49 +81,31 @@ class D2CDashboardScreen extends StatelessWidget {
                     isWalkerUser: _isWalkerUser,
                   ),
                 ],
-                if (_visibleAlerts.isNotEmpty) ...[
+                if (snapshot.openAlerts.isNotEmpty) ...[
                   const SizedBox(height: 26),
                   const _SectionLabel('Today\'s alerts'),
                   const SizedBox(height: 10),
-                  for (final a in _visibleAlerts) ...[
+                  for (final a in snapshot.openAlerts) ...[
                     _AlertCard(alert: a),
                     const SizedBox(height: 10),
                   ],
                 ],
-                if (!_isWalkerUser && snapshot.careNote != null) ...[
+                if (snapshot.careNote != null) ...[
                   const SizedBox(height: 18),
                   _CareNoteCard(
                     note: snapshot.careNote!,
                     canEdit: snapshot.viewer.isAdmin,
                   ),
                 ],
-                if (!_isWalkerUser) ...[
-                  const SizedBox(height: 22),
-                  _DeviceCard(device: snapshot.device),
-                ],
+                const SizedBox(height: 22),
+                _DeviceCard(device: snapshot.device),
               ],
             ),
           ),
         ),
       ),
-      bottomNavigationBar: _BottomNav(isWalkerUser: _isWalkerUser),
+      bottomNavigationBar: const D2CBottomNav(active: D2CTab.activity),
     );
-  }
-
-  /// Walker user sees activity-related alerts only — device alerts
-  /// (battery / signal / offline) are operational and surface to the
-  /// Admin instead. For the wireframe this filter is empty for walker
-  /// user since the only seeded alert is `battery_low`.
-  List<WalkerAlert> get _visibleAlerts {
-    if (!_isWalkerUser) return snapshot.openAlerts;
-    return snapshot.openAlerts.where((a) {
-      // Device-health alert icons are filtered out for walker user.
-      final t = a.title.toLowerCase();
-      return !t.contains('battery') &&
-          !t.contains('signal') &&
-          !t.contains('offline') &&
-          !t.contains('check') /* "checking in"-style device alerts */;
-    }).toList();
   }
 
   PreferredSizeWidget _buildAppBar(BuildContext context) {
@@ -350,16 +332,14 @@ class _GreetingCard extends StatelessWidget {
     final t = snapshot.today;
     final w = snapshot.walker;
     final isYou = snapshot.viewer.isWalkerUser;
-    final subject = isYou ? "You're" : "${w.firstName}'s";
-    final possessive = isYou ? 'your' : 'her'; // adjust pronoun if needed
     final theirs = isYou ? 'your' : '${w.firstName}\'s';
 
     // 1. Personal best — strongest day this week
     if (t.is7DayHigh && t.steps > 0) {
       return (
         headline: isYou
-            ? 'Strongest day yet this week.'
-            : '${w.firstName}\'s strongest day yet this week.',
+            ? 'Your most active day this week.'
+            : "${w.firstName}'s most active day this week.",
         subhead:
             '${NumberFormat('#,##0').format(t.steps)} steps · ${t.percentChangeFromYesterday}% above yesterday.',
       );
@@ -369,10 +349,10 @@ class _GreetingCard extends StatelessWidget {
     if (t.streakDaysAboveAverage >= 3 && t.steps >= t.weeklyAverageSteps) {
       return (
         headline: isYou
-            ? '${t.streakDaysAboveAverage} days running above $possessive pace.'
-            : '${w.firstName} — ${t.streakDaysAboveAverage} days running above pace.',
+            ? '${t.streakDaysAboveAverage} steady days in a row.'
+            : '${w.firstName} — ${t.streakDaysAboveAverage} steady days in a row.',
         subhead:
-            '${NumberFormat('#,##0').format(t.steps)} so far today. Keep the rhythm going.',
+            '${NumberFormat('#,##0').format(t.steps)} steps so far, above $theirs usual again. Nice and steady.',
       );
     }
 
@@ -383,10 +363,10 @@ class _GreetingCard extends StatelessWidget {
               .round();
       return (
         headline: isYou
-            ? '$subject above $possessive weekly pace.'
-            : '${w.firstName} is above her weekly pace.',
+            ? "You're ahead of your usual today."
+            : '${w.firstName} is ahead of her usual today.',
         subhead:
-            '${NumberFormat('#,##0').format(t.steps)} steps so far · $pct% over $theirs 7-day average.',
+            '${NumberFormat('#,##0').format(t.steps)} steps so far · $pct% above a typical day.',
       );
     }
 
@@ -397,10 +377,10 @@ class _GreetingCard extends StatelessWidget {
               .round();
       return (
         headline: isYou
-            ? 'A lighter day so far.'
-            : 'Lighter day for ${w.firstName} so far.',
+            ? 'A quieter day so far.'
+            : 'A quieter day for ${w.firstName} so far.',
         subhead: '${NumberFormat('#,##0').format(t.steps)} steps · $pct% '
-            'below $theirs weekly pace.',
+            'below a typical day.',
       );
     }
 
@@ -416,8 +396,8 @@ class _GreetingCard extends StatelessWidget {
     }
     return (
       headline: isYou
-          ? 'A rest day so far.'
-          : 'A rest day for ${w.firstName} so far.',
+          ? 'A restful day so far.'
+          : 'A restful day for ${w.firstName} so far.',
       subhead: 'No activity logged today.',
     );
   }
@@ -1174,96 +1154,3 @@ class _DeviceCard extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Bottom nav — role-conditional
-// ─────────────────────────────────────────────────────────────────────
-
-class _BottomNav extends StatelessWidget {
-  const _BottomNav({required this.isWalkerUser});
-  final bool isWalkerUser;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(
-          top: BorderSide(color: AppTheme.border.withOpacity(0.6)),
-        ),
-      ),
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: SafeArea(
-        top: false,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
-          children: [
-            _NavItem(
-              icon: Icons.show_chart_rounded,
-              label: 'Today',
-              active: true,
-              onTap: () {},
-            ),
-            if (isWalkerUser)
-              _NavItem(
-                icon: Icons.history_rounded,
-                label: 'History',
-                onTap: () {},
-              )
-            else
-              _NavItem(
-                icon: Icons.group_outlined,
-                label: 'Care Team',
-                onTap: () => context.go('/d2c/preview/care-team'),
-              ),
-            _NavItem(
-              icon: Icons.person_outline,
-              label: 'Account',
-              onTap: () {},
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _NavItem extends StatelessWidget {
-  const _NavItem({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    this.active = false,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-  final bool active;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = active ? AppTheme.sage : AppTheme.textSoft;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(height: 2),
-            Text(
-              label,
-              style: TextStyle(
-                color: color,
-                fontSize: 11.5,
-                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}

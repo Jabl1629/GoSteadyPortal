@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../theme/app_theme.dart';
 import '../data/d2c_mock_data.dart';
+import '../widgets/d2c_bottom_nav.dart';
 
 /// Account-tier screens for the signed-in D2C user:
 ///   - Account settings (name / email / phone / relationship + sign out)
@@ -17,12 +18,16 @@ class _AccountScaffold extends StatelessWidget {
   const _AccountScaffold({
     required this.title,
     required this.child,
-    this.backTo = '/d2c/preview/dashboard',
+    this.backTo,
   });
 
   final String title;
   final Widget child;
-  final String backTo;
+
+  /// When set, shows a back arrow returning to this route (drill-down
+  /// screens). When null, this is a top-level tab — no back arrow; the
+  /// persistent bottom nav handles movement.
+  final String? backTo;
 
   @override
   Widget build(BuildContext context) {
@@ -33,10 +38,14 @@ class _AccountScaffold extends StatelessWidget {
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         scrolledUnderElevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_rounded, color: AppTheme.textDark),
-          onPressed: () => context.go(backTo),
-        ),
+        automaticallyImplyLeading: false,
+        leading: backTo == null
+            ? null
+            : IconButton(
+                icon: const Icon(Icons.arrow_back_rounded,
+                    color: AppTheme.textDark),
+                onPressed: () => context.go(backTo!),
+              ),
         title: Text(
           title,
           style: Theme.of(context).textTheme.titleLarge?.copyWith(
@@ -52,6 +61,7 @@ class _AccountScaffold extends StatelessWidget {
           child: child,
         ),
       ),
+      bottomNavigationBar: const D2CBottomNav(active: D2CTab.account),
     );
   }
 }
