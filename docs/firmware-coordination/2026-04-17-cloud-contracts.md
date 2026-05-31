@@ -8545,3 +8545,36 @@ The device already only received queued cmds during its hourly connect-publish-d
 ---
 
 *Entry owner: Claude (firmware session, 2026-05-31). PSM validated on GS9999999998 (tau=3 h / active=2 s granted). No cloud contract change; new firmware version strings 0.12.0-psm / 0.13.1-pilot.*
+
+---
+
+# §C39 — GS0000000001 flashed + staged for first D2C QR-claim test (2026-05-31)
+
+Entry owner: Claude (firmware session) | Trigger: stage the first shipping unit `GS0000000001` (fresh from Nordic starter FW) for the D2C Phase 1 real-device claim test ([`d2c-phase1-walker-activation.md`](../specs/d2c-phase1-walker-activation.md) §7). **Device-side + cloud-prep are complete and verified**; the only remaining blockers are Twilio OTP delivery (operator, in compliance review) and Jace's phone-side claim. No firmware code change — flashed the existing `0.13.1-pilot` and did cloud staging.
+
+## C39.1 — Device prep (done + verified)
+
+- **Flashed `GS0000000001`** with `0.13.1-pilot` (pilot deploy build: FIELD_MODE + PSM + snippets off + green session LED), rebuilt with `CONFIG_AWS_IOT_CLIENT_ID_STATIC="GS0000000001"` (per-unit rebuild is mandatory — broker rejects a mismatched client_id). Flow per the bringup playbook Phase 3: `at_client` sample → `flash_cert.py --serial GS0000000001` (root CA + client cert + key written to sec_tag 201, the existing bundle cert fp `8351197b…`) → pilot app via `--chiperase` (cert survives in CryptoCell-312).
+- **On-device verified:** boots FIELD_MODE `0.13.1-pilot`; iBasis eSIM `registered_roaming` (RSRP −85, SNR 10); PSM granted tau=10800 s / active=2 s; subscribed `gs/GS0000000001/cmd`; first heartbeat published and landed in the Thing Shadow (`firmware:0.13.1-pilot`, battery 97 %, boot_count 2).
+
+## C39.2 — Cloud prep (done + verified)
+
+- The IoT Thing + cert (ACTIVE, policy attached) + Device Registry row already existed from the §C2.1 first-handoff mint (`ready_to_provision`, owner NULL, `activated_at` None). **The one missing piece — `walkerId` — was assigned:** `37b2e250-9732-4d4b-9d66-b8339d952d8a` written to the registry row; the `by-walker-id` GSI resolves it → `GS0000000001`; `GET /api/v1/public/walkers/{walkerId}` returns `{"status":"unclaimed"}`.
+- **QR / setup URL:** `https://dev.portal.gosteady.co/d2c/#/setup/37b2e250-9732-4d4b-9d66-b8339d952d8a` (QR PNG at `~/Desktop/GS0000000001_setup_QR.png`). The opaque walkerId is in the QR; the `GS` serial is never exposed (umbrella L6).
+
+## C39.3 — Pre-claim state is correct (the point of the test)
+
+`status=ready_to_provision`, owner NULL, `activated_at` None → the claim will exercise the **real** provision + activate path (NOT the dev `activated_at` shortcut). The device heartbeats in pre-activation (session capture gated until the `activate` cmd) and is subscribed to its cmd topic, so the §C24 connection-coordinator delivers the activate at the next connect. (Recommend power-cycling the cap right after the claim so it connects within seconds rather than waiting up to the 1 h heartbeat.)
+
+## C39.4 — Remaining before the claim can run (not firmware)
+
+- **Twilio** `gosteady/dev/twilio` secret populate + A2P/toll-free review (operator, in progress ~2 biz days). Until then SMS-OTP can't deliver → no D2C JWT → no claim. The Cognito **email** confirm-code step (the "two-code first-timer" flow, d2c-phase1 §9) works today.
+- **Jace phone-side** (d2c-phase1 §7): scan QR → sign up (name/email/phone) → email confirm → SMS OTP → `POST /claim` → power-cycle cap → walk ~100 steps → confirm activity renders + status `active_monitoring` + `device.activated` audit.
+
+## C39.5 — One firmware discrepancy to know
+
+d2c-phase1 §7 item 3 ("blue LED off on activation") assumes a pre-activation blue LED, but **field builds never drive the blue LED** (it's only wired into the bench purple-blink path). Use cloud status (`active_monitoring`) + the **green session LED** on first capture as the activation confirmation, not a blue light. A real pre-activation indicator could be added (candidate, mirrors the `CONFIG_GOSTEADY_SESSION_LED` pattern) if we want one for the demo.
+
+---
+
+*Entry owner: Claude (firmware session, 2026-05-31). GS0000000001 flashed `0.13.1-pilot` + cert + walkerId; pre-claim state verified. Blocks: Twilio OTP + Jace phone-side claim. No firmware code change.*

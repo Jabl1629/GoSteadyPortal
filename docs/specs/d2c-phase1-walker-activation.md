@@ -408,9 +408,16 @@ rework later). Done in code:
    live impl + `main_d2c.dart` entry/router; see §9 "Frontend". `analyze`
    0-error/0-warning (new code) + `build web` clean. End-to-end auth+reads
    validate at the real-device test (gated on Twilio, same as items 4/6).
-6. **Real device** (§7) — flash Thingy:91 X, assign+sticker a `walkerId`
-   QR, real signup via SMS-OTP, claim, power-on activation, walk, confirm
-   activity renders. **← loop Jace in here.**
+6. **Real device** (§7) — **device-side DONE (2026-05-31, coord §C39):**
+   `GS0000000001` flashed with `0.13.1-pilot` (client_id baked + cert sec_tag
+   201), heartbeating in pre-activation (`ready_to_provision`, owner NULL,
+   `activated_at` None → real activate flow); `walkerId`
+   `37b2e250-9732-4d4b-9d66-b8339d952d8a` assigned, `by-walker-id` GSI +
+   public lookup return `unclaimed`; QR at `~/Desktop/GS0000000001_setup_QR.png`
+   → `https://dev.portal.gosteady.co/d2c/#/setup/37b2e250-…`. **Remaining:**
+   Twilio OTP (item 4) + Jace's phone-side claim (signup → email confirm →
+   SMS OTP → claim → power-cycle cap → walk → confirm activity). **← loop Jace
+   in once Twilio clears.**
 
 ## 11. Changelog
 
