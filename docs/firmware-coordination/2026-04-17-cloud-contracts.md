@@ -8538,6 +8538,10 @@ The device already only received queued cmds during its hourly connect-publish-d
 - **Discharge run to measure real life:** top `GS9999999998` to 100 %, run on battery (vbus=0), watch `battery_pct` decline across hourly heartbeats on the per-device dashboard over 2–4 days → average current → projected life (treat the slope as ±5–10 % given the generic fuel-gauge model). Optionally fold nPM1300 `IBAT` into the heartbeat payload (cloud accept-all → Shadow) for a per-heartbeat connection-current signal.
 - Revisit the deferred sampler-gating + gyro-disable only if the measured life needs the extra margin.
 
+## C38.6 — Follow-up: green session LED restored (`0.13.1-pilot`)
+
+`0.13.0-pilot` (via FIELD_MODE) had silenced ALL LEDs, including the green "recording" LED. Operator feedback: the green LED lighting on motion-detected/recording is a useful confirmation; only the *idle* purple blink was unwanted. Restored the green session LED via new `CONFIG_GOSTEADY_SESSION_LED` (set in `prj_pilot.conf`): green solid during an active capture session, dark at rest (idle purple blink stays off, gated separately). Cost is tens of mAh/month (green on ~40 min/day) — affordable within the pilot budget. Reflashed `GS9999999998` → `0.13.1-pilot` (heartbeat `firmware` field updated). No cloud impact.
+
 ---
 
-*Entry owner: Claude (firmware session, 2026-05-31). PSM validated on GS9999999998 (tau=3 h / active=2 s granted). No cloud contract change; new firmware version strings 0.12.0-psm / 0.13.0-pilot.*
+*Entry owner: Claude (firmware session, 2026-05-31). PSM validated on GS9999999998 (tau=3 h / active=2 s granted). No cloud contract change; new firmware version strings 0.12.0-psm / 0.13.1-pilot.*
