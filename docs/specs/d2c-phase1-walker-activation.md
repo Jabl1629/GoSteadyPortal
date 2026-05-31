@@ -282,6 +282,31 @@ Activity ↔ Account navigated correctly).
   localhost origin to the dev API CORS allow-list. The real-device test is
   unaffected (it runs against the allow-listed portal origin).
 
+**Live deploy + in-browser verification (2026-05-31):** the live D2C build
+is deployed to the allow-listed origin at
+**`https://dev.portal.gosteady.co/d2c/index.html`** — a `/d2c/` SUBPATH of
+the existing portal bucket (`gosteady-dev-portal-hosting`, CloudFront
+`E5ZXJOQXF5HDH`), built with `--base-href /d2c/` + hash routing so it shares
+the CORS-allow-listed origin without touching the facility app at root.
+Deploy: `flutter build web -t lib/main_d2c.dart --base-href /d2c/
+--dart-define=BUILD_MODE=live --dart-define=API_BASE_URL=<dev-api>
+--dart-define=USE_HASH_URLS=true` → `aws s3 sync build/web
+s3://gosteady-dev-portal-hosting/d2c/ --delete` → CloudFront invalidate
+`/d2c/*`. Verified in Chrome from that origin:
+- ✅ **Public data path** end-to-end: `/setup/{id}` lookup hits the live API
+  (CORS passes), parses, and renders the correct landing state (`unknown` →
+  "this link doesn't look right"). A page-context `fetch` returned `200
+  {"status":"unknown"}` (vs `TypeError: Failed to fetch` from localhost).
+- ✅ **Auth path to the Twilio boundary**: sign-in → `startSignIn` → Cognito
+  `InitiateAuth(CUSTOM_AUTH)` succeeds (hosting CSP allows `cognito-idp`),
+  the custom challenge is caught, and the app routes to the OTP screen. Only
+  OTP *delivery* is blocked (Twilio secret unpopulated) — exactly the
+  documented gate.
+- ⛔ **Authenticated reads** (dashboard/claim with a real JWT) still need a
+  received OTP → validate once Twilio is live / at the real-device test.
+- Caveat: a facility root redeploy that `s3 sync --delete`s the bucket root
+  would also remove `/d2c/`; re-run the deploy above if that happens.
+
 ## 10. Deploy + synthetic-test results
 
 **Deployed dev resources (real values, verified from CFN outputs):**
