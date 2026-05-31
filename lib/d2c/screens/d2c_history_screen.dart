@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../theme/app_theme.dart';
+import '../d2c_routes.dart';
 import '../data/d2c_mock_data.dart';
 import '../widgets/d2c_bottom_nav.dart';
 
@@ -46,7 +47,7 @@ class _D2CHistoryScreenState extends State<D2CHistoryScreen> {
         scrolledUnderElevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_rounded, color: AppTheme.textDark),
-          onPressed: () => context.go('/d2c/preview/dashboard'),
+          onPressed: () => context.go(D2CRoutes.dashboard),
         ),
         title: Text(
           'History',

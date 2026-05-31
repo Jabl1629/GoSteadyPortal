@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../theme/app_theme.dart';
+import '../d2c_routes.dart';
 
 /// The three top-level tabs of the signed-in D2C experience. Everyone
 /// (caregivers + walker users) gets the same three — no role-conditional
@@ -35,19 +36,19 @@ class D2CBottomNav extends StatelessWidget {
               icon: Icons.show_chart_rounded,
               label: 'Activity',
               active: active == D2CTab.activity,
-              onTap: () => context.go('/d2c/preview/dashboard'),
+              onTap: () => context.go(D2CRoutes.dashboard),
             ),
             _NavItem(
               icon: Icons.group_outlined,
               label: 'Care Team',
               active: active == D2CTab.careTeam,
-              onTap: () => context.go('/d2c/preview/care-team'),
+              onTap: () => context.go(D2CRoutes.careTeam),
             ),
             _NavItem(
               icon: Icons.person_outline,
               label: 'Account',
               active: active == D2CTab.account,
-              onTap: () => context.go('/d2c/preview/account'),
+              onTap: () => context.go(D2CRoutes.account),
             ),
           ],
         ),

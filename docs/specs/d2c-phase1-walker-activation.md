@@ -217,6 +217,50 @@ Walker user: dashboard polls /me/patients + /patients/{id}/activity →
 3. ✅ Second JWT authorizer + `d2c-claim` Lambda + 2 routes + grants +
    audit subscription filter (ApiStack). Deployed.
 
+**Frontend — Flutter live wiring DONE (`feature/d2c-flutter-wiring`,
+2026-05-31; `flutter analyze` 0 errors + `flutter build web -t
+lib/main_d2c.dart` clean):**
+- ✅ `ApiClient.claimDevice` + `publicWalkerLookup` (+ `d2c_api_models.dart`
+  DTOs). `_request` gained an unauthenticated path for the public lookup
+  (defaults preserved — every facility call unchanged). Public lookup
+  live-smoke verified (`{"status":"unknown"}` on a random id).
+- ✅ `D2CAuthService` (`lib/d2c/auth/`) — passwordless SMS-OTP custom-auth
+  over `amazon_cognito_identity_dart_2`: `signUp` → `confirmSignUp`
+  (email code) → `startSignIn` (CUSTOM_AUTH) → `submitOtp`
+  (`sendCustomChallengeAnswer`). Implements `AuthServiceInterface` so
+  `ApiClient` is reused unchanged; password/MFA methods throw
+  `UnsupportedError`. `D2CCognitoConfig` = deployed pool/client.
+- ✅ `D2CRepository` interface + `D2CMockRepository` + `LiveD2CRepository`
+  — maps claim + 2A-RD reads into `D2CDashboardSnapshot`; aggregates raw
+  sessions client-side into today's totals + 7-day trend + streaks +
+  recent walks (the server returns sessions, not the contextualized shape).
+- ✅ `lib/main_d2c.dart` entry + `D2CApp` + `buildD2CRouter` — real routes
+  (`/setup/:walkerId`, sign-up, confirm, otp, sign-in, dashboard, history,
+  account). A build-mode-aware route prefix (`D2CRoutes`) lets the shared
+  dashboard + bottom-nav work in both the preview hub and the live shell;
+  reuses the injectable `D2CDashboardScreen`. The `/d2c/preview/*` hub is
+  retained for design review (separate entry `main.dart`).
+
+**Two findings (no action required now):**
+- **First-timer = two codes.** The deployed pool (`autoVerify: email`,
+  `EMAIL_ONLY` recovery, no PreSignUp auto-confirm) requires a fresh
+  self-signup to confirm via an EMAILED code (`ConfirmSignUp`) BEFORE the
+  SMS-OTP sign-in can run. The mockups assumed a single SMS step — this
+  answers the open "first-time OTP channel" question in
+  `d2c-mockup-followups.md`. A `PreSignUp` auto-confirm trigger would
+  collapse it to one SMS step (cleaner UX) — candidate backend simplification.
+- **Read-path data gaps.** 2A-RD `currentDevice` exposes only
+  serial/status/lastSeen — **no battery % / signal** (the device card
+  derives battery from an open low-battery alert, else shows full). **90-day
+  history is unavailable** (activity range maxes at 30d). Both flagged in
+  `live_d2c_repository.dart`.
+
+**End-to-end verification is still gated on Twilio** (same gate as the
+hardware exit test): minting a real D2C JWT needs the SMS-OTP flow, which
+needs the `gosteady/dev/twilio` secret populated (§10 item 4). The code is
+built to the deployed contract; auth + live reads validate at the
+real-device test.
+
 ## 10. Deploy + synthetic-test results
 
 **Deployed dev resources (real values, verified from CFN outputs):**
@@ -313,9 +357,11 @@ rework later). Done in code:
    operator steps in the runbook above. 10DLC approval is the long pole
    (1–7 business days); start it early. Then I smoke-test an OTP to
    `+1 720 206 4566`.
-5. **Flutter live wiring** — D2C auth service (CUSTOM_AUTH/SMS-OTP) +
-   `D2CRepository` live impl; swap mock→live in `lib/d2c/`. (Can do solo,
-   in parallel with the 10DLC wait.)
+5. ✅ **Flutter live wiring DONE** (`feature/d2c-flutter-wiring`,
+   2026-05-31) — D2C auth service (CUSTOM_AUTH/SMS-OTP) + `D2CRepository`
+   live impl + `main_d2c.dart` entry/router; see §9 "Frontend". `analyze`
+   0-error/0-warning (new code) + `build web` clean. End-to-end auth+reads
+   validate at the real-device test (gated on Twilio, same as items 4/6).
 6. **Real device** (§7) — flash Thingy:91 X, assign+sticker a `walkerId`
    QR, real signup via SMS-OTP, claim, power-on activation, walk, confirm
    activity renders. **← loop Jace in here.**
@@ -331,3 +377,12 @@ rework later). Done in code:
   error_response arity, status_patientId GSI key); all fixed + redeployed;
   re-run all-green (§10). Backend Phase 1 complete; remaining work needs
   real hardware + Flutter live wiring.
+- **2026-05-31 (PM)** — Flutter live wiring built + compile-verified on
+  `feature/d2c-flutter-wiring` (isolated portal worktree, parallel to a
+  hardware session): claim + public-lookup `ApiClient` methods,
+  `D2CAuthService` (SMS-OTP custom auth), `D2CRepository` (mock + live with
+  client-side session aggregation), `main_d2c.dart` entry + `D2CApp` +
+  router. `flutter analyze` 0 errors/0 warnings (new code); `flutter build
+  web` clean; public-lookup live-smoke green. Two findings logged in §9
+  (two-code first-timer flow; read-path battery/90-day gaps). Full
+  end-to-end remains gated on the Twilio secret (item 4).
