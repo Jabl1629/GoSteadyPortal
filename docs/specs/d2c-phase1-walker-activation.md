@@ -283,12 +283,31 @@ test actually runs against live infra, and never invent resource IDs.
   claim returned `alreadyClaimed:true` without duplicate side effects.)
 - `_masked_owner` now works (`email` stored on the RoleAssignments row).
 
+**SMS provider pivot (2026-05-31): SNS → Twilio.** The dev AWS account has
+**no SMS origination identity** — `aws sns create-sms-sandbox-phone-number`
+returned `No origination entities available to send`, and the account is
+SANDBOX tier with zero phone numbers / pools. AWS won't send even the
+sandbox verification code without a registered origination identity, and US
+A2P SMS needs 10DLC registration regardless. So D2C now sends OTP via
+**Twilio** (the production path planned for Phase 2, pulled forward — no
+rework later). Done in code:
+- `d2c-custom-auth` Lambda: `_send_sms` swapped SNS → Twilio REST (stdlib
+  `urllib`, no SDK; fails closed if creds absent).
+- `D2CAuthStack`: empty Secrets Manager secret `gosteady/{env}/twilio`
+  (operator-populated out-of-band so the token never enters source/CFN/
+  chat) + `GetSecretValue` grant + `TWILIO_SECRET_ARN` env. Old `sns:Publish`
+  grant removed. `tsc` + `cdk synth` clean.
+- Dangling SNS sandbox entry for the test number removed.
+- **Operator runbook:** [`docs/playbooks/d2c-twilio-setup.md`](../playbooks/d2c-twilio-setup.md).
+
 **Remaining before real-device exit test (needs Jace + hardware):**
-4. **SNS SMS sandbox** — verify the test phone (or exit sandbox) so OTP
-   sends. (Custom-auth Lambda currently SNS-publishes; sandbox blocks
-   un-verified numbers.)
+4. **Twilio account + 10DLC + populate `gosteady/dev/twilio` secret** —
+   operator steps in the runbook above. 10DLC approval is the long pole
+   (1–7 business days); start it early. Then I smoke-test an OTP to
+   `+1 720 206 4566`.
 5. **Flutter live wiring** — D2C auth service (CUSTOM_AUTH/SMS-OTP) +
-   `D2CRepository` live impl; swap mock→live in `lib/d2c/`.
+   `D2CRepository` live impl; swap mock→live in `lib/d2c/`. (Can do solo,
+   in parallel with the 10DLC wait.)
 6. **Real device** (§7) — flash Thingy:91 X, assign+sticker a `walkerId`
    QR, real signup via SMS-OTP, claim, power-on activation, walk, confirm
    activity renders. **← loop Jace in here.**

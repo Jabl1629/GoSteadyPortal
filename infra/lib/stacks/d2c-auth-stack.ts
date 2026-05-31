@@ -3,6 +3,7 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import { GoSteadyEnvConfig } from '../config.js';
@@ -54,7 +55,25 @@ export class D2CAuthStack extends cdk.Stack {
     const removal = isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY;
     const logRetention = isProd ? logs.RetentionDays.THREE_MONTHS : logs.RetentionDays.ONE_MONTH;
 
-    // ── Custom-auth trigger Lambda (SMS-OTP) ──────────────────────────
+    // ── Twilio credentials secret (SMS OTP sender) ────────────────────
+    // The dev AWS account has no SNS SMS origination identity ("No
+    // origination entities available to send"), and US A2P SMS needs 10DLC
+    // registration regardless — so D2C uses Twilio (the production path;
+    // pulled forward from Phase 2). This secret is created EMPTY: the value
+    // (account_sid / auth_token / from) is populated out-of-band by an
+    // operator (AWS console or CLI) so the Twilio auth token never lands in
+    // source control, CloudFormation, or chat. See
+    // docs/playbooks/d2c-twilio-setup.md. The custom-auth Lambda reads it at
+    // runtime; until populated, the OTP flow fails closed.
+    const twilioSecret = new secretsmanager.Secret(this, 'D2CTwilioSecret', {
+      secretName: `gosteady/${p}/twilio`,
+      description:
+        'Twilio creds for D2C SMS OTP — JSON {account_sid, auth_token, from}. ' +
+        'Populate out-of-band; see docs/playbooks/d2c-twilio-setup.md.',
+      removalPolicy: removal,
+    });
+
+    // ── Custom-auth trigger Lambda (SMS-OTP via Twilio) ───────────────
     const customAuthLambda = new lambda.Function(this, 'D2CCustomAuth', {
       functionName: `gosteady-${p}-d2c-custom-auth`,
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -66,26 +85,16 @@ export class D2CAuthStack extends cdk.Stack {
       memorySize: 128,
       timeout: cdk.Duration.seconds(5), // auth-path: respond fast
       tracing: lambda.Tracing.ACTIVE,
-      environment: { SMS_SENDER_ID: 'GoSteady', ENVIRONMENT: p },
+      environment: {
+        ENVIRONMENT: p,
+        TWILIO_SECRET_ARN: twilioSecret.secretArn,
+      },
       logRetention,
-      description: 'D2C SMS-OTP custom-auth (Define/Create/Verify) — Phase 1',
+      description: 'D2C SMS-OTP custom-auth (Define/Create/Verify) via Twilio — Phase 1',
     });
 
-    // Phase-1 interim: send OTP via SNS Publish (sandbox-verified number).
-    // Phase 2 routes through the Twilio dispatcher instead. Scoped to SMS
-    // publish (no topic ARN — direct-to-phone publish needs "*").
-    customAuthLambda.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['sns:Publish'],
-        resources: ['*'],
-        conditions: {
-          // Restrict to SMS (no topic) publishes — defense in depth.
-          StringEquals: { 'sns:Protocol': 'sms' },
-        },
-      }),
-    );
-    // SNS SMS attributes (sender ID, spend limit) live at the account
-    // level; nothing stack-scoped to set here.
+    // Lambda reads the Twilio creds at runtime (cached per cold start).
+    twilioSecret.grantRead(customAuthLambda);
 
     // ── Pre-Token Generation V2 Lambda ────────────────────────────────
     const preTokenLambda = new lambda.Function(this, 'D2CPreToken', {
@@ -192,6 +201,11 @@ export class D2CAuthStack extends cdk.Stack {
       value: this.userPool.userPoolProviderUrl,
       exportName: `${p}-D2CUserPoolProviderUrl`,
       description: 'D2C pool issuer URL (for the API multi-issuer authorizer)',
+    });
+    new cdk.CfnOutput(this, 'D2CTwilioSecretArn', {
+      value: twilioSecret.secretArn,
+      exportName: `${p}-D2CTwilioSecretArn`,
+      description: 'Secrets Manager ARN — populate with Twilio creds (see d2c-twilio-setup.md)',
     });
   }
 }
