@@ -261,6 +261,27 @@ needs the `gosteady/dev/twilio` secret populated (§10 item 4). The code is
 built to the deployed contract; auth + live reads validate at the
 real-device test.
 
+**Browser smoke test (2026-05-31, Chrome via MCP, live build vs the dev
+API):** the live bundle boots + routes in a real browser; the auth gate
+redirects `/` → `/sign-in`; the sign-in and `/setup/:walkerId` screens
+render; the **demo** build renders the full dashboard from the mock repo
+(greeting, stat cards, 7-day chart, today's walks) and bottom-nav routing
+works (the `D2CRoutes` prefix refactor confirmed in the live shell —
+Activity ↔ Account navigated correctly).
+- **CORS finding (not a route bug, but a test/deploy constraint):** the dev
+  API's new D2C routes (`/api/v1/public/walkers/{id}`, `/api/v1/claim`) ARE
+  correctly CORS-configured — preflight + GET reflect
+  `Access-Control-Allow-Origin: https://dev.portal.gosteady.co` (identical
+  to the facility `/me` baseline). But a **localhost** dev origin
+  (`http://127.0.0.1:*`) is **not** allow-listed, so a locally-served build
+  cannot exercise the live data path — the browser blocks it with
+  `TypeError: Failed to fetch`. (`curl` masked this earlier by sending no
+  `Origin` header.) **Implication:** to browser-test the live data/claim
+  path *before* the real-device test, serve the D2C build from an
+  allow-listed origin (deploy to `dev.portal.gosteady.co`) **or** add a
+  localhost origin to the dev API CORS allow-list. The real-device test is
+  unaffected (it runs against the allow-listed portal origin).
+
 ## 10. Deploy + synthetic-test results
 
 **Deployed dev resources (real values, verified from CFN outputs):**
