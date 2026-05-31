@@ -56,24 +56,38 @@ The empty secret already exists: **`gosteady/dev/twilio`**
 (ARN is the `D2CTwilioSecretArn` CloudFormation output of
 `GoSteady-Dev-D2C-Auth`). Put the JSON value in via **either**:
 
+**Use a scoped API Key, not the master Auth Token.** Twilio Console →
+Account → **API keys & tokens** → Create API key → **Standard**. Copy the
+**SID (`SK…`)** and **Secret** (shown once). An API key is independently
+revocable — if it ever leaks you revoke just that key instead of rotating
+the whole account.
+
 **AWS Console:** Secrets Manager → `gosteady/dev/twilio` → Retrieve secret
 value → Edit → paste as plaintext JSON:
 ```json
 {
-  "account_sid": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "auth_token":  "your_auth_token",
-  "from":        "MGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  "account_sid":    "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "api_key_sid":    "SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "api_key_secret": "your_api_key_secret",
+  "from":           "+18XXXXXXXXXX"
 }
 ```
-(`from` can be a Messaging Service SID `MG…` or a number `+1XXXXXXXXXX`.)
+- `account_sid` is always required (it's in the request URL).
+- Auth = `api_key_sid` + `api_key_secret` (preferred). *Or* drop those two
+  and use `"auth_token": "..."` instead — the Lambda accepts either.
+- `from` = your toll-free number `+1…` **or** a Messaging Service SID `MG…`.
+  (For the verified-caller-ID smoke test the bare toll-free number is fine.)
 
-**Or AWS CLI:**
+**Or AWS CLI** (run it yourself — keeps the secret out of chat):
 ```bash
 aws secretsmanager put-secret-value \
   --region us-east-1 \
   --secret-id gosteady/dev/twilio \
-  --secret-string '{"account_sid":"AC...","auth_token":"...","from":"MG..."}'
+  --secret-string '{"account_sid":"AC...","api_key_sid":"SK...","api_key_secret":"...","from":"+18..."}'
 ```
+
+⚠️ **Never paste the API key secret into the assistant chat.** Populate the
+secret yourself via console or CLI; the Lambda reads it at runtime.
 
 No redeploy needed — the Lambda reads the secret on its next cold start
 (force one by editing any env var, or just wait; first OTP after population

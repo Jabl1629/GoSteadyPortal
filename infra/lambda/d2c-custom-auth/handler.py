@@ -19,14 +19,17 @@ send"), and US A2P SMS needs 10DLC registration regardless — so we use
 Twilio, which is the production path anyway (no rework later).
 
 Credentials live in a Secrets Manager secret (ARN in env `TWILIO_SECRET_ARN`),
-NEVER in code or env vars. Expected secret JSON:
+NEVER in code or env vars. Expected secret JSON — use a scoped **API Key**
+(revocable; preferred) OR the master Auth Token:
     {
-      "account_sid": "AC...",
-      "auth_token":  "...",
-      "from":        "+1XXXXXXXXXX"   # a Twilio number OR a Messaging
-                                       # Service SID (MG...) — either works
-                                       # as the `From`/`MessagingServiceSid`.
+      "account_sid":    "AC...",        # always — used in the request URL
+      "api_key_sid":    "SK...",        # PREFERRED auth (with api_key_secret)
+      "api_key_secret": "...",
+      "auth_token":     "...",          # fallback auth if no API key
+      "from":           "+1XXXXXXXXXX"  # a Twilio number OR a Messaging
+                                        # Service SID (MG...).
     }
+Auth precedence: (api_key_sid + api_key_secret) if present, else auth_token.
 Until the secret is populated (see docs/playbooks/d2c-twilio-setup.md), the
 Lambda raises and the OTP flow fails closed (no silent success).
 
@@ -152,12 +155,21 @@ def _twilio() -> dict[str, str]:
         raise RuntimeError("TWILIO_SECRET_ARN not configured")
     raw = _secrets_client.get_secret_value(SecretId=TWILIO_SECRET_ARN)["SecretString"]
     creds = json.loads(raw)
-    for k in ("account_sid", "auth_token", "from"):
+    # account_sid (URL path) + from (sender) are always required.
+    for k in ("account_sid", "from"):
         if not creds.get(k):
             raise RuntimeError(
                 f"Twilio secret missing '{k}' — populate it per "
                 "docs/playbooks/d2c-twilio-setup.md"
             )
+    # Auth: a scoped API Key (preferred) OR the master Auth Token.
+    has_key = bool(creds.get("api_key_sid") and creds.get("api_key_secret"))
+    has_token = bool(creds.get("auth_token"))
+    if not (has_key or has_token):
+        raise RuntimeError(
+            "Twilio secret needs either api_key_sid+api_key_secret (preferred) "
+            "or auth_token — see docs/playbooks/d2c-twilio-setup.md"
+        )
     _twilio_creds = creds
     return creds
 
@@ -180,11 +192,12 @@ def _send_sms(phone_e164: str, code: str) -> None:
     data = urllib.parse.urlencode(form).encode()
     url = TWILIO_API.format(sid=creds["account_sid"])
     req = urllib.request.Request(url, data=data, method="POST")
-    # HTTP basic auth: account_sid : auth_token
+    # HTTP basic auth: API Key (SK… : secret) if present, else account_sid :
+    # auth_token. The URL always uses the real account_sid (above).
     import base64
-    token = base64.b64encode(
-        f"{creds['account_sid']}:{creds['auth_token']}".encode()
-    ).decode()
+    auth_user = creds.get("api_key_sid") or creds["account_sid"]
+    auth_pass = creds.get("api_key_secret") or creds["auth_token"]
+    token = base64.b64encode(f"{auth_user}:{auth_pass}".encode()).decode()
     req.add_header("Authorization", f"Basic {token}")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:
