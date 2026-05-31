@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import '../auth/auth_service_interface.dart';
 import 'api_exception.dart';
 import 'api_models.dart';
+import 'd2c_api_models.dart';
 
 /// Single HTTP gateway for the GoSteady portal API.
 ///
@@ -246,6 +247,43 @@ class ApiClient {
     return CareNoteResponse.fromJson(body);
   }
 
+  // ── D2C claim + public lookup (d2c-phase1 §3.3 / §3.4) ─────────
+
+  /// `GET /api/v1/public/walkers/{walkerId}` — UNAUTHENTICATED landing
+  /// lookup for the scanned QR / `/setup/{walkerId}` link. Never attaches
+  /// a token (the endpoint sits outside both authorizers). Returns the
+  /// claimable state; an unknown id reads as [PublicWalkerStatus.unknown]
+  /// (no existence leak per d2c.md L6).
+  Future<PublicWalkerLookup> publicWalkerLookup(String walkerId) async {
+    final body = await _request(
+      'GET',
+      '/api/v1/public/walkers/${Uri.encodeComponent(walkerId)}',
+      authenticated: false,
+    );
+    return PublicWalkerLookup.fromJson(body);
+  }
+
+  /// `POST /api/v1/claim` — bootstrap the household + patient +
+  /// role-assignment then provision the device (d2c-phase1 §3.3).
+  /// Authenticated with the just-signed-up walker user's D2C JWT.
+  /// Idempotent: re-claiming a device this user already owns returns
+  /// 200 with `alreadyClaimed: true`.
+  Future<ClaimResponse> claimDevice(
+    String walkerId, {
+    String? displayName,
+  }) async {
+    final body = await _request(
+      'POST',
+      '/api/v1/claim',
+      body: {
+        'walkerId': walkerId,
+        if (displayName != null && displayName.isNotEmpty)
+          'displayName': displayName,
+      },
+    );
+    return ClaimResponse.fromJson(body);
+  }
+
   // ── Internals ─────────────────────────────────────────────────
 
   /// GET with JWT attachment, envelope decoding, and retry on 5xx.
@@ -261,21 +299,26 @@ class ApiClient {
     String path, {
     Object? body,
     Map<String, String>? query,
+    // D2C public lookup (d2c-phase1 §3.4) sits outside both authorizers
+    // and must NOT carry a token. Defaults to true so every existing
+    // facility + authenticated call is unchanged.
+    bool authenticated = true,
   }) async {
-    final token = await _auth.getIdToken();
-    if (token == null) {
-      throw ApiException.unauthenticated();
-    }
-
     var uri = Uri.parse('$_baseUrl$path');
     if (query != null && query.isNotEmpty) {
       uri = uri.replace(queryParameters: {...uri.queryParameters, ...query});
     }
-    final headers = {
-      'Authorization': 'Bearer $token',
+    final headers = <String, String>{
       'Content-Type': 'application/json',
       'Accept': 'application/json',
     };
+    if (authenticated) {
+      final token = await _auth.getIdToken();
+      if (token == null) {
+        throw ApiException.unauthenticated();
+      }
+      headers['Authorization'] = 'Bearer $token';
+    }
 
     http.Response resp;
     try {

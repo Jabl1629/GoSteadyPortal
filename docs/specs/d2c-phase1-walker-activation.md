@@ -217,6 +217,96 @@ Walker user: dashboard polls /me/patients + /patients/{id}/activity →
 3. ✅ Second JWT authorizer + `d2c-claim` Lambda + 2 routes + grants +
    audit subscription filter (ApiStack). Deployed.
 
+**Frontend — Flutter live wiring DONE (`feature/d2c-flutter-wiring`,
+2026-05-31; `flutter analyze` 0 errors + `flutter build web -t
+lib/main_d2c.dart` clean):**
+- ✅ `ApiClient.claimDevice` + `publicWalkerLookup` (+ `d2c_api_models.dart`
+  DTOs). `_request` gained an unauthenticated path for the public lookup
+  (defaults preserved — every facility call unchanged). Public lookup
+  live-smoke verified (`{"status":"unknown"}` on a random id).
+- ✅ `D2CAuthService` (`lib/d2c/auth/`) — passwordless SMS-OTP custom-auth
+  over `amazon_cognito_identity_dart_2`: `signUp` → `confirmSignUp`
+  (email code) → `startSignIn` (CUSTOM_AUTH) → `submitOtp`
+  (`sendCustomChallengeAnswer`). Implements `AuthServiceInterface` so
+  `ApiClient` is reused unchanged; password/MFA methods throw
+  `UnsupportedError`. `D2CCognitoConfig` = deployed pool/client.
+- ✅ `D2CRepository` interface + `D2CMockRepository` + `LiveD2CRepository`
+  — maps claim + 2A-RD reads into `D2CDashboardSnapshot`; aggregates raw
+  sessions client-side into today's totals + 7-day trend + streaks +
+  recent walks (the server returns sessions, not the contextualized shape).
+- ✅ `lib/main_d2c.dart` entry + `D2CApp` + `buildD2CRouter` — real routes
+  (`/setup/:walkerId`, sign-up, confirm, otp, sign-in, dashboard, history,
+  account). A build-mode-aware route prefix (`D2CRoutes`) lets the shared
+  dashboard + bottom-nav work in both the preview hub and the live shell;
+  reuses the injectable `D2CDashboardScreen`. The `/d2c/preview/*` hub is
+  retained for design review (separate entry `main.dart`).
+
+**Two findings (no action required now):**
+- **First-timer = two codes.** The deployed pool (`autoVerify: email`,
+  `EMAIL_ONLY` recovery, no PreSignUp auto-confirm) requires a fresh
+  self-signup to confirm via an EMAILED code (`ConfirmSignUp`) BEFORE the
+  SMS-OTP sign-in can run. The mockups assumed a single SMS step — this
+  answers the open "first-time OTP channel" question in
+  `d2c-mockup-followups.md`. A `PreSignUp` auto-confirm trigger would
+  collapse it to one SMS step (cleaner UX) — candidate backend simplification.
+- **Read-path data gaps.** 2A-RD `currentDevice` exposes only
+  serial/status/lastSeen — **no battery % / signal** (the device card
+  derives battery from an open low-battery alert, else shows full). **90-day
+  history is unavailable** (activity range maxes at 30d). Both flagged in
+  `live_d2c_repository.dart`.
+
+**End-to-end verification is still gated on Twilio** (same gate as the
+hardware exit test): minting a real D2C JWT needs the SMS-OTP flow, which
+needs the `gosteady/dev/twilio` secret populated (§10 item 4). The code is
+built to the deployed contract; auth + live reads validate at the
+real-device test.
+
+**Browser smoke test (2026-05-31, Chrome via MCP, live build vs the dev
+API):** the live bundle boots + routes in a real browser; the auth gate
+redirects `/` → `/sign-in`; the sign-in and `/setup/:walkerId` screens
+render; the **demo** build renders the full dashboard from the mock repo
+(greeting, stat cards, 7-day chart, today's walks) and bottom-nav routing
+works (the `D2CRoutes` prefix refactor confirmed in the live shell —
+Activity ↔ Account navigated correctly).
+- **CORS finding (not a route bug, but a test/deploy constraint):** the dev
+  API's new D2C routes (`/api/v1/public/walkers/{id}`, `/api/v1/claim`) ARE
+  correctly CORS-configured — preflight + GET reflect
+  `Access-Control-Allow-Origin: https://dev.portal.gosteady.co` (identical
+  to the facility `/me` baseline). But a **localhost** dev origin
+  (`http://127.0.0.1:*`) is **not** allow-listed, so a locally-served build
+  cannot exercise the live data path — the browser blocks it with
+  `TypeError: Failed to fetch`. (`curl` masked this earlier by sending no
+  `Origin` header.) **Implication:** to browser-test the live data/claim
+  path *before* the real-device test, serve the D2C build from an
+  allow-listed origin (deploy to `dev.portal.gosteady.co`) **or** add a
+  localhost origin to the dev API CORS allow-list. The real-device test is
+  unaffected (it runs against the allow-listed portal origin).
+
+**Live deploy + in-browser verification (2026-05-31):** the live D2C build
+is deployed to the allow-listed origin at
+**`https://dev.portal.gosteady.co/d2c/index.html`** — a `/d2c/` SUBPATH of
+the existing portal bucket (`gosteady-dev-portal-hosting`, CloudFront
+`E5ZXJOQXF5HDH`), built with `--base-href /d2c/` + hash routing so it shares
+the CORS-allow-listed origin without touching the facility app at root.
+Deploy: `flutter build web -t lib/main_d2c.dart --base-href /d2c/
+--dart-define=BUILD_MODE=live --dart-define=API_BASE_URL=<dev-api>
+--dart-define=USE_HASH_URLS=true` → `aws s3 sync build/web
+s3://gosteady-dev-portal-hosting/d2c/ --delete` → CloudFront invalidate
+`/d2c/*`. Verified in Chrome from that origin:
+- ✅ **Public data path** end-to-end: `/setup/{id}` lookup hits the live API
+  (CORS passes), parses, and renders the correct landing state (`unknown` →
+  "this link doesn't look right"). A page-context `fetch` returned `200
+  {"status":"unknown"}` (vs `TypeError: Failed to fetch` from localhost).
+- ✅ **Auth path to the Twilio boundary**: sign-in → `startSignIn` → Cognito
+  `InitiateAuth(CUSTOM_AUTH)` succeeds (hosting CSP allows `cognito-idp`),
+  the custom challenge is caught, and the app routes to the OTP screen. Only
+  OTP *delivery* is blocked (Twilio secret unpopulated) — exactly the
+  documented gate.
+- ⛔ **Authenticated reads** (dashboard/claim with a real JWT) still need a
+  received OTP → validate once Twilio is live / at the real-device test.
+- Caveat: a facility root redeploy that `s3 sync --delete`s the bucket root
+  would also remove `/d2c/`; re-run the deploy above if that happens.
+
 ## 10. Deploy + synthetic-test results
 
 **Deployed dev resources (real values, verified from CFN outputs):**
@@ -313,9 +403,11 @@ rework later). Done in code:
    operator steps in the runbook above. 10DLC approval is the long pole
    (1–7 business days); start it early. Then I smoke-test an OTP to
    `+1 720 206 4566`.
-5. **Flutter live wiring** — D2C auth service (CUSTOM_AUTH/SMS-OTP) +
-   `D2CRepository` live impl; swap mock→live in `lib/d2c/`. (Can do solo,
-   in parallel with the 10DLC wait.)
+5. ✅ **Flutter live wiring DONE** (`feature/d2c-flutter-wiring`,
+   2026-05-31) — D2C auth service (CUSTOM_AUTH/SMS-OTP) + `D2CRepository`
+   live impl + `main_d2c.dart` entry/router; see §9 "Frontend". `analyze`
+   0-error/0-warning (new code) + `build web` clean. End-to-end auth+reads
+   validate at the real-device test (gated on Twilio, same as items 4/6).
 6. **Real device** (§7) — flash Thingy:91 X, assign+sticker a `walkerId`
    QR, real signup via SMS-OTP, claim, power-on activation, walk, confirm
    activity renders. **← loop Jace in here.**
@@ -331,3 +423,12 @@ rework later). Done in code:
   error_response arity, status_patientId GSI key); all fixed + redeployed;
   re-run all-green (§10). Backend Phase 1 complete; remaining work needs
   real hardware + Flutter live wiring.
+- **2026-05-31 (PM)** — Flutter live wiring built + compile-verified on
+  `feature/d2c-flutter-wiring` (isolated portal worktree, parallel to a
+  hardware session): claim + public-lookup `ApiClient` methods,
+  `D2CAuthService` (SMS-OTP custom auth), `D2CRepository` (mock + live with
+  client-side session aggregation), `main_d2c.dart` entry + `D2CApp` +
+  router. `flutter analyze` 0 errors/0 warnings (new code); `flutter build
+  web` clean; public-lookup live-smoke green. Two findings logged in §9
+  (two-code first-timer flow; read-path battery/90-day gaps). Full
+  end-to-end remains gated on the Twilio secret (item 4).

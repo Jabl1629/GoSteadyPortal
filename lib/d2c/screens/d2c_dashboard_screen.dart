@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../theme/app_theme.dart';
+import '../d2c_routes.dart';
 import '../data/d2c_mock_data.dart';
 import '../widgets/d2c_bottom_nav.dart';
 
@@ -611,7 +612,7 @@ class _DayTrendCard extends StatelessWidget {
                 ),
               ),
               GestureDetector(
-                onTap: () => context.go('/d2c/preview/history'),
+                onTap: () => context.go(D2CRoutes.history),
                 child: const Text(
                   'See more',
                   style: TextStyle(
