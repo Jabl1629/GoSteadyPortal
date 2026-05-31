@@ -8503,3 +8503,41 @@ D2C Phase 1 cloud backend deployed + synthetic-validated; no firmware ask. Coord
 ---
 
 *Entry owner: Claude (portal session, 2026-05-31). Reuses existing activation/provision/Shadow contracts; zero firmware change.*
+
+---
+
+# §C38 — Firmware battery pilot: LTE-M PSM + low-power overlay (2026-05-31)
+
+Entry owner: Claude (firmware session) | Trigger: pilot will run a smaller **1350 mAh AA-class cell** and needs **~30-day life on a single charge**. Built a power budget from the actual firmware paths, found the dominant overrun, fixed it, and validated on `GS9999999998`. **Cloud-facing impact: effectively none** — no contract change. Two things a cloud-side reader should note: (1) new firmware version strings `0.12.0-psm` / `0.13.0-pilot` will appear in heartbeats; (2) the device now uses modem PSM, but this does **not** change downlink (activate/wipe) behavior — see C38.4.
+
+## C38.1 — Root cause found in the power model
+
+Built an energy model over the real consumers (heartbeat connect/publish/disconnect, per-session activity uplink, 84 KB snippet uploads, idle sampler, sensors, LEDs). Budget: 1350 mAh / 720 h = **1.875 mA average ceiling** (design target ~1.4 mA with margin for temp + the generic-1100 mAh fuel-gauge model error, FMEA 3.1).
+
+The smoking gun, confirmed in the resolved `.config` (not just source): **`# CONFIG_LTE_PSM_REQ is not set`**. `CONFIG_LTE_LC_PSM_MODULE=y` only compiled the module in; PSM was never requested, and the firmware never powers the modem down. So between hourly heartbeats the nRF9151 idled in registered I-DRX at **~mA-level 24/7** — that term alone (~1440 mAh/mo at ~2 mA) overruns the entire budget → projected life **~20 days, FAILS**.
+
+## C38.2 — What landed (firmware)
+
+- **`0.12.0-psm`** (`prj_cloud.conf` + `prj_field.conf`): request PSM at attach — `CONFIG_LTE_PSM_REQ=y`, RPTAU `00010010` (T3412 = 3 h periodic-TAU backstop, set above the 1 h heartbeat), RAT `00000001` (T3324 = 2 s active time, minimal so the modem enters PSM ~immediately after each RRC release; NCS default was 60 s).
+- **`0.13.0-pilot`** (new self-contained `prj_pilot.conf` = `prj_field.conf` + two deltas): **snippets OFF** (`CONFIG_GOSTEADY_SNIPPET_ENABLE=n` — removes the 84 KB/session uploads, the largest per-event radio cost) + **`CONFIG_GOSTEADY_LOW_POWER=y`** bundle (new Kconfig): fuel-gauge cadence 5 s→60 s, cellular signal/time reporter poll 60 s→30 min, and the nPM1300 `AVG_CURRENT` surfaced on uart0 for bench power readings. FIELD_MODE (already in `prj_field.conf`) also silences the idle purple-blink + recording LEDs (the blink alone is ~1–3 mA). `src/version.h` keys the version string off `LOW_POWER` so non-pilot builds keep reporting `0.12.0-psm` (accurate cloud attribution per build).
+- **Deferred (session-capture hot-path risk, pending measurement):** idle-sampler 100 Hz-spin gating + BMI270 gyro-disable (the V1 algo is accel-only; gyro is dead weight once snippets are off). The set above already clears 30 days with margin, so these stay out until the discharge run says the extra margin is needed and they can be tested against capture in isolation.
+
+## C38.3 — Validation (GS9999999998, bench)
+
+- PSM **granted by the carrier exactly as requested**: uart0 `cellular: psm: tau=10800 s, active=2 s` (iBasis roaming, RSRP −87…−89 dBm, SNR 4–5 dB). Registration ~5–10 s after boot.
+- `0.13.0-pilot` flashed + running: FIELD_MODE (LEDs off), heartbeat publishes `"firmware":"0.13.0-pilot"`, snippets quiet, no faults, nPM1300 current instrument live (`I=… uA (vbus=…)`).
+
+**Bench model (recalibrated with PSM confirmed):** pre-PSM ~20 d (FAIL) → PSM-only as-flashed ~58–89 d → fully-optimized pilot ~90–210 d, depending on per-connection (TLS-handshake) energy `E` (≈0.15–0.40 mAh/connection, 32 connections/day). Every PSM-enabled scenario clears 30 days; `E` is the remaining swing and is what the discharge run will pin down.
+
+## C38.4 — Why PSM doesn't break downlink (activate / wipe)
+
+The device already only received queued cmds during its hourly connect-publish-disconnect window; the connection-coordinator Lambda (§C24) re-publishes any outstanding `outstandingActivationCmds` / `outstandingWipeCmds` on each AWS IoT `CONNECTED` lifecycle event. PSM lowers the between-wake current **without widening downlink latency** vs the prior design — worst-case cmd delivery is still ≤ one heartbeat interval. No cloud action required.
+
+## C38.5 — Open / next
+
+- **Discharge run to measure real life:** top `GS9999999998` to 100 %, run on battery (vbus=0), watch `battery_pct` decline across hourly heartbeats on the per-device dashboard over 2–4 days → average current → projected life (treat the slope as ±5–10 % given the generic fuel-gauge model). Optionally fold nPM1300 `IBAT` into the heartbeat payload (cloud accept-all → Shadow) for a per-heartbeat connection-current signal.
+- Revisit the deferred sampler-gating + gyro-disable only if the measured life needs the extra margin.
+
+---
+
+*Entry owner: Claude (firmware session, 2026-05-31). PSM validated on GS9999999998 (tau=3 h / active=2 s granted). No cloud contract change; new firmware version strings 0.12.0-psm / 0.13.0-pilot.*
