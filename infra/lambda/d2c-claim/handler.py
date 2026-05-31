@@ -90,7 +90,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
             return _public_lookup(event)
         raise ApiError(code="NOT_FOUND", message=f"Unknown route {route}", status=404)
     except ApiError as e:
-        return error_response(e)
+        return error_response(e.code, e.message, e.status, e.details)
 
 
 # ── POST /claim ────────────────────────────────────────────────────────
@@ -147,6 +147,11 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
         "censusId": census_id,
         "displayName": display_name,
         "status": "active",
+        # by-client-status + by-census-status GSI sort key. Sparse GSI:
+        # without this composite attribute the patient row is INVISIBLE to
+        # both indexes (breaks /me/patients reads + idempotent re-claim).
+        # Matches patient-mgmt's create shape.
+        "status_patientId": f"active#{patient_id}",
         "isWalkerUser": True,
         "cognitoUserId": sub,
         "createdAt": now_iso,
@@ -155,14 +160,19 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
     _patients.put_item(Item=patient_item)
 
     # 3. RoleAssignments row (Admin + walker user of own household).
+    # DynamoDB rejects EMPTY string/number sets ("An ... set may not be
+    # empty"), so scopedFacilityIds / scopedCensusIds are OMITTED rather
+    # than written as empty sets. Absent = unrestricted within the
+    # household scope — exactly right for a solo D2C Admin, and the
+    # facility handlers treat a missing scope attribute the same way.
+    # `email` is stored so the pre-claim-race masked-owner hint works.
     _roles.put_item(Item={
         "userId": sub,
         "clientId": client_id,
         "role": "household_owner",
         "role_userId": f"household_owner#{sub}",
         "isWalkerUser": True,
-        "scopedFacilityIds": set(),
-        "scopedCensusIds": set(),
+        "email": claims.get("email", ""),
         "validFrom": now_iso,
         "assignedBy": sub,
     })
