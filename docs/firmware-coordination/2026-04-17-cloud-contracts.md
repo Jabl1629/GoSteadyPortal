@@ -8471,3 +8471,35 @@ All four §C35.4-deferred items are closed. V1 caregiver UX surface now fully co
 ---
 
 *Entry owner: Claude (portal session, 2026-05-27). Single-Lambda code swap on `gosteady-dev-patient-api`; no infra, no firmware impact.*
+
+---
+
+# §C37 — D2C Phase 1 backend: walker-user claim + activation (2026-05-31)
+
+Entry owner: Claude (portal session) | Trigger: begin the consumer/household (D2C) product on its phased plan. **Zero firmware-facing impact** — D2C reuses the already-shipped device-activation + provision + Shadow-desired contracts verbatim (ARCHITECTURE §4/§7; coord §C18/§C19 activation ack). No firmware change requested or needed through D2C Phase 4. This entry exists so a firmware-side reader knows the D2C surface now provisions real devices through the same `gs/{serial}/cmd` activate path.
+
+## C37.1 — What landed (deployed to dev)
+
+- **New spec set:** `docs/specs/d2c.md` (umbrella + 5-phase plan) + `docs/specs/d2c-phase1-walker-activation.md` (detail). Account model = Member + Admin flag + Walker-user property + Care Circle (maps onto existing `dtc_*` synthetic-client tenancy; no new role enum).
+- **Phased plan:** (1) walker-user claim+activation+monitoring → (2) SMS notifications → (3) deactivation/reset → (4) new-user-on-reset-device → (5) caregivers. Walker-first, real-hardware exit test each phase.
+- **New stack `GoSteady-Dev-D2C-Auth`:** separate Cognito pool `us-east-1_bhvtxuHwD` (d2c.md L5 — clean HIPAA/scoping boundary from the facility pool), D2C-Portal client `1mfi0ori1r0r5tvd5rq11m3ac3` (CUSTOM_AUTH/SMS-OTP only, passwordless), custom-auth Lambda (Define/Create/Verify), D2C pre-token Lambda (injects `dtc_*` claims with a pre-claim bootstrap default).
+- **`d2c-claim` Lambda + 2 API routes:** `POST /api/v1/claim` (2nd JWT authorizer on the D2C pool) bootstraps household + Patient(isWalkerUser) + RoleAssignments(household_owner) then provisions the device via an inline copy of the 2A-DL provision chain (activate cmd + Shadow `desired.activated_at`). `GET /api/v1/public/walkers/{walkerId}` (unauth) drives the QR `/setup` landing. New `by-walker-id` GSI on Device Registry maps the opaque QR id → serial (printed `GS` serial never exposed; d2c.md L6).
+- **SMS provider = Twilio** (pulled forward from Phase 2): the dev AWS account has no SNS SMS origination identity, so OTP sends via Twilio's REST API. Creds in Secrets Manager `gosteady/dev/twilio` (operator-populated; scoped API Key preferred). Runbook: `docs/playbooks/d2c-twilio-setup.md`.
+
+## C37.2 — Validation
+
+Synthetic end-to-end all-green against deployed infra: public lookup states (unclaimed/unknown/claimed/decommissioned), 401 on unauthed claim, claim→201 with full side effects (device `provisioned` + owner + activate cmd; DeviceAssignments + RoleAssignments + Organizations rows; patient visible in `by-client-status` GSI), idempotent re-claim→200, cross-user→409, audit events flowing. Three live-AWS bugs found + fixed during testing (DDB empty-set rejection; `error_response` arity; missing `status_patientId` GSI sort key) — full record in `d2c-phase1` spec §10.
+
+## C37.3 — Open / next
+
+- **Blocked on operator:** Twilio A2P/toll-free compliance review (~2 business days) + populate the `gosteady/dev/twilio` secret. OTP can't send until then. Verified-Caller-ID smoke test possible sooner.
+- **Real-device exit test pending** (flash Thingy:91 X → generate+sticker walkerId QR → claim → power-on activation → walk → activity renders). Can be decoupled from SMS via admin-minted token if the Twilio review lags.
+- **Flutter D2C live wiring** still pending (auth service + D2CRepository).
+
+## C37.4 — Coord doc for next sync
+
+D2C Phase 1 cloud backend deployed + synthetic-validated; no firmware ask. Coord doc rests until the real-device activation test (which closes the firmware `reported.activated_at` Shadow ack loop for a D2C account for the first time — will log that result when it happens).
+
+---
+
+*Entry owner: Claude (portal session, 2026-05-31). Reuses existing activation/provision/Shadow contracts; zero firmware change.*

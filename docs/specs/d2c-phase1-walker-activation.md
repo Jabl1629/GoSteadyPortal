@@ -298,7 +298,15 @@ rework later). Done in code:
   chat) + `GetSecretValue` grant + `TWILIO_SECRET_ARN` env. Old `sns:Publish`
   grant removed. `tsc` + `cdk synth` clean.
 - Dangling SNS sandbox entry for the test number removed.
+- **Auth credential (2026-05-31 refinement):** the handler accepts a scoped
+  Twilio **API Key** (`api_key_sid` + `api_key_secret`, preferred —
+  independently revocable) OR the master `auth_token`; `account_sid` always
+  used in the request URL. Verified against the deployed Lambda artifact.
 - **Operator runbook:** [`docs/playbooks/d2c-twilio-setup.md`](../playbooks/d2c-twilio-setup.md).
+- **Operator status (2026-05-31):** Twilio account funded; Verified Caller
+  ID set for the test phone; A2P/toll-free compliance review in progress
+  (~2 business days). `gosteady/dev/twilio` secret still holds the CDK
+  placeholder — awaiting operator populate. OTP sends blocked until then.
 
 **Remaining before real-device exit test (needs Jace + hardware):**
 4. **Twilio account + 10DLC + populate `gosteady/dev/twilio` secret** —
