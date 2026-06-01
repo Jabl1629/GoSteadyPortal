@@ -8578,3 +8578,34 @@ d2c-phase1 §7 item 3 ("blue LED off on activation") assumes a pre-activation bl
 ---
 
 *Entry owner: Claude (firmware session, 2026-05-31). GS0000000001 flashed `0.13.1-pilot` + cert + walkerId; pre-claim state verified. Blocks: Twilio OTP + Jace phone-side claim. No firmware code change.*
+
+---
+
+# §C40 — Pre-activation shipping mode + gated sampler (`0.14.0-shipmode`, 2026-05-31)
+
+Entry owner: Claude (firmware session) | Trigger: ship/store a pre-activation cap for months with no pull-tab and still hand the patient a near-full battery. **Firmware-only; zero cloud contract change.** Spec: `gosteady-firmware/docs/specs/preactivation-lowpower-mode.md`.
+
+## C40.1 — Problem
+
+A pre-activation device wasn't a low-power standby — it was a fully active cellular device that just declined to capture: hourly heartbeat + a 100 Hz sampler thread spinning in idle → **~340–410 mAh/month in storage (~27 % of a 1350 mAh cell)**. A cap boxed for a few months could be dead before the patient claims it.
+
+## C40.2 — What shipped (`0.14.0-shipmode`)
+
+- **Gated sampler [UNCONDITIONAL, all builds]:** the 100 Hz sampler now blocks on a new session-start signal (`session.c` `sampler_start_sem` + `gosteady_session_wait_for_start()`) instead of spinning when idle — the largest idle term. Preserves the documented start/stop race fixes (`s_active` ordering unchanged; only *how it waits* changed). Benefits activated devices between walks too.
+- **`CONFIG_GOSTEADY_PREACT_LOWPOWER` (prj_pilot.conf):** in pre-activation, motion → a brief **blue "pick me up to set up"** blink (rate-limited, no BMI270 confirm) + a **rate-limited motion-triggered connect** to collect a pending `activate` cmd when the user handles the cap; heartbeat drops to a **24 h safety net** (tunable). Modem stays PSM-registered (~5 µA). Implements the pre-activation indicator the D2C spec assumed but field builds never had (§C39.5).
+
+Estimated storage draw **~48 mAh/month** (~7–8× cut) → months of shelf life. Handling (2 h of motion) ≈ 3–5 mAh.
+
+## C40.3 — Validation
+
+- **Gated-sampler soak PASSED** on GS0000000001 (bench build, control.py / uart1): 16 start/stop cycles (12 normal + 4 rapid-fire), **0 faults, 0 dropped**, every session captured, clean BMI270 resume/suspend, algo ran. The `-EBADF`/HardFault stop race was not reintroduced.
+- Both pilot (PREACT) and default-bench (gated, no cloud) builds compile clean.
+- **GS0000000001 re-flashed to `0.14.0-shipmode`** (field) after the soak; boots clean, heartbeats as itself, **D2C pre-claim staging intact** (`ready_to_provision` / owner NULL / `activated_at` None / walkerId `37b2e250-…` / public lookup `unclaimed`). The bench-build detour left zero contamination (boot orphan-sweep cleaned the soak sessions).
+
+## C40.4 — Cloud-coordination note (carry-forward)
+
+When the **Phase 1C offline detector** ships (`lastSeen > 2 h`), it MUST scope to `active_monitoring` devices — a pre-activation/shelf cap on a 24 h safety-net heartbeat is quiet by design and must NOT trip it. (No conflict today; 1C isn't built.) Sibling to the §C39 staging note. Also: with shipmode, GS0000000001 now connects on **motion or reboot**, not hourly — so the D2C activate cmd lands when Jace power-cycles/mounts the cap after claiming (already the §C39 runbook step).
+
+---
+
+*Entry owner: Claude (firmware session, 2026-05-31). `0.14.0-shipmode` on GS0000000001; gated sampler soak-validated; D2C staging intact. No cloud contract change.*
