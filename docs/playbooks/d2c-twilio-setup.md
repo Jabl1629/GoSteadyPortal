@@ -108,3 +108,41 @@ the real-device exit test.
 - **Phase 2** formalizes this (STOP-keyword handling, delivery-status
   webhooks, per-Member notification SMS) — this runbook just covers the
   Phase-1 OTP sender.
+
+---
+
+## Appendix — Toll-Free Verification form answers (2026-06-01)
+
+We went the **toll-free number** route (Toll-Free Verification), an alternative
+to the 10DLC Brand+Campaign in Step 2 — usually faster for low-volume
+transactional traffic. Form answers used (Twilio Console → Messaging → toll-free
+verification → "Messaging use case"):
+
+| Field | Value |
+|---|---|
+| Estimated monthly volume | `100` |
+| **Opt-in type** | **Via Website** (NOT "Via Text" — users opt in by entering their number on the web sign-up, not by texting a keyword) |
+| Use case categories | `2FA` + `Account Notifications` |
+| Use case description | GoSteady is a remote-monitoring service for elderly users of walking aids and their family caregivers. We send two kinds of transactional, consumer-initiated SMS: (1) one-time login verification codes (2FA/OTP) to verify a user's mobile number and secure sign-in; and (2) account & activity notifications to caregivers (e.g., a low-activity check-in suggestion or a device/account alert). No marketing or promotional content. ~100 messages/month. |
+| Sample message | `123456 is your GoSteady verification code. It expires in 5 minutes. Reply STOP to opt out.` (verbatim from `d2c-custom-auth/handler.py`) |
+| **Proof of consent (opt-in) URL** | **`https://dev.portal.gosteady.co/sms-consent.html`** (hosted opt-in/consent page; source `web/sms-consent.html`) |
+| Additional information | Second message type — account/activity notification, e.g. "GoSteady: walking activity for Mom was lower than usual today — you may want to check in. Reply STOP to opt out." Consumer-initiated via website opt-in; reply STOP to opt out, HELP for help. |
+| E-mail for notifications | (account owner's email) |
+
+**Why both use cases (not OTP-only):** the verified use case is effectively a
+contract with the carriers — sending alert texts on an OTP-only-verified number
+risks use-case-mismatch filtering. The sign-up consent line already covers
+"account and alert texts," and the "Account Notifications" category covers the
+caregiver alerts, so declaring both now avoids a second verification later.
+
+**Post-approval monitoring:** carriers + Twilio monitor automatically (opt-out
+& complaint rates, send velocity, content-vs-use-case consistency; SHAFT +
+prohibited content always filtered). Stay within the declared transactional use
+case, only message consented users, honor STOP — no manual per-message review,
+but mismatched/marketing content gets filtered or the number throttled.
+
+**Consent page:** `web/sms-consent.html` → deployed to the portal hosting bucket
+root (`aws s3 cp web/sms-consent.html s3://gosteady-dev-portal-hosting/` +
+CloudFront `/sms-consent.html` invalidation). It's also picked up automatically
+by any facility Flutter redeploy since it lives in `web/`. Update the support
+email / privacy link before any production use.
