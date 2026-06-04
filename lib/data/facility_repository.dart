@@ -57,6 +57,13 @@ abstract class FacilityRepository {
   /// set returns no patients (UI default is "all selected").
   List<PatientSummary> patientsForSelection(Set<String> selectedUnitIds);
 
+  /// Discontinued (ended-monitoring) engagements in scope — backs the
+  /// read-only "Show discontinued" toggle. Live impl queries
+  /// `/me/patients?status=discontinued`; demo impl returns a small seeded
+  /// set. Fetched on demand (only when the toggle is flipped on), not at
+  /// sign-in.
+  Future<List<DiscontinuedSummary>> discontinuedPatients();
+
   // ── Per-patient (async — cache + fetch on miss in live impl) ─
 
   /// Lookup a single patient.

@@ -8710,9 +8710,20 @@ User-facing mapping (facility build): `N residents` → **`N devices in use`**; 
 
 Scope: **user-facing strings only.** The data model is unchanged (`Patient` / `patientId` / `Patients` table / API). Internal Flutter identifiers (`AddResidentDialog`, `resident_settings_dialog.dart`, `_residentCountForUnit`, `onResidentCreated`) were left as-is — a cosmetic rename follow-up, not user-visible. Also shipped a small **"No device assigned"** polish so a device-less / just-ended detail shows a clean state instead of the sentinel `0% · Weak · epoch` chips. Verified live on `dev.portal.gosteady.co`.
 
+## C42.7 — "Show discontinued" — read-only view of ended engagements (2026-06-04)
+
+A bottom-bar **"Show discontinued"** toggle (default off) on the census reveals everyone previously monitored who is no longer being monitored (discharged), as read-only rows. Cheap to build because the `status_patientId` fix already indexes the discharged set:
+
+- **Backend (`patient-api`, hotswap):** `GET /api/v1/me/patients?status=discontinued` lists the discharged slice. `query_patients_by_census` / `query_patients_by_client` gained a `status_prefix` param (default `active_`); `status=discontinued` flips it to `discharged_` on the same `by-census-status` / `by-client-status` GSIs — no new table/migration. `_patient_row_view` now also surfaces `dischargedAt`. (Default/active behavior unchanged; the `family_viewer` by-patient-ids path is unaffected — the toggle is a census/client-role feature.)
+- **Frontend:** a fixed `_DiscontinuedBar` footer toggle (default off) → on demand fetches the discharged set (`FacilityRepository.discontinuedPatients()` → live API; demo returns empty) → a greyed **DISCONTINUED** section: each row is `name · unit · "Discontinued <date>"` with a `link_off` icon, no live chips. Clicking opens the **read-only** detail — the settings gear is hidden (no Edit/Pause/End/Replace), a **"Monitoring ended · read-only"** chip sits under the header, the device card reads "No device assigned", and the **preserved activity history still renders**.
+- **Verified live:** toggled on → `Pilot CapTest · Bench · Discontinued Jun 3, 2026` appeared greyed; clicking it showed the read-only detail with its preserved 43-step walk and no action surfaces.
+- **Deferred (next session, per Jace):** a **"Start Monitoring again"** action from a discontinued row. Today re-monitoring = re-add (new record); the same-record, history-linked resume is the bigger follow-up that this view is the natural hook for. Tiny follow-up: the care-note `+` is still tappable on a discontinued detail (the gear is gated, but the care-note panel isn't) — minor.
+
+Verified live on `dev.portal.gosteady.co`.
+
 ---
 
-*Entry owner: Claude (portal session, 2026-06-04). "End Monitoring" consolidation (no reason, no Discontinue Device) + discharge-cascade wipe fix; full provision→activate→walk→end→wipe→recycle→re-provision→re-activate→walk loop validated on one physical cap. + C42.6 terminology generalization (resident → device/monitoring). No firmware change.*
+*Entry owner: Claude (portal session, 2026-06-04). "End Monitoring" consolidation (no reason, no Discontinue Device) + discharge-cascade wipe fix; full provision→activate→walk→end→wipe→recycle→re-provision→re-activate→walk loop validated on one physical cap. + C42.6 terminology generalization (resident → device/monitoring) + C42.7 read-only "Show discontinued" view. No firmware change.*
 
 ---
 

@@ -262,13 +262,21 @@ class _PatientView extends StatelessWidget {
                 unit: unitDisplay,
                 room: patient.room,
                 compact: isPhone,
-                onSettingsTap: () => ResidentSettingsDialog.show(
-                  context,
-                  patient: patient,
-                  data: data,
-                  onCompleted: onRefresh,
-                ),
+                // Discontinued (discharged) engagements are read-only — no
+                // settings gear (no Edit / Pause / End / Replace Device).
+                onSettingsTap: patient.status == PatientStatus.discharged
+                    ? null
+                    : () => ResidentSettingsDialog.show(
+                          context,
+                          patient: patient,
+                          data: data,
+                          onCompleted: onRefresh,
+                        ),
               ),
+              if (patient.status == PatientStatus.discharged) ...[
+                const SizedBox(height: 10),
+                _DiscontinuedTag(),
+              ],
               const SizedBox(height: 20),
               // 2B-FAC-W: pause banner appears whenever notifications
               // are currently paused. Stacks above the care-note +
@@ -393,7 +401,8 @@ class _PatientHeader extends StatelessWidget {
   final String name;
   final String unit;
   final String room;
-  final VoidCallback onSettingsTap;
+  // Null => read-only (discontinued): the settings gear is hidden.
+  final VoidCallback? onSettingsTap;
   final bool compact;
 
   @override
@@ -413,11 +422,13 @@ class _PatientHeader extends StatelessWidget {
                     ),
               ),
             ),
-            const SizedBox(width: 8),
-            _SettingsGearButton(
-              onTap: onSettingsTap,
-              compact: compact,
-            ),
+            if (onSettingsTap != null) ...[
+              const SizedBox(width: 8),
+              _SettingsGearButton(
+                onTap: onSettingsTap!,
+                compact: compact,
+              ),
+            ],
           ],
         ),
         const SizedBox(height: 4),
@@ -552,6 +563,39 @@ class _EmptyState extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Small read-only chip under the header when viewing a discontinued
+/// (discharged) engagement — history is preserved, but no actions apply.
+class _DiscontinuedTag extends StatelessWidget {
+  const _DiscontinuedTag();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: AppTheme.statusWarn.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(100),
+        border: Border.all(color: AppTheme.statusWarn.withOpacity(0.35)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.history_rounded, size: 14, color: AppTheme.statusWarn),
+          const SizedBox(width: 6),
+          Text(
+            'Monitoring ended · read-only',
+            style: TextStyle(
+              color: AppTheme.statusWarn,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
       ),
     );
   }

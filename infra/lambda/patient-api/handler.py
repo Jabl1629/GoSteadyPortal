@@ -149,6 +149,10 @@ def _patient_row_view(p: dict[str, Any]) -> dict[str, Any]:
         "facilityId": p.get("facilityId"),
         "censusId": p.get("censusId"),
     }
+    # When status != active (the "Show discontinued" view), surface when it
+    # ended so the row can read "Discontinued <date>".
+    if p.get("dischargedAt"):
+        out["dischargedAt"] = p.get("dischargedAt")
     if is_currently_paused(p):
         pause = p.get("notificationsPaused") or {}
         out["notificationsPaused"] = {
@@ -380,6 +384,15 @@ def _action_me_patients(
     page_size = parse_page_size(_query_param(event, "pageSize"))
     start_key = decode_cursor(_query_param(event, "cursor"))
 
+    # Status slice: `?status=discontinued` lists the discharged set (ended
+    # monitoring, for the "Show discontinued" toggle); default is the active
+    # roster. Both ride the same by-census-status / by-client-status GSIs via
+    # the status_patientId prefix (active_ / discharged_).
+    status_q = (_query_param(event, "status") or "active").lower()
+    status_prefix = (
+        "discharged_" if status_q in ("discontinued", "discharged", "ended") else "active_"
+    )
+
     patients_out: list[dict[str, Any]] = []
     next_cursor: str | None = None
 
@@ -398,6 +411,7 @@ def _action_me_patients(
             limit=page_size,
             exclusive_start_key=start_key,
             facility_filter=plan["facilityIds"] or None,
+            status_prefix=status_prefix,
         )
         patients_out = res["items"]
         next_cursor = encode_cursor(res["last_evaluated_key"])
@@ -410,6 +424,7 @@ def _action_me_patients(
                 _patients,
                 census_id=cid,
                 limit=page_size,
+                status_prefix=status_prefix,
             )
             merged.extend(res["items"])
         # Pagination across multiple-census fan-out: not in v1; truncate

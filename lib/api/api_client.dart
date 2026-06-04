@@ -54,10 +54,12 @@ class ApiClient {
   Future<MePatientsResponse> getMyPatients({
     String? cursor,
     String? clientId,
+    String? status,
   }) async {
     final query = <String, String>{};
     if (cursor != null && cursor.isNotEmpty) query['cursor'] = cursor;
     if (clientId != null && clientId.isNotEmpty) query['clientId'] = clientId;
+    if (status != null && status.isNotEmpty) query['status'] = status;
     final body = await _get('/api/v1/me/patients', query: query);
     return MePatientsResponse.fromJson(body);
   }

@@ -45,6 +45,9 @@ class MePatientSummary {
   final String? censusName;
   final String? currentDeviceSerial;
   final DateTime? lastActivityAt;
+  // When monitoring ended (status != active) — drives the "Discontinued <date>"
+  // row in the Show-discontinued view.
+  final DateTime? dischargedAt;
   final int openAlertCount;
   // US-31: active-only; null when not currently paused. Server projects
   // the same shape as the detail view so client deserialization is
@@ -61,6 +64,7 @@ class MePatientSummary {
     this.censusName,
     this.currentDeviceSerial,
     this.lastActivityAt,
+    this.dischargedAt,
     required this.openAlertCount,
     this.notificationsPaused,
   });
@@ -77,6 +81,7 @@ class MePatientSummary {
       censusName: json['censusName'] as String?,
       currentDeviceSerial: json['currentDeviceSerial'] as String?,
       lastActivityAt: _parseTs(json['lastActivityAt']),
+      dischargedAt: _parseTs(json['dischargedAt']),
       openAlertCount: _parseInt(json['openAlertCount']) ?? 0,
       notificationsPaused:
           paused == null ? null : NotificationsPaused.fromJson(paused),

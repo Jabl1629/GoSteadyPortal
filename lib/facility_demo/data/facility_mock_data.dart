@@ -69,6 +69,12 @@ class FacilityMockData implements FacilityRepository {
         .toList(growable: false);
   }
 
+  @override
+  Future<List<DiscontinuedSummary>> discontinuedPatients() async {
+    // Demo has no discharged set — the toggle renders its empty state.
+    return const [];
+  }
+
   // ── Per-patient methods (async; demo wraps sync data in Future) ───────
 
   /// Lookup a single patient.

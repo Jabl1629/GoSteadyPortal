@@ -97,18 +97,20 @@ def query_patients_by_client(
     limit: int,
     exclusive_start_key: dict[str, Any] | None = None,
     facility_filter: list[str] | None = None,
+    status_prefix: str = "active_",
 ) -> dict[str, Any]:
     """
-    GSI `by-client-status` query — list active patients per client.
+    GSI `by-client-status` query — list patients per client by status.
 
     PK=clientId, SK=`status_patientId` (underscore-separated per 0B-rev).
-    Filters to status=active via SK begins_with("active_").
+    [status_prefix] selects the status slice via SK begins_with — `active_`
+    (default) for the live roster, `discharged_` for the discontinued view.
     Optional facility post-filter for facility_admin with explicit facilities.
     """
     kwargs: dict[str, Any] = {
         "IndexName": "by-client-status",
         "KeyConditionExpression": Key("clientId").eq(client_id)
-        & Key("status_patientId").begins_with("active_"),
+        & Key("status_patientId").begins_with(status_prefix),
         "Limit": limit,
     }
     if facility_filter:
@@ -128,16 +130,18 @@ def query_patients_by_census(
     census_id: str,
     limit: int,
     exclusive_start_key: dict[str, Any] | None = None,
+    status_prefix: str = "active_",
 ) -> dict[str, Any]:
     """
-    GSI `by-census-status` query — census roster (status=active only).
+    GSI `by-census-status` query — census roster by status.
 
-    PK=censusId, SK=`status_patientId`.
+    PK=censusId, SK=`status_patientId`. [status_prefix] selects the status
+    slice (`active_` default, `discharged_` for the discontinued view).
     """
     kwargs: dict[str, Any] = {
         "IndexName": "by-census-status",
         "KeyConditionExpression": Key("censusId").eq(census_id)
-        & Key("status_patientId").begins_with("active_"),
+        & Key("status_patientId").begins_with(status_prefix),
         "Limit": limit,
     }
     if exclusive_start_key:

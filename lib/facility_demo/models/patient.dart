@@ -49,3 +49,20 @@ class PatientSummary {
     required this.hasDataToday,
   });
 }
+
+/// A monitoring engagement that has ended (the person was discharged via
+/// "End Monitoring"). Lightweight — no live device/activity, just who + where
+/// + when it ended. Backs the read-only "Show discontinued" rows.
+class DiscontinuedSummary {
+  final String patientId;
+  final String displayName;
+  final String? censusName;
+  final DateTime? dischargedAt;
+
+  const DiscontinuedSummary({
+    required this.patientId,
+    required this.displayName,
+    this.censusName,
+    this.dischargedAt,
+  });
+}

@@ -87,6 +87,32 @@ class _PatientCensusViewState extends State<PatientCensusView> {
 
   PollingController? _polling;
 
+  // "Show discontinued" bottom-bar toggle (default off) — discharged / ended
+  // engagements, fetched on demand. `_discontinued == null` => not yet loaded.
+  bool _showDiscontinued = false;
+  bool _loadingDiscontinued = false;
+  List<DiscontinuedSummary>? _discontinued;
+
+  void _onToggleDiscontinued(bool v) {
+    setState(() => _showDiscontinued = v);
+    if (v && _discontinued == null && !_loadingDiscontinued) {
+      setState(() => _loadingDiscontinued = true);
+      widget.data.discontinuedPatients().then((list) {
+        if (!mounted) return;
+        setState(() {
+          _discontinued = list;
+          _loadingDiscontinued = false;
+        });
+      }, onError: (_) {
+        if (!mounted) return;
+        setState(() {
+          _discontinued = const [];
+          _loadingDiscontinued = false;
+        });
+      });
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -239,48 +265,68 @@ class _PatientCensusViewState extends State<PatientCensusView> {
     final filtered = _applyFilter(rows, widget.selection.filterMode);
     _applySort(filtered, widget.selection.sortMode);
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(10, 24, 10, 32),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _Header(
-            totalShown: filtered.length,
-            totalSelected: summaries.length,
-            selection: widget.selection,
-            data: widget.data,
-            onResidentCreated: _onResidentCreated,
-          ),
-          const SizedBox(height: 18),
-          if (filtered.isEmpty)
-            _EmptyState(filterMode: widget.selection.filterMode)
-          else if (widget.selection.viewMode == CensusViewMode.list)
-            PatientListView(
-              rows: filtered.map((r) {
-                final id = r.summary.patient.id;
-                final loaded = _loaded[id];
-                return PatientListRow(
-                  patient: r.summary.patient,
-                  unitDisplay:
-                      unitDisplayFor(widget.data, r.summary.patient.unitId),
-                  stats: loaded?.stats ?? _placeholderStats,
-                  activeNotifications: r.active,
-                  isLoading: loaded == null,
-                  onFirstVisible: () => _scheduleLoad(id),
-                );
-              }).toList(),
-              selectedPatientId: widget.selection.selectedPatientId,
-              onSelect: widget.selection.selectPatient,
-            )
-          else
-            _Grid(
-              rows: filtered,
-              data: widget.data,
-              selection: widget.selection,
-              onRowVisible: _scheduleLoad,
+    return Column(
+      children: [
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(10, 24, 10, 32),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _Header(
+                  totalShown: filtered.length,
+                  totalSelected: summaries.length,
+                  selection: widget.selection,
+                  data: widget.data,
+                  onResidentCreated: _onResidentCreated,
+                ),
+                const SizedBox(height: 18),
+                if (filtered.isEmpty)
+                  _EmptyState(filterMode: widget.selection.filterMode)
+                else if (widget.selection.viewMode == CensusViewMode.list)
+                  PatientListView(
+                    rows: filtered.map((r) {
+                      final id = r.summary.patient.id;
+                      final loaded = _loaded[id];
+                      return PatientListRow(
+                        patient: r.summary.patient,
+                        unitDisplay: unitDisplayFor(
+                            widget.data, r.summary.patient.unitId),
+                        stats: loaded?.stats ?? _placeholderStats,
+                        activeNotifications: r.active,
+                        isLoading: loaded == null,
+                        onFirstVisible: () => _scheduleLoad(id),
+                      );
+                    }).toList(),
+                    selectedPatientId: widget.selection.selectedPatientId,
+                    onSelect: widget.selection.selectPatient,
+                  )
+                else
+                  _Grid(
+                    rows: filtered,
+                    data: widget.data,
+                    selection: widget.selection,
+                    onRowVisible: _scheduleLoad,
+                  ),
+                if (_showDiscontinued) ...[
+                  const SizedBox(height: 28),
+                  _DiscontinuedSection(
+                    loading: _loadingDiscontinued,
+                    items: _discontinued ?? const [],
+                    onSelect: widget.selection.selectPatient,
+                  ),
+                ],
+              ],
             ),
-        ],
-      ),
+          ),
+        ),
+        _DiscontinuedBar(
+          value: _showDiscontinued,
+          loading: _loadingDiscontinued,
+          count: _discontinued?.length,
+          onChanged: _onToggleDiscontinued,
+        ),
+      ],
     );
   }
 
@@ -592,4 +638,200 @@ class _EmptyState extends StatelessWidget {
       ),
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// "Show discontinued" — read-only ended engagements
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Fixed footer with the "Show discontinued" toggle (default off).
+class _DiscontinuedBar extends StatelessWidget {
+  const _DiscontinuedBar({
+    required this.value,
+    required this.loading,
+    required this.count,
+    required this.onChanged,
+  });
+
+  final bool value;
+  final bool loading;
+  final int? count;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppTheme.cream,
+        border:
+            Border(top: BorderSide(color: AppTheme.border.withOpacity(0.6))),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+      child: Row(
+        children: [
+          Icon(Icons.history_rounded, size: 16, color: AppTheme.textSoft),
+          const SizedBox(width: 8),
+          const Text(
+            'Show discontinued',
+            style: TextStyle(
+              color: AppTheme.textDark,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (value && !loading && count != null) ...[
+            const SizedBox(width: 6),
+            Text(
+              '($count)',
+              style: const TextStyle(color: AppTheme.textSoft, fontSize: 13),
+            ),
+          ],
+          const Spacer(),
+          if (loading)
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          const SizedBox(width: 8),
+          Switch(
+            value: value,
+            onChanged: onChanged,
+            activeColor: AppTheme.sage,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Section shown above the bottom bar when "Show discontinued" is on.
+class _DiscontinuedSection extends StatelessWidget {
+  const _DiscontinuedSection({
+    required this.loading,
+    required this.items,
+    required this.onSelect,
+  });
+
+  final bool loading;
+  final List<DiscontinuedSummary> items;
+  final ValueChanged<String> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          child: Text(
+            'DISCONTINUED',
+            style: TextStyle(
+              color: AppTheme.textSoft.withOpacity(0.9),
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.0,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        if (loading)
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Center(
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          )
+        else if (items.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 12),
+            child: Text(
+              'Nothing has been discontinued in this scope.',
+              style: TextStyle(
+                color: AppTheme.textSoft.withOpacity(0.85),
+                fontSize: 13,
+              ),
+            ),
+          )
+        else
+          ...items.map(
+            (d) => _DiscontinuedRow(item: d, onTap: () => onSelect(d.patientId)),
+          ),
+      ],
+    );
+  }
+}
+
+/// One greyed, read-only discontinued row: name · unit · "Discontinued <date>".
+class _DiscontinuedRow extends StatelessWidget {
+  const _DiscontinuedRow({required this.item, required this.onTap});
+
+  final DiscontinuedSummary item;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final loc = item.censusName ?? '';
+    final ended = _fmtDate(item.dischargedAt);
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: AppTheme.border.withOpacity(0.4)),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.link_off_rounded,
+                  size: 16, color: AppTheme.textSoft.withOpacity(0.6)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  item.displayName,
+                  style: const TextStyle(
+                    color: AppTheme.textSoft,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              if (loc.isNotEmpty) ...[
+                Text(loc,
+                    style: TextStyle(
+                        color: AppTheme.textSoft.withOpacity(0.8),
+                        fontSize: 13)),
+                const SizedBox(width: 14),
+              ],
+              Text(
+                ended == null ? 'Discontinued' : 'Discontinued $ended',
+                style: TextStyle(
+                    color: AppTheme.textSoft.withOpacity(0.7), fontSize: 13),
+              ),
+              const SizedBox(width: 6),
+              Icon(Icons.chevron_right_rounded,
+                  size: 18, color: AppTheme.textSoft.withOpacity(0.4)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String? _fmtDate(DateTime? d) {
+  if (d == null) return null;
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  final local = d.toLocal();
+  return '${months[local.month - 1]} ${local.day}, ${local.year}';
 }

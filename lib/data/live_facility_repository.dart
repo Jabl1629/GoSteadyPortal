@@ -150,6 +150,22 @@ class LiveFacilityRepository implements FacilityRepository {
         .toList(growable: false);
   }
 
+  @override
+  Future<List<DiscontinuedSummary>> discontinuedPatients() async {
+    // `/me/patients?status=discontinued` — the discharged set, same GSI as the
+    // active roster (status_patientId begins_with "discharged_"). Fetched on
+    // demand; not part of the sign-in prime.
+    final page = await _api.getMyPatients(status: 'discontinued');
+    return page.patients
+        .map((p) => DiscontinuedSummary(
+              patientId: p.patientId,
+              displayName: p.displayName,
+              censusName: p.censusName,
+              dischargedAt: p.dischargedAt,
+            ))
+        .toList(growable: false);
+  }
+
   // ── Per-patient (async; cache + fetch on miss) ───────────────
 
   @override
