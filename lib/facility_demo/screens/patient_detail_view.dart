@@ -274,34 +274,32 @@ class _PatientView extends StatelessWidget {
                           data: data,
                           onCompleted: onRefresh,
                         ),
-              ),
-              if (patient.status == PatientStatus.discharged) ...[
-                const SizedBox(height: 10),
-                _DiscontinuedTag(),
-                const SizedBox(height: 14),
-                // Same-record resume: flips discharged→active under the same
-                // patientId (history preserved). On success onRefresh reloads
-                // the bundle → patient reads active → this CTA + the read-only
-                // chip clear and the settings gear returns.
-                _StartMonitoringAgainButton(
-                  onTap: () => ResumeMonitoringDialog.show(
-                    context,
-                    patient: patient,
-                    data: data,
-                    onCompleted: onRefresh,
+                // Actions laid out horizontally to the right of the unit/room
+                // line (wraps under it on narrow widths). Discontinued
+                // residents get the read-only chip + same-record resume CTA;
+                // everyone gets the read-only Monitoring history affordance.
+                // On success the resume's onRefresh reloads the bundle →
+                // patient reads active → chip + CTA clear, settings gear returns.
+                trailing: [
+                  if (patient.status == PatientStatus.discharged) ...[
+                    const _DiscontinuedTag(),
+                    _StartMonitoringAgainButton(
+                      onTap: () => ResumeMonitoringDialog.show(
+                        context,
+                        patient: patient,
+                        data: data,
+                        onCompleted: onRefresh,
+                      ),
+                    ),
+                  ],
+                  _MonitoringHistoryButton(
+                    onTap: () => MonitoringHistoryModal.show(
+                      context,
+                      patientId: patient.id,
+                      data: data,
+                    ),
                   ),
-                ),
-              ],
-              const SizedBox(height: 12),
-              // Monitoring-session history — available in both active and
-              // discontinued states (read-only). Shows the device timeline
-              // that resume turns multi-row.
-              _MonitoringHistoryButton(
-                onTap: () => MonitoringHistoryModal.show(
-                  context,
-                  patientId: patient.id,
-                  data: data,
-                ),
+                ],
               ),
               const SizedBox(height: 20),
               // 2B-FAC-W: pause banner appears whenever notifications
@@ -421,6 +419,7 @@ class _PatientHeader extends StatelessWidget {
     required this.unit,
     required this.room,
     required this.onSettingsTap,
+    this.trailing = const [],
     this.compact = false,
   });
 
@@ -429,6 +428,9 @@ class _PatientHeader extends StatelessWidget {
   final String room;
   // Null => read-only (discontinued): the settings gear is hidden.
   final VoidCallback? onSettingsTap;
+  // Action widgets (read-only chip / resume CTA / history link) laid out
+  // horizontally to the right of the unit/room line; wrap below it when narrow.
+  final List<Widget> trailing;
   final bool compact;
 
   @override
@@ -457,14 +459,25 @@ class _PatientHeader extends StatelessWidget {
             ],
           ],
         ),
-        const SizedBox(height: 4),
-        Text(
-          room.isEmpty ? unit : '$unit  ·  Room $room',
-          style: const TextStyle(
-            color: AppTheme.textSoft,
-            fontSize: 15,
-            fontWeight: FontWeight.w500,
-          ),
+        SizedBox(height: trailing.isEmpty ? 4 : 10),
+        // Unit/room on the left, action buttons flowing to its right. A Wrap
+        // (not a Row) so the actions drop below the unit/room line instead of
+        // overflowing on narrow detail panes / phones.
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 12,
+          runSpacing: 10,
+          children: [
+            Text(
+              room.isEmpty ? unit : '$unit  ·  Room $room',
+              style: const TextStyle(
+                color: AppTheme.textSoft,
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            ...trailing,
+          ],
         ),
       ],
     );
@@ -603,21 +616,21 @@ class _StartMonitoringAgainButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: FilledButton.icon(
-        onPressed: onTap,
-        icon: const Icon(Icons.restart_alt_rounded, size: 18),
-        label: const Text('Start Monitoring Again'),
-        style: FilledButton.styleFrom(
-          backgroundColor: AppTheme.sage,
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(100),
-          ),
-          textStyle: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+    return FilledButton.icon(
+      onPressed: onTap,
+      icon: const Icon(Icons.restart_alt_rounded, size: 18),
+      label: const Text('Start Monitoring Again'),
+      style: FilledButton.styleFrom(
+        backgroundColor: AppTheme.sage,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(100),
         ),
+        textStyle: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+        // Keep the button compact inside the header Wrap.
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
       ),
     );
   }
@@ -632,17 +645,16 @@ class _MonitoringHistoryButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: TextButton.icon(
-        onPressed: onTap,
-        icon: const Icon(Icons.history_rounded, size: 17),
-        label: const Text('Monitoring history'),
-        style: TextButton.styleFrom(
-          foregroundColor: AppTheme.sage,
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-        ),
+    return TextButton.icon(
+      onPressed: onTap,
+      icon: const Icon(Icons.history_rounded, size: 17),
+      label: const Text('Monitoring history'),
+      style: TextButton.styleFrom(
+        foregroundColor: AppTheme.sage,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
       ),
     );
   }
