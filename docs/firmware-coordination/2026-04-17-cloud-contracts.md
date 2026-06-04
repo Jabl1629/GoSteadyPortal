@@ -8654,3 +8654,54 @@ In the agreed order for the next work block:
 ---
 
 *Entry owner: Claude (portal session, 2026-06-03). First physical-device activation through the facility portal, end-to-end on the live site. 3 live-mode bugs fixed + deployed. D2C coordination follow-ups in C41.3. No firmware change.*
+
+---
+
+# §C42 — Device-lifecycle UX consolidation ("End Monitoring") + discharge-cascade wipe fix; full single-cap lifecycle validated (2026-06-04)
+
+Entry owner: Claude (portal session) | Trigger: product decision to collapse the overlapping "Discontinue Device" and "Discharge Resident" affordances (no EHR/EMR integration planned for a long time, so the device-vs-resident distinction was artificial). While testing the consolidation end-to-end on the live site, a discharge-cascade bug surfaced (cap never recycled). Both fixed + deployed; then the **entire device lifecycle** was validated on one physical cap. **Zero firmware change** — `GS0000000001` ran `0.15.1-wakewindow` unmodified.
+
+## C42.1 — UX consolidation: "End Monitoring"
+
+- **Removed "Discontinue Device"** (was: unassign the cap but keep the resident actively monitored, device-less — an anti-state that would trip `device_offline` alerts; "Replace Device" + "Pause Monitoring" already cover the real cases).
+- **Renamed "Discharge Resident" → "End Monitoring"** (label + form + toast only; the discharge plumbing is unchanged under the hood — `status=discharged` + cascade releases the cap). Resulting menu: **DEVICE** → Replace Device; **RESIDENT** → Edit / Pause Monitoring / End Monitoring.
+- **Dropped the discharge reason entirely** — "End Monitoring" is now just a confirm + optional notes, no reason picker (the prior `transferred/moved_home/hospital_admission/deceased/other` enum read as too clinical, and the user wanted "just end and move on"). Backend `reason` is now **optional free-text** (`patient-mgmt` `validate_discharge_reason` + handler; `VALID_DISCHARGE_REASONS` removed). Frontend `DischargeReason` enum removed; `dischargePatient` `reason` param made optional across `ApiClient` / `FacilityRepository` / live + mock impls.
+- Copy reflects the V1 re-monitoring model: *"removes them from the active census and releases the walker cap back to the available pool. Activity history is preserved — you can monitor them again later by re-adding them with a device."* (Same-record reactivation — bring a discharged resident back under one record with linked history — is a deferred follow-up; re-adding as a new resident is the V1 path and was validated below.)
+
+## C42.2 — Bug fixed: discharge-cascade never published the wipe
+
+The `discharge-cascade` Lambda (DDB Stream on Patients → `status=discharged`) **closed the assignment + flipped the device to `discontinued` + cleared `desired.activated_at`, but never queued the wipe** (`outstandingWipeCmds`, `desired.wipe_requested`) — unlike the device-api `end-assignment` endpoint. So **every cap released via discharge got stuck in `discontinued` and never auto-recycled to `ready_to_provision`** — directly contradicting the ARCHITECTURE §4 cascade design ("Each end-assignment fires a wipe cmd") and making the new "End Monitoring releases the cap to the available pool" UX copy false.
+
+**Fix (hotswap-deployed):** the cascade now mirrors the endpoint's AA-recycle write — generates a `wipe_id`, populates `outstandingWipeCmds` (two-step `if_not_exists` idiom) + `wipe_requested_at`, sets Shadow `desired.wipe_requested` + clears `desired.activated_at`, and emits `device.wipe_requested`. It deliberately does **not** publish the wipe cmd directly (the cascade Lambda has no `iot:Publish` grant, and the **§C24 connection-coordinator re-publishes `outstandingWipeCmds` on the cap's next CONNECTED event** — the designed reliable path; keeps the cascade hotswap-deployable with no IAM/CFN change).
+
+## C42.3 — Full single-cap lifecycle validated end-to-end (live site + real cap)
+
+One physical cap (`GS0000000001`, `0.15.1-wakewindow`) traversed the **entire** lifecycle through `dev.portal.gosteady.co`:
+
+```
+Pilot CapTest (pat_aad8e1c7…):  Add Resident+provision → activate (shake) → walk 42 steps/50 ft
+                                                → End Monitoring (no reason)
+GS0000000001:  cascade → discontinued + wipe queued → (shake) wipe-ack → recycle → ready_to_provision
+Rosa Delgado (pat_8ce10709…):  Add Resident+provision the recycled cap → activate (shake) → walk 16 steps/20 ft
+```
+
+- End Monitoring on Pilot CapTest: `status=discharged`, **`dischargeReason` absent** (no-reason flow), device → `discontinued`, dropped from `/me/patients`. ✓
+- Recovery note: Pilot CapTest was discharged moments *before* the cascade fix deployed, so its cap had no wipe queued; the corrected wipe-recycle state was applied to `GS0000000001` by hand (mirroring the fixed cascade) and a shake completed it — `reported.wipe_complete` matched, `outstandingWipeCmds` cleared, **`discontinued → ready_to_provision`** at battery 94.9%. This validated the cascade-fix *mechanism* on real hardware.
+- Rosa Delgado: the recycled cap re-provisioned cleanly (`provisioned`, new `act_7b849296…`, Shadow `desired.activated_at` set), activated on a shake (`active_monitoring`, cmd acked), and her walk rendered (`94% · Good · 1 min ago`, 16 steps) — assignment history preserved (Pilot CapTest's ended assignment + Rosa's active one both on the device). ✓
+
+Also: the **fixed `deploy-portal.sh` ran for the first time** (portal redeploy for the consolidation) and worked end-to-end — resolved the API URL (region fix) and protected `/d2c/` (`--exclude "d2c/*"`; still 28 objects).
+
+## C42.4 — Follow-ups
+
+- **Minor UI polish:** a discharged / device-less patient's detail renders the "no device" `DeviceHealth` placeholder as `0% · Weak · 20608d ago` (epoch-0 lastSeen) instead of a clean "No device assigned" state. Only reachable on a stale open detail of a just-discharged resident (they drop from the census). Low priority.
+- **Deferred feature:** same-record "resume monitoring" for an ended resident (history linked under one record), vs. the V1 re-add-as-new path. Open when a pilot needs it.
+- Carry-over from §C41.3 (D2C coordination) still open: `d2c-claim` `status_patientId` `active#`-vs-`active_` format; shared `_shared/patient_row.build_patient_item()` helper; separate facility/D2C hosting buckets.
+
+## C42.5 — State after this entry
+
+- `GS0000000001`: **`active_monitoring`** for Rosa Delgado (`pat_8ce10709…`, Bench / Rm 202), `0.15.1-wakewindow`. Pilot CapTest (`pat_aad8e1c7…`) = `discharged` (history preserved).
+- Deployed to dev: `patient-mgmt` (reason-optional) + `discharge-cascade` (wipe) hotswaps; portal rebuilt + redeployed (End Monitoring UX).
+
+---
+
+*Entry owner: Claude (portal session, 2026-06-04). "End Monitoring" consolidation (no reason, no Discontinue Device) + discharge-cascade wipe fix; full provision→activate→walk→end→wipe→recycle→re-provision→re-activate→walk loop validated on one physical cap. No firmware change.*

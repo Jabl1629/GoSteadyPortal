@@ -138,14 +138,16 @@ abstract class FacilityRepository {
     String? room,
   });
 
-  /// `POST /patients/{id}/discharge` — flip Patient.status to
-  /// discharged; the discharge-cascade Lambda fires async via DDB
-  /// Streams. Returns the cascade snapshot at response-time. Live
-  /// impl refreshes `/me/patients` so the now-discharged row drops
-  /// out of the active census.
+  /// "End Monitoring" — `POST /patients/{id}/discharge` flips
+  /// Patient.status to discharged (the discharge-cascade Lambda fires
+  /// async via DDB Streams, ending device assignments + recycling the
+  /// cap). Returns the cascade snapshot. Live impl refreshes
+  /// `/me/patients` so the now-ended row drops out of the active
+  /// census. [reason] is optional (the structured reason was dropped
+  /// 2026-06-03 — ending monitoring needs no reason).
   Future<api.DischargeResponse> dischargePatient({
     required String patientId,
-    required String reason,
+    String? reason,
     String? notes,
   });
 
@@ -186,11 +188,4 @@ abstract class FacilityRepository {
     required String newSerial,
   });
 
-  /// Unassign a patient's walker cap without provisioning a
-  /// replacement. Live impl calls
-  /// `POST /devices/{serial}/end-assignment` and evicts patient detail.
-  Future<api.DeviceResponse> discontinueDevice({
-    required String patientId,
-    required String serial,
-  });
 }

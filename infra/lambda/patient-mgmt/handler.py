@@ -870,10 +870,13 @@ def _action_discharge_patient(
         "dischargeReason": None,
         "dischargeNotes": None,
     }
+    # Reason is optional (the structured discharge reason was dropped 2026-06-03
+    # — "End Monitoring" needs no reason). May be None.
+    reason = body.get("reason")
     after = {
         "status": "discharged",
         "dischargedAt": now_iso,
-        "dischargeReason": body["reason"],
+        "dischargeReason": reason,
         "dischargeNotes": body["notes"],
     }
 
@@ -885,7 +888,6 @@ def _action_discharge_patient(
         # `active_<id>` and lingers in /me/patients + the census after discharge.
         "status_patientId = :spi_discharged",
         "dischargedAt = :now",
-        "dischargeReason = :reason",
         "dischargedBy = :actor",
     ]
     attr_names = {"#status": "status"}
@@ -894,9 +896,11 @@ def _action_discharge_patient(
         ":spi_discharged": f"discharged_{patient_id}",
         ":active": "active",
         ":now": now_iso,
-        ":reason": body["reason"],
         ":actor": claims["userId"],
     }
+    if reason:
+        update_expr_parts.append("dischargeReason = :reason")
+        attr_values[":reason"] = reason
     if body["notes"]:
         update_expr_parts.append("dischargeNotes = :notes")
         attr_values[":notes"] = body["notes"]
@@ -943,7 +947,7 @@ def _action_discharge_patient(
             "patientId": patient_id,
             "status": "discharged",
             "dischargedAt": now_iso,
-            "dischargeReason": body["reason"],
+            "dischargeReason": reason,
             "dischargeNotes": body["notes"],
         },
         "cascade": {

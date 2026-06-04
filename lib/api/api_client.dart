@@ -202,14 +202,14 @@ class ApiClient {
 
   Future<DischargeResponse> dischargePatient(
     String patientId, {
-    required String reason,
+    String? reason,
     String? notes,
   }) async {
     final body = await _request(
       'POST',
       '/api/v1/patients/$patientId/discharge',
       body: {
-        'reason': reason,
+        if (reason != null && reason.isNotEmpty) 'reason': reason,
         if (notes != null && notes.isNotEmpty) 'notes': notes,
       },
     );

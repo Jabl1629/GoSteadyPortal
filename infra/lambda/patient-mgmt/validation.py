@@ -42,9 +42,9 @@ VALID_PAUSE_REASONS = frozenset(
     {"in_hospital", "at_rehab", "family_visit_offsite", "on_vacation", "other"}
 )
 
-VALID_DISCHARGE_REASONS = frozenset(
-    {"transferred", "moved_home", "hospital_admission", "deceased", "other"}
-)
+# NOTE: the structured discharge-reason enum was dropped 2026-06-03 — "End
+# Monitoring" (the renamed discharge action) needs no reason. `reason` is now an
+# optional free-text field (see validate_discharge_reason).
 
 
 # ── Field validators ──────────────────────────────────────────────────
@@ -201,20 +201,33 @@ def validate_pause_reason(value: Any) -> str:
     return value
 
 
-def validate_discharge_reason(value: Any) -> str:
-    """Discharge reason — must be in VALID_DISCHARGE_REASONS."""
-    if not isinstance(value, str) or value not in VALID_DISCHARGE_REASONS:
+def validate_discharge_reason(value: Any) -> Optional[str]:
+    """
+    Optional free-text 'end monitoring' reason. The structured enum was dropped
+    2026-06-03 (ending monitoring needs no reason); this stays only to accept an
+    optional note-like string if a client ever sends one, and to keep old
+    clients that still POST a reason from 400-ing.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
         raise ApiError(
             code="INVALID_REQUEST",
-            message="reason must be one of the allowed discharge-reason values",
+            message="reason must be a string (or omitted)",
             status=400,
-            details={
-                "field": "reason",
-                "allowed": sorted(VALID_DISCHARGE_REASONS),
-                "got": value,
-            },
+            details={"field": "reason", "got": type(value).__name__},
         )
-    return value
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if len(stripped) > DISCHARGE_NOTES_MAX_LEN:
+        raise ApiError(
+            code="INVALID_REQUEST",
+            message=f"reason exceeds {DISCHARGE_NOTES_MAX_LEN} characters",
+            status=400,
+            details={"field": "reason"},
+        )
+    return stripped
 
 
 def validate_discharge_notes(value: Any) -> Optional[str]:

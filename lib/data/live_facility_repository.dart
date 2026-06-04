@@ -490,7 +490,7 @@ class LiveFacilityRepository implements FacilityRepository {
   @override
   Future<DischargeResponse> dischargePatient({
     required String patientId,
-    required String reason,
+    String? reason,
     String? notes,
   }) async {
     final resp = await _api.dischargePatient(
@@ -555,19 +555,6 @@ class LiveFacilityRepository implements FacilityRepository {
       await _api.endAssignment(currentSerial);
     }
     final resp = await _api.provisionDevice(newSerial, patientId);
-    _patientDetailCache.evict(patientId);
-    try {
-      await refreshCensus();
-    } catch (_) {/* non-fatal */}
-    return resp;
-  }
-
-  @override
-  Future<DeviceResponse> discontinueDevice({
-    required String patientId,
-    required String serial,
-  }) async {
-    final resp = await _api.endAssignment(serial);
     _patientDetailCache.evict(patientId);
     try {
       await refreshCensus();

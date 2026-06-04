@@ -744,29 +744,6 @@ enum PauseReason {
   }
 }
 
-/// Discharge reasons per 2A-UM-P L5 enum.
-enum DischargeReason {
-  transferred('transferred'),
-  movedHome('moved_home'),
-  hospitalAdmission('hospital_admission'),
-  deceased('deceased'),
-  other('other');
-
-  final String wireValue;
-  const DischargeReason(this.wireValue);
-
-  String get label {
-    switch (this) {
-      case DischargeReason.transferred:
-        return 'Transferred';
-      case DischargeReason.movedHome:
-        return 'Moved home';
-      case DischargeReason.hospitalAdmission:
-        return 'Hospital admission';
-      case DischargeReason.deceased:
-        return 'Deceased';
-      case DischargeReason.other:
-        return 'Other';
-    }
-  }
-}
+// DischargeReason enum removed 2026-06-03 — "End Monitoring" (the renamed
+// discharge action) collects no reason. The backend still accepts an optional
+// free-text `reason` if one is ever sent.

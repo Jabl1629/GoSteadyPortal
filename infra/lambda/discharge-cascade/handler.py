@@ -26,12 +26,16 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
 
-from _shared.audit_catalog import AUDIT_DEVICE_ASSIGNMENT_ENDED
+from _shared.audit_catalog import (
+    AUDIT_DEVICE_ASSIGNMENT_ENDED,
+    AUDIT_DEVICE_WIPE_REQUESTED,
+)
 from _shared.observability import emit_audit, get_logger
 
 
@@ -53,15 +57,22 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _clear_shadow_activated_at(serial: str) -> None:
-    """DL14 invariant — clear desired.activated_at on every transition out of {provisioned, active_monitoring}."""
+def _set_shadow_wipe(serial: str, wipe_id: str) -> None:
+    """
+    DL14 + DL15 — clear desired.activated_at AND set desired.wipe_requested in a
+    single Shadow call (mirrors the device-api end-assignment endpoint). The cap
+    reads desired.wipe_requested on its next connect, wipes, and acks → cloud
+    auto-recycles discontinued → ready_to_provision.
+    """
     try:
         iot_data.update_thing_shadow(
             thingName=serial,
-            payload=json.dumps({"state": {"desired": {"activated_at": None}}}).encode(),
+            payload=json.dumps(
+                {"state": {"desired": {"activated_at": None, "wipe_requested": wipe_id}}}
+            ).encode(),
         )
     except ClientError:
-        logger.exception("shadow_clear_failed", extra={"serial": serial})
+        logger.exception("shadow_wipe_set_failed", extra={"serial": serial})
 
 
 def _cascade_one(patient_id: str, patient_client_id: str | None) -> int:
@@ -121,30 +132,71 @@ def _cascade_one(patient_id: str, patient_client_id: str | None) -> int:
             logger.exception("assignment_close_failed", extra={"serial": serial})
             continue
 
-        # Transition device → discontinued
+        # Transition device → discontinued AND queue the wipe so the cap
+        # auto-recycles to ready_to_provision on ack. Mirrors the device-api
+        # end-assignment endpoint (AA-recycle, coord §C20-C24): this cascade
+        # previously did the discontinue but SKIPPED the wipe, leaving every
+        # discharged patient's cap stuck in `discontinued` forever (never
+        # re-provisionable). Fixed 2026-06-04 (coord §C42) — also what makes
+        # the "End Monitoring releases the cap to the available pool" UX honest.
+        wipe_id = f"wipe_{uuid.uuid4()}"
         try:
+            # Step 1: status + ensure outstandingWipeCmds map exists (two-step
+            # idiom: DDB can't if_not_exists a map AND write a key in one expr).
             _devices.update_item(
                 Key={"serialNumber": serial},
-                UpdateExpression="SET #status = :d, lastTransitionAt = :now REMOVE currentAssignmentSk",
+                UpdateExpression=(
+                    "SET #status = :d, lastTransitionAt = :now, "
+                    "wipe_requested_at = :now, "
+                    "outstandingWipeCmds = if_not_exists(outstandingWipeCmds, :empty) "
+                    "REMOVE currentAssignmentSk"
+                ),
                 ExpressionAttributeNames={"#status": "status"},
-                ExpressionAttributeValues={":d": "discontinued", ":now": now_iso},
+                ExpressionAttributeValues={":d": "discontinued", ":now": now_iso, ":empty": {}},
+            )
+            # Step 2: write the wipe_id into the map.
+            _devices.update_item(
+                Key={"serialNumber": serial},
+                UpdateExpression="SET outstandingWipeCmds.#cid = :now",
+                ExpressionAttributeNames={"#cid": wipe_id},
+                ExpressionAttributeValues={":now": now_iso},
             )
         except ClientError:
             logger.exception("device_status_update_failed", extra={"serial": serial})
             continue
 
-        # DL14 invariant
-        _clear_shadow_activated_at(serial)
+        # DL14 + DL15: clear desired.activated_at + set desired.wipe_requested.
+        _set_shadow_wipe(serial, wipe_id)
 
-        # Emit audit
+        # Delivery: we deliberately do NOT publish the wipe cmd directly here.
+        # Unlike the device-api end-assignment endpoint (which has iot:Publish
+        # and the user may be watching for immediacy), this cascade runs async
+        # off a DDB Stream against a cap that's almost always asleep (PSM). The
+        # §C24 connection-coordinator re-publishes any outstandingWipeCmds on the
+        # cap's next CONNECTED event — that's the designed reliable path — so
+        # populating the map + Shadow above is sufficient and keeps this Lambda
+        # free of an iot:Publish grant (hotswap-deployable).
+
+        # Emit audit: assignment ended + wipe requested.
+        _subject = {
+            "serialNumber": serial,
+            "patientId": patient_id,
+            "clientId": assignment.get("clientId") or patient_client_id,
+        }
         emit_audit(
             event=AUDIT_DEVICE_ASSIGNMENT_ENDED,
             actor={"system": "discharge-cascade"},
-            subject={"serialNumber": serial, "patientId": patient_id,
-                     "clientId": assignment.get("clientId") or patient_client_id},
+            subject=_subject,
             action="update",
             extra={"reason": "patient_discharged", "previousState": current_state,
                    "assignmentSk": assignment["assignedAt"]},
+        )
+        emit_audit(
+            event=AUDIT_DEVICE_WIPE_REQUESTED,
+            actor={"system": "discharge-cascade"},
+            subject=_subject,
+            action="create",
+            extra={"wipe_id": wipe_id, "reason": "patient_discharged"},
         )
         ended += 1
 

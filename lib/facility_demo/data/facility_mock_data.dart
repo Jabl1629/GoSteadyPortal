@@ -302,7 +302,7 @@ class FacilityMockData implements FacilityRepository {
   @override
   Future<api.DischargeResponse> dischargePatient({
     required String patientId,
-    required String reason,
+    String? reason,
     String? notes,
   }) async {
     return api.DischargeResponse(
@@ -366,17 +366,6 @@ class FacilityMockData implements FacilityRepository {
     return api.DeviceResponse(
       serialNumber: newSerial,
       status: 'provisioned',
-    );
-  }
-
-  @override
-  Future<api.DeviceResponse> discontinueDevice({
-    required String patientId,
-    required String serial,
-  }) async {
-    return api.DeviceResponse(
-      serialNumber: serial,
-      status: 'discontinued',
     );
   }
 

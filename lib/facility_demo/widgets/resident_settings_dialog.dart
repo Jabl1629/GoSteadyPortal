@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../api/api_exception.dart';
-import '../../api/api_models.dart' show DischargeReason, PauseReason;
+import '../../api/api_models.dart' show PauseReason;
 import '../../theme/app_theme.dart';
 import '../../data/facility_repository.dart';
 import '../models/patient.dart';
@@ -56,9 +56,10 @@ class ResidentSettingsDialog extends StatefulWidget {
 enum _View {
   menu,
   replaceDevice,
-  discontinueDevice,
   editInfo,
   pauseMonitoring,
+  // "End Monitoring" in the UI — implemented as a patient discharge under the
+  // hood (status=discharged + cascade releases the device).
   dischargeResident,
 }
 
@@ -69,19 +70,6 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
   void _back() => _goTo(_View.menu);
 
   void _close() => Navigator.of(context).pop();
-
-  void _toastAndClose(String message) {
-    final messenger = ScaffoldMessenger.of(context);
-    Navigator.of(context).pop();
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(message),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: AppTheme.sage,
-        duration: const Duration(seconds: 3),
-      ),
-    );
-  }
 
   /// Runs an async write op, then closes the dialog and toasts. On
   /// error, closes + toasts the error. Captures the messenger before
@@ -171,30 +159,6 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
             ),
           ),
         );
-      case _View.discontinueDevice:
-        return _DiscontinueDeviceConfirm(
-          patient: widget.patient,
-          onBack: _back,
-          onClose: _close,
-          onConfirm: () {
-            final serial = widget.patient.deviceSerial;
-            if (serial == null || serial.isEmpty) {
-              // No assigned device — surface as a no-op toast rather than
-              // bouncing a 4xx off the server.
-              _toastAndClose(
-                'No device assigned to ${widget.patient.displayName}.',
-              );
-              return;
-            }
-            _runWrite(
-              'Device discontinued for ${widget.patient.displayName}.',
-              () => widget.data.discontinueDevice(
-                patientId: widget.patient.id,
-                serial: serial,
-              ),
-            );
-          },
-        );
       case _View.editInfo:
         return _EditInfoForm(
           patient: widget.patient,
@@ -229,12 +193,11 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
           patient: widget.patient,
           onBack: _back,
           onClose: _close,
-          onConfirm: (reason, notes) => _runWrite(
-            '${widget.patient.displayName} discharged. '
+          onConfirm: (notes) => _runWrite(
+            'Monitoring ended for ${widget.patient.displayName}. '
             'Activity history preserved.',
             () => widget.data.dischargePatient(
               patientId: widget.patient.id,
-              reason: reason.wireValue,
               notes: notes,
             ),
           ),
@@ -324,13 +287,6 @@ class _MenuView extends StatelessWidget {
           subtitle: 'Swap in a new walker cap',
           onTap: () => onSelect(_View.replaceDevice),
         ),
-        _MenuRow(
-          icon: Icons.power_settings_new_rounded,
-          label: 'Discontinue Device',
-          subtitle: 'Unassign without discharging',
-          destructive: true,
-          onTap: () => onSelect(_View.discontinueDevice),
-        ),
         const SizedBox(height: 18),
         const _SectionLabel('Resident'),
         const SizedBox(height: 4),
@@ -348,8 +304,8 @@ class _MenuView extends StatelessWidget {
         ),
         _MenuRow(
           icon: Icons.logout_rounded,
-          label: 'Discharge Resident',
-          subtitle: 'End monitoring; preserves history',
+          label: 'End Monitoring',
+          subtitle: 'Releases the device; preserves history',
           destructive: true,
           onTap: () => onSelect(_View.dischargeResident),
         ),
@@ -833,62 +789,6 @@ class _ReplaceDeviceFormState extends State<_ReplaceDeviceForm> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Discontinue Device
-// ─────────────────────────────────────────────────────────────────────────
-
-class _DiscontinueDeviceConfirm extends StatelessWidget {
-  const _DiscontinueDeviceConfirm({
-    required this.patient,
-    required this.onBack,
-    required this.onClose,
-    required this.onConfirm,
-  });
-
-  final Patient patient;
-  final VoidCallback onBack;
-  final VoidCallback onClose;
-  final VoidCallback onConfirm;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SubViewHeader(
-          icon: Icons.power_settings_new_rounded,
-          iconColor: AppTheme.statusAlert,
-          title: 'Discontinue Device',
-          subtitle: 'Unassign ${patient.displayName}\'s walker cap.',
-          onBack: onBack,
-          onClose: onClose,
-        ),
-        const SizedBox(height: 16),
-        _WarningBox(
-          text:
-              'This will stop activity tracking and alerts from the device. '
-              '${patient.displayName}\'s historical activity is preserved. '
-              'You can assign a new device any time.',
-        ),
-        const SizedBox(height: 16),
-        _CurrentValueChip(
-          label: 'Currently assigned',
-          value: patient.deviceSerial ?? '—',
-        ),
-        const SizedBox(height: 24),
-        _DialogActions(
-          onCancel: onBack,
-          cancelLabel: 'Cancel',
-          actionLabel: 'Discontinue',
-          onAction: onConfirm,
-          destructive: true,
-        ),
-      ],
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
 // Edit Resident Info
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -1114,16 +1014,15 @@ class _DischargeForm extends StatefulWidget {
   final Patient patient;
   final VoidCallback onBack;
   final VoidCallback onClose;
-  final void Function(DischargeReason reason, String? notes) onConfirm;
+  // "End Monitoring" takes no reason — just optional free-text notes.
+  final void Function(String? notes) onConfirm;
 
   @override
   State<_DischargeForm> createState() => _DischargeFormState();
 }
 
 class _DischargeFormState extends State<_DischargeForm> {
-  final _formKey = GlobalKey<FormState>();
   final _notes = TextEditingController();
-  DischargeReason? _reason;
 
   @override
   void dispose() {
@@ -1132,64 +1031,49 @@ class _DischargeFormState extends State<_DischargeForm> {
   }
 
   void _submit() {
-    if (!_formKey.currentState!.validate()) return;
-    if (_reason == null) return;
     final notes = _notes.text.trim();
-    widget.onConfirm(_reason!, notes.isEmpty ? null : notes);
+    widget.onConfirm(notes.isEmpty ? null : notes);
   }
 
   @override
   Widget build(BuildContext context) {
-    return Form(
-      key: _formKey,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _SubViewHeader(
-            icon: Icons.logout_rounded,
-            iconColor: AppTheme.statusAlert,
-            title: 'Discharge Resident',
-            subtitle:
-                'End monitoring for ${widget.patient.displayName}.',
-            onBack: widget.onBack,
-            onClose: widget.onClose,
-          ),
-          const SizedBox(height: 16),
-          _WarningBox(
-            text:
-                'This archives ${widget.patient.displayName} from the active '
-                'census and stops all monitoring. Activity history is preserved '
-                'and remains exportable. To re-admit, contact support.',
-          ),
-          const SizedBox(height: 16),
-          LabeledDropdown<DischargeReason>(
-            label: 'Reason for discharge',
-            hint: 'Select reason',
-            value: _reason,
-            options: DischargeReason.values,
-            optionLabel: (r) => r.label,
-            onChanged: (r) => setState(() => _reason = r),
-            validator: (v) => v == null ? 'Required' : null,
-          ),
-          const SizedBox(height: 14),
-          LabeledField(
-            label: 'Notes (optional)',
-            controller: _notes,
-            hint: 'Any additional context for the record',
-            maxLines: 3,
-            textCapitalization: TextCapitalization.sentences,
-          ),
-          const SizedBox(height: 24),
-          _DialogActions(
-            onCancel: widget.onBack,
-            cancelLabel: 'Cancel',
-            actionLabel: 'Discharge Resident',
-            onAction: _submit,
-            destructive: true,
-          ),
-        ],
-      ),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SubViewHeader(
+          icon: Icons.logout_rounded,
+          iconColor: AppTheme.statusAlert,
+          title: 'End Monitoring',
+          subtitle: 'Stop monitoring ${widget.patient.displayName}.',
+          onBack: widget.onBack,
+          onClose: widget.onClose,
+        ),
+        const SizedBox(height: 16),
+        _WarningBox(
+          text:
+              'This removes ${widget.patient.displayName} from the active '
+              'census and releases the walker cap back to the available pool. '
+              'Activity history is preserved — you can monitor them again '
+              'later by re-adding them with a device.',
+        ),
+        const SizedBox(height: 16),
+        LabeledField(
+          label: 'Notes (optional)',
+          controller: _notes,
+          hint: 'Any context for the record',
+          maxLines: 3,
+          textCapitalization: TextCapitalization.sentences,
+        ),
+        const SizedBox(height: 24),
+        _DialogActions(
+          onCancel: widget.onBack,
+          cancelLabel: 'Cancel',
+          actionLabel: 'End Monitoring',
+          onAction: _submit,
+          destructive: true,
+        ),
+      ],
     );
   }
 }
