@@ -8777,6 +8777,22 @@ A "monitoring session" was **already** a `DeviceAssignments` row (`validFrom`=st
 
 **Discharge-cascade vs immediate-resume race.** The discharge cascade is async (DDB stream) and ends **all** active assignments it sees at run time (~1-2s after discharge). If a resume fires *within that window*, the cascade can end the freshly-provisioned new device too. Surfaced in the smoke (back-to-back discharge→resume) and handled there by waiting for the cascade to settle before resuming — which is exactly real usage (a caregiver reaches "Start Monitoring Again" seconds-to-minutes later, long after the cascade). Practically unreachable with a human in the loop; a durable guard would scope the cascade to assignments active as-of the discharge timestamp. Filed for a future device-side pass.
 
+## C44.5 — Full single-cap lifecycle re-validated on real hardware (`GS0000000001`, live)
+
+Ran the **entire** end→wipe→recycle→resume→re-activate→walk cycle on the physical cap through `dev.portal.gosteady.co`, on the same record (Rosa Delgado, `pat_8ce10709…`), zero firmware change (`0.15.1-wakewindow`):
+
+1. **End Monitoring (Rosa)** → cascade: Rosa `discharged`, GS0000000001 → `discontinued`, wipe `wipe_0224522b` queued + Shadow `desired.wipe_requested`.
+2. **Shake** → coordinator (§C24) re-published the wipe on connect (17:53:01) → cap wiped + **blue pre-activation LED** → ack → cloud auto-recycled → `ready_to_provision`. ✓ (operator validated blue)
+3. **Start Monitoring Again (Rosa, GS0000000001)** via the resume dialog → Rosa `active` (same `patientId`), GS0000000001 re-provisioned + activate `act_62efdc4f` queued + Shadow `desired.activated_at`.
+4. **Re-activate** → cap exited pre-activation, `device.activated` + `device.first_heartbeat` → `active_monitoring`, blue LED off. ✓
+5. **Walk** → activity uplink to Rosa: **16 steps / 39.42 ft / outdoor**. Rosa now has **6 sessions under one record**; the Monitoring-history modal shows her two GS0000000001 periods (resumed `Ongoing` + original `14h 26m`, ended at End-Monitoring).
+
+**Operational finding (device-side, worth a runbook note): post-wipe re-activation of the *same physical cap* required a REBOOT, not a shake.** After step 2 the cap acked the wipe at 17:53:01 and disconnected; the resume queued `act_62efdc4f` at 17:54:47 (after that connect). Repeated **shakes did not produce a new connect** (`boot_count` stuck at 7, no coordinator events, `reported.last_cmd_id` stuck on the old cmd) — the post-wipe pre-activation wake/motion-connect on `0.15.1-wakewindow` is gated/rate-limited. A **power-cycle** (`boot_count` 7→8) forced a fresh connect within seconds → coordinator delivered `act_62efdc4f` → activated. **Cloud was correct throughout** (cmd properly queued in `outstandingActivationCmds` + Shadow `desired`, within the 24h window); the gap was purely the cap not reconnecting on motion. Runbook: when resuming onto the just-wiped same cap, **reboot it** (don't rely on a shake) to drain the queued activate cmd. Possible firmware follow-up: allow a motion-connect shortly after a wipe-recycle so a shake suffices.
+
+## C44.6 — UX: detail actions laid out horizontally
+
+The read-only chip + "Start Monitoring Again" CTA + "Monitoring history" link were moved from a vertical stack below the header into a `Wrap` beside the unit/room line (horizontal on wide panes, wrapping below on narrow). Active residents show just the history link; discontinued show all three. Verified live for both states.
+
 ---
 
-*Entry owner: Claude (portal session, 2026-06-04). Same-record resume + monitoring-history modal + hardened `GET /patients/{id}/devices`; 13/13 smoke + live Chrome verified; 87/87 validation (incl. a pre-existing red-test fix). No firmware change.*
+*Entry owner: Claude (portal session, 2026-06-04). Same-record resume + monitoring-history modal + hardened `GET /patients/{id}/devices`; 13/13 smoke + 87/87 validation (incl. a pre-existing red-test fix); **full end→wipe→recycle→resume→re-activate→walk cycle re-validated on the physical `GS0000000001` (C44.5)** + horizontal action layout (C44.6). No firmware change. Device-side finding: reboot (not shake) needed to re-activate the same cap immediately post-wipe.*
