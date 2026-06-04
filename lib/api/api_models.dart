@@ -752,3 +752,43 @@ enum PauseReason {
 // DischargeReason enum removed 2026-06-03 — "End Monitoring" (the renamed
 // discharge action) collects no reason. The backend still accepts an optional
 // free-text `reason` if one is ever sent.
+
+// ── /patients/{id}/devices — monitoring-session history ────────────
+
+/// One monitoring period from `GET /api/v1/patients/{id}/devices` — a
+/// projected DeviceAssignments row (device-api `_assignment_view`). Each row
+/// is the device + when monitoring started/ended ([endedAt] null = ongoing).
+/// Backs the patient-detail "Monitoring history" modal.
+class MonitoringSession {
+  final String serialNumber;
+  final DateTime? startedAt;
+  final DateTime? endedAt; // null = currently ongoing
+  final bool ongoing;
+  final int? durationSeconds; // null when ongoing / unparseable
+  final String? facilityId;
+  final String? censusId;
+
+  const MonitoringSession({
+    required this.serialNumber,
+    required this.startedAt,
+    required this.endedAt,
+    required this.ongoing,
+    this.durationSeconds,
+    this.facilityId,
+    this.censusId,
+  });
+
+  factory MonitoringSession.fromJson(Map<String, dynamic> json) {
+    final ended = _parseTs(json['endedAt']);
+    return MonitoringSession(
+      serialNumber: (json['serialNumber'] as String?) ?? '',
+      startedAt: _parseTs(json['startedAt']),
+      endedAt: ended,
+      // Trust the server's `ongoing` flag; fall back to endedAt == null.
+      ongoing: (json['ongoing'] as bool?) ?? (ended == null),
+      durationSeconds: _parseInt(json['durationSeconds']),
+      facilityId: json['facilityId'] as String?,
+      censusId: json['censusId'] as String?,
+    );
+  }
+}

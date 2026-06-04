@@ -158,6 +158,23 @@ abstract class FacilityRepository {
     String? notes,
   });
 
+  /// "Start Monitoring Again" — `POST /patients/{id}/resume` flips a
+  /// discontinued resident back to active under the **same record** (history
+  /// preserved) and atomically re-provisions [deviceSerial]. Returns the
+  /// resumed patient detail; live impl evicts the per-patient caches and
+  /// refreshes `/me/patients` so the resident reappears in the active census.
+  Future<api.PatientDetailResponse> resumeMonitoring({
+    required String patientId,
+    required String censusId,
+    required String room,
+    required String deviceSerial,
+  });
+
+  /// Monitoring-session history — every device this patient was monitored
+  /// with, most-recent-first (`GET /patients/{id}/devices`). Backs the
+  /// "Monitoring history" modal. Fetched on demand. Demo impl synthesizes.
+  Future<List<api.MonitoringSession>> monitoringHistory(String patientId);
+
   /// `POST /patients/{id}/notifications/pause` — pause for [days]
   /// (∈ [1,90]). Live impl refreshes the patient detail cache so
   /// the Pause Banner renders immediately.

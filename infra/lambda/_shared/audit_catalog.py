@@ -68,6 +68,8 @@ AUDIT_PATIENT_CREATED = "patient.created"  # POST /patients (atomic create + opt
 AUDIT_PATIENT_CREATE_ROLLBACK = "patient.create_rollback"  # Patient row deleted after downstream provision failed
 AUDIT_PATIENT_UPDATE = "patient.update"  # PATCH /patients/{id} — name / room / cross-facility transfer
 AUDIT_PATIENT_DISCHARGE = "patient.discharge"  # POST /patients/{id}/discharge — cascades to device end-assignment via 2A-DL Lambda
+AUDIT_PATIENT_RESUMED = "patient.resumed"  # POST /patients/{id}/resume — discharged→active flip (same record) + atomic re-provision
+AUDIT_PATIENT_RESUME_ROLLBACK = "patient.resume_rollback"  # Patient flipped back to discharged after the re-provision failed
 AUDIT_PATIENT_NOTIFICATIONS_PAUSE = "patient.notifications.pause"
 AUDIT_PATIENT_NOTIFICATIONS_RESUME_MANUAL = "patient.notifications.resume_manual"  # DELETE /pause
 AUDIT_PATIENT_NOTIFICATIONS_RESUME_AUTO = "patient.notifications.resume_auto"  # Activity Processor saw activity during pause window
@@ -136,6 +138,8 @@ KNOWN_AUDIT_EVENTS = frozenset(
         AUDIT_PATIENT_CREATE_ROLLBACK,
         AUDIT_PATIENT_UPDATE,
         AUDIT_PATIENT_DISCHARGE,
+        AUDIT_PATIENT_RESUMED,
+        AUDIT_PATIENT_RESUME_ROLLBACK,
         AUDIT_PATIENT_NOTIFICATIONS_PAUSE,
         AUDIT_PATIENT_NOTIFICATIONS_RESUME_MANUAL,
         AUDIT_PATIENT_NOTIFICATIONS_RESUME_AUTO,

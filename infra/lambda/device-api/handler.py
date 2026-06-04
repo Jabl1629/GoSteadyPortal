@@ -26,6 +26,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime
 from typing import Any
 
 import boto3
@@ -244,10 +245,49 @@ def _action_get_device(event: dict[str, Any], claims: dict[str, Any], serial: st
     return ok_response({"device": view})
 
 
+def _duration_seconds(start_iso: Any, end_iso: Any) -> int | None:
+    """Whole seconds between two ISO-8601 UTC timestamps; None if either is
+    missing/unparseable (an ongoing session has no end → None)."""
+    if not start_iso or not end_iso:
+        return None
+    try:
+        start = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(end_iso).replace("Z", "+00:00"))
+        return max(0, int((end - start).total_seconds()))
+    except (ValueError, TypeError):
+        return None
+
+
+def _assignment_view(a: dict[str, Any]) -> dict[str, Any]:
+    """
+    Project a raw DeviceAssignments row into the "monitoring session" contract
+    the portal's history modal renders. Each row IS one monitoring period:
+    device + start (validFrom) + end (validUntil; null = ongoing).
+    """
+    started = a.get("validFrom") or a.get("assignedAt")
+    ended = a.get("validUntil")  # None / missing = currently ongoing
+    return {
+        "serialNumber": a.get("serialNumber"),
+        "patientId": a.get("patientId"),
+        "startedAt": started,
+        "endedAt": ended,
+        "ongoing": ended is None,
+        "durationSeconds": _duration_seconds(started, ended),
+        "facilityId": a.get("facilityId"),
+        "censusId": a.get("censusId"),
+        "assignedBy": a.get("assignedBy"),
+    }
+
+
 def _action_list_patient_devices(
     event: dict[str, Any], claims: dict[str, Any], patient_id: str
 ) -> dict[str, Any]:
-    """GET /api/v1/patients/{patientId}/devices."""
+    """
+    GET /api/v1/patients/{patientId}/devices — the patient's monitoring-session
+    history (every DeviceAssignments row), most-recent-first, projected to a
+    clean contract. The unused-raw-items version was hardened 2026-06-04 to back
+    the portal's "Monitoring history" modal.
+    """
     patient = _get_patient(patient_id)
     enforce_tenancy(claims, patient.get("clientId"))
     enforce_scope(
@@ -256,13 +296,17 @@ def _action_list_patient_devices(
         target_census_id=patient.get("censusId"),
     )
 
-    # Query DeviceAssignments by GSI by-patient
+    # Query DeviceAssignments by GSI by-patient, newest assignment first
+    # (ScanIndexForward=False → descending assignedAt SK). Assignment count
+    # per patient is tiny (a handful of provision cycles) — no pagination.
     res = _assignments.query(
         IndexName="by-patient",
         KeyConditionExpression="patientId = :p",
         ExpressionAttributeValues={":p": patient_id},
+        ScanIndexForward=False,
     )
-    return ok_response({"assignments": res.get("Items", [])})
+    views = [_assignment_view(a) for a in res.get("Items", [])]
+    return ok_response({"assignments": views, "count": len(views)})
 
 
 def _action_provision(

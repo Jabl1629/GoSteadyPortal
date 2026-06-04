@@ -72,6 +72,8 @@ from _shared.audit_catalog import (
     AUDIT_PATIENT_DISCHARGE,
     AUDIT_PATIENT_NOTIFICATIONS_PAUSE,
     AUDIT_PATIENT_NOTIFICATIONS_RESUME_MANUAL,
+    AUDIT_PATIENT_RESUME_ROLLBACK,
+    AUDIT_PATIENT_RESUMED,
     AUDIT_PATIENT_UPDATE,
 )
 from _shared.observability import emit_audit, get_logger
@@ -82,6 +84,7 @@ from validation import (
     validate_create_patient_body,
     validate_discharge_body,
     validate_pause_body,
+    validate_resume_body,
     validate_update_patient_body,
 )
 
@@ -958,6 +961,274 @@ def _action_discharge_patient(
     })
 
 
+# ── POST /api/v1/patients/{id}/resume — "Start Monitoring Again" ──────
+
+
+def _action_resume_patient(
+    event: dict[str, Any], claims: dict[str, Any], patient_id: str
+) -> dict[str, Any]:
+    """
+    POST /api/v1/patients/{id}/resume
+
+    "Start Monitoring Again" — flips a discontinued (discharged) resident back
+    to `active` under the SAME patientId (so their Activity Series + Alert
+    History stay attached), re-homes them into a unit/room, and atomically
+    re-provisions a device. The inverse of _action_discharge_patient + a reuse
+    of _action_create_patient's _provision_inline chain.
+
+    deviceSerial is REQUIRED (validation): an active resident with no device is
+    the anti-state §C42 eliminated. The body has no displayName — resume keeps
+    the same record, so the name is preserved.
+
+    The flip is discharged→active. The discharge-cascade Lambda's DDB-stream
+    filter fires only on NewImage.status == "discharged" (and its
+    _was_discharged guard needs old!=discharged AND new==discharged), so this
+    flip does NOT trigger a spurious wipe/end-assignment cascade.
+    """
+    require_role(
+        claims,
+        "caregiver", "facility_admin", "client_admin", "household_owner", "internal_admin",
+    )
+
+    # Internal-tier patient management lands in 2A-INT (mirrors create) —
+    # _resolve_census_to_facility needs the actor's fixed clientId.
+    if is_internal(claims):
+        raise ApiError(
+            code="INSUFFICIENT_PERMISSIONS",
+            message="Internal-tier patient resume not yet supported. Use 2A-INT once available.",
+            status=403,
+        )
+
+    body = validate_resume_body(_parse_body(event))
+    census_id = body["censusId"]
+    room = body["room"]
+    device_serial = body["deviceSerial"]
+
+    actor = _actor(claims)
+
+    # Step 1: load the patient + verify the caller can see it (same scope gate
+    # as the discontinued census list that surfaced this resident).
+    patient = _get_patient(patient_id)
+    linked = linked_patient_ids(claims, _role_assignments)
+    enforce_patient_access(claims, patient, linked_ids=linked)
+
+    # Step 2: only a discontinued (discharged) resident can be resumed.
+    if patient.get("status") != "discharged":
+        raise ApiError(
+            code="INVALID_STATE",
+            message=f"Only discontinued residents can be resumed; status={patient.get('status')}",
+            status=409,
+            details={"currentStatus": patient.get("status")},
+        )
+
+    # Step 3: resolve the target census → parent facility within the caller's
+    # client tenancy, then scope-check the placement. This is a FRESH placement
+    # (the resident isn't in any active facility), so it uses the same authz as
+    # create — NOT the PATCH cross-facility client_admin+ transfer rule.
+    facility_id, target_client_id, census_row = _resolve_census_to_facility(
+        claims["clientId"], census_id
+    )
+    enforce_scope(claims, target_facility_id=facility_id, target_census_id=census_id)
+
+    # Step 4: pre-flight the device (mirrors create step 4).
+    device = _get_device_or_404(device_serial)
+    current_state = device.get("status", STATE_READY)
+    if current_state != STATE_READY:
+        raise ApiError(
+            code="DEVICE_NOT_AVAILABLE",
+            message=f"Device {device_serial} is in state {current_state}; cannot provision",
+            status=409,
+            details={"currentStatus": current_state},
+        )
+    existing_owner = device.get("owningClientId")
+    if existing_owner and existing_owner != target_client_id:
+        raise ApiError(
+            code="OWNED_BY_OTHER_CLIENT",
+            message="Device belongs to another organization",
+            status=403,
+        )
+
+    # Step 5: snapshot the discharged sub-state for rollback, then flip the
+    # Patient row to active. timezone re-derives from the (possibly new)
+    # facility, mirroring create. The REMOVE clears the discharge metadata so
+    # the row reads cleanly as active (discharge history lives in the audit log).
+    timezone = census_row.get("timezone") or _get_facility_timezone(target_client_id, facility_id)
+    now_iso = _now_iso()
+    snapshot = {
+        "status": patient.get("status"),
+        "status_patientId": patient.get("status_patientId"),
+        "censusId": patient.get("censusId"),
+        "facilityId": patient.get("facilityId"),
+        "room": patient.get("room"),
+        "timezone": patient.get("timezone"),
+        "dischargedAt": patient.get("dischargedAt"),
+        "dischargedBy": patient.get("dischargedBy"),
+        "dischargeReason": patient.get("dischargeReason"),
+        "dischargeNotes": patient.get("dischargeNotes"),
+    }
+    before = {
+        "status": "discharged",
+        "censusId": patient.get("censusId"),
+        "facilityId": patient.get("facilityId"),
+        "room": patient.get("room"),
+    }
+    after = {
+        "status": "active",
+        "censusId": census_id,
+        "facilityId": facility_id,
+        "room": room,
+    }
+    try:
+        _patients.update_item(
+            Key={"patientId": patient_id},
+            UpdateExpression=(
+                "SET #status = :active, status_patientId = :spi_active, "
+                "censusId = :cen, facilityId = :fac, #room = :room, "
+                "#tz = :tz, resumedAt = :now, resumedBy = :actor "
+                "REMOVE dischargedAt, dischargedBy, dischargeReason, dischargeNotes"
+            ),
+            ConditionExpression="#status = :discharged",
+            ExpressionAttributeNames={
+                "#status": "status",
+                "#room": "room",
+                "#tz": "timezone",
+            },
+            ExpressionAttributeValues={
+                ":active": "active",
+                ":spi_active": f"active_{patient_id}",
+                ":cen": census_id,
+                ":fac": facility_id,
+                ":room": room,
+                ":tz": timezone,
+                ":now": now_iso,
+                ":actor": claims["userId"],
+                ":discharged": "discharged",
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise ApiError(
+                code="INVALID_STATE",
+                message="Resident is no longer discontinued (raced with another caller); refresh and retry",
+                status=409,
+            )
+        raise
+
+    # Step 6: re-provision the device (atomic with the flip — roll the flip
+    # back to discharged on any provision failure).
+    try:
+        activation = _provision_inline(
+            serial=device_serial,
+            patient_id=patient_id,
+            target_client_id=target_client_id,
+            target_facility_id=facility_id,
+            target_census_id=census_id,
+            claims=claims,
+            device=device,
+        )
+    except Exception as exc:
+        _rollback_patient_resume(patient_id, snapshot)
+        emit_audit(
+            event=AUDIT_PATIENT_RESUME_ROLLBACK,
+            actor=actor,
+            subject={"patientId": patient_id, "clientId": target_client_id},
+            action="update",
+            extra={
+                "reason": "provision_failed",
+                "serial": device_serial,
+                "errorType": type(exc).__name__,
+            },
+            request_id=_request_id(event),
+        )
+        if isinstance(exc, ApiError):
+            raise
+        raise ApiError(
+            code="PROVISION_FAILED",
+            message=f"Provision failed: {exc}",
+            status=500,
+        )
+
+    # Step 7: success audit. The _provision_inline chain emits its own
+    # device.claimed / device.assigned / device.activation_sent.
+    emit_audit(
+        event=AUDIT_PATIENT_RESUMED,
+        actor=actor,
+        subject={
+            "patientId": patient_id,
+            "clientId": target_client_id,
+            "facilityId": facility_id,
+            "censusId": census_id,
+        },
+        action="update",
+        before=before,
+        after=after,
+        extra={"serial": device_serial},
+        request_id=_request_id(event),
+    )
+
+    updated = _get_patient(patient_id)
+    return ok_response({
+        "patient": _patient_view(updated),
+        "device": {
+            "serialNumber": device_serial,
+            "status": "provisioned",
+            "activationCmdId": activation["cmd_id"],
+        },
+        "activation": {
+            "cmdId": activation["cmd_id"],
+            "ackWindowHours": ACTIVATION_ACK_WINDOW_HOURS,
+        },
+    })
+
+
+def _rollback_patient_resume(patient_id: str, snapshot: dict[str, Any]) -> None:
+    """
+    Restore the discharged sub-state after a resume's re-provision failed.
+    The resume analog of _rollback_patient_create (which deletes the row);
+    here the row pre-existed, so we restore the captured fields instead.
+    Best-effort — logs on failure.
+    """
+    try:
+        set_parts = [
+            "#status = :status",
+            "status_patientId = :spi",
+            "censusId = :cen",
+            "facilityId = :fac",
+            "#room = :room",
+            "#tz = :tz",
+        ]
+        attr_names = {"#status": "status", "#room": "room", "#tz": "timezone"}
+        attr_values: dict[str, Any] = {
+            ":status": snapshot.get("status") or "discharged",
+            ":spi": snapshot.get("status_patientId") or f"discharged_{patient_id}",
+            ":cen": snapshot.get("censusId"),
+            ":fac": snapshot.get("facilityId"),
+            ":room": snapshot.get("room"),
+            ":tz": snapshot.get("timezone"),
+        }
+        # Restore the discharge metadata that the flip REMOVE'd.
+        if snapshot.get("dischargedAt"):
+            set_parts.append("dischargedAt = :da")
+            attr_values[":da"] = snapshot["dischargedAt"]
+        if snapshot.get("dischargedBy"):
+            set_parts.append("dischargedBy = :db")
+            attr_values[":db"] = snapshot["dischargedBy"]
+        if snapshot.get("dischargeReason"):
+            set_parts.append("dischargeReason = :dr")
+            attr_values[":dr"] = snapshot["dischargeReason"]
+        if snapshot.get("dischargeNotes"):
+            set_parts.append("dischargeNotes = :dn")
+            attr_values[":dn"] = snapshot["dischargeNotes"]
+        _patients.update_item(
+            Key={"patientId": patient_id},
+            UpdateExpression="SET " + ", ".join(set_parts) + " REMOVE resumedAt, resumedBy",
+            ExpressionAttributeNames=attr_names,
+            ExpressionAttributeValues=attr_values,
+        )
+    except ClientError:
+        logger.exception("rollback_patient_resume_failed", extra={"patientId": patient_id})
+
+
 # ── POST /api/v1/patients/{id}/notifications/pause ────────────────────
 
 
@@ -1213,6 +1484,7 @@ def _route(api_event: dict[str, Any]) -> tuple[str, dict[str, str]]:
         ("POST", "POST /api/v1/patients"): "create_patient",
         ("PATCH", "PATCH /api/v1/patients/{id}"): "update_patient",
         ("POST", "POST /api/v1/patients/{id}/discharge"): "discharge_patient",
+        ("POST", "POST /api/v1/patients/{id}/resume"): "resume_patient",
         ("POST", "POST /api/v1/patients/{id}/notifications/pause"): "pause_notifications",
         ("DELETE", "DELETE /api/v1/patients/{id}/notifications/pause"): "resume_notifications",
         ("PATCH", "PATCH /api/v1/patients/{id}/care-note"): "update_care_note",
@@ -1250,6 +1522,8 @@ def handler(api_event: dict[str, Any], context: Any) -> dict[str, Any]:
             return _action_update_patient(api_event, claims, patient_id)
         if action == "discharge_patient":
             return _action_discharge_patient(api_event, claims, patient_id)
+        if action == "resume_patient":
+            return _action_resume_patient(api_event, claims, patient_id)
         if action == "pause_notifications":
             return _action_pause_notifications(api_event, claims, patient_id)
         if action == "resume_notifications":

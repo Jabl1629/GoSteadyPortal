@@ -162,6 +162,17 @@ class ApiClient {
     );
   }
 
+  /// `GET /api/v1/patients/{id}/devices` — the patient's monitoring-session
+  /// history (every DeviceAssignments row), most-recent-first, projected by
+  /// `device-api._assignment_view`. Backs the "Monitoring history" modal.
+  Future<List<MonitoringSession>> listPatientDevices(String patientId) async {
+    final body = await _get('/api/v1/patients/$patientId/devices');
+    final raw = (body['assignments'] as List<dynamic>?) ?? const [];
+    return raw
+        .map((e) => MonitoringSession.fromJson(e as Map<String, dynamic>))
+        .toList(growable: false);
+  }
+
   // ── 2A-UM-P writes (deployed dev 2026-05-24; wired in 2B-FAC-W) ──
 
   Future<PatientDetailResponse> createPatient({
@@ -216,6 +227,27 @@ class ApiClient {
       },
     );
     return DischargeResponse.fromJson(body);
+  }
+
+  /// `POST /api/v1/patients/{id}/resume` — "Start Monitoring Again". Flips a
+  /// discontinued resident back to active under the same record + atomically
+  /// re-provisions [deviceSerial]. Same response envelope as create.
+  Future<PatientDetailResponse> resumeMonitoring(
+    String patientId, {
+    required String censusId,
+    required String room,
+    required String deviceSerial,
+  }) async {
+    final body = await _request(
+      'POST',
+      '/api/v1/patients/$patientId/resume',
+      body: {
+        'censusId': censusId,
+        'room': room,
+        'deviceSerial': deviceSerial,
+      },
+    );
+    return PatientDetailResponse.fromJson(body);
   }
 
   Future<NotificationsPauseResponse> pauseNotifications(

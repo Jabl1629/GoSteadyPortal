@@ -528,6 +528,39 @@ class LiveFacilityRepository implements FacilityRepository {
   }
 
   @override
+  Future<PatientDetailResponse> resumeMonitoring({
+    required String patientId,
+    required String censusId,
+    required String room,
+    required String deviceSerial,
+  }) async {
+    final resp = await _api.resumeMonitoring(
+      patientId,
+      censusId: censusId,
+      room: room,
+      deviceSerial: deviceSerial,
+    );
+    // Resumed patient flips discharged→active: evict its stale (discharged)
+    // detail + activity/alert caches and refresh the active roster so it
+    // reappears in the census. Mirrors createPatient/dischargePatient.
+    _patientDetailCache.evict(patientId);
+    _activity24hCache.evict(patientId);
+    _activity7dCache.evict(patientId);
+    _activity30dCache.evict(patientId);
+    _alertsCache.evict(patientId);
+    try {
+      await refreshCensus();
+    } catch (_) {/* non-fatal — next poll tick will catch up */}
+    return resp;
+  }
+
+  @override
+  Future<List<MonitoringSession>> monitoringHistory(String patientId) {
+    // On-demand (modal open); no caching for V1 — the list is tiny.
+    return _api.listPatientDevices(patientId);
+  }
+
+  @override
   Future<NotificationsPauseResponse> pauseNotifications({
     required String patientId,
     required int days,

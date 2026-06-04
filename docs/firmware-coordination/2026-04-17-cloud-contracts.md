@@ -8750,3 +8750,33 @@ Root cause: the `nrf_fuel_gauge` coulomb-fused estimate diverges at this device'
 ---
 
 *Entry owner: Claude (firmware session, 2026-06-04). Voltage-based OCV SoC replaces the diverging coulomb gauge; verified on GS9999999998. Earlier GS9999999998 battery_critical alarms were false. No cloud contract change.*
+
+---
+
+# §C44 — "Start Monitoring Again" (same-record resume) + Monitoring-history modal + hardened devices endpoint (2026-06-04)
+
+Entry owner: Claude (portal session) | Trigger: ship the deferred §C42.7 / §C42.4 follow-up — let a discontinued resident be resumed under the **same record** (history preserved) instead of re-added as a new one — plus a read-only "Monitoring history" view of the device timeline. **Zero firmware change** (reuses the shipped provision / activate / Shadow-desired contracts verbatim). Deployed to dev + validated end-to-end (13/13 synthetic smoke + live Chrome on `dev.portal.gosteady.co`).
+
+## C44.1 — Same-record resume
+
+New endpoint **`POST /api/v1/patients/{id}/resume`** on `patient-mgmt` — the inverse of discharge + a reuse of create's `_provision_inline`. Flips a `discharged` patient back to `active` under the same `patientId` (Activity Series + Alert History stay attached), re-homes to a unit/room, and **atomically re-provisions a required device** (device-less `active` is the anti-state §C42 removed). Body `{censusId, room, deviceSerial}` — all required; name is preserved (not in the body). Status guard: only `discharged` → 409 otherwise. Authz mirrors **create** (role + `enforce_scope` on the target census), **not** the PATCH cross-facility `client_admin+` rule, since a discontinued resident isn't being transferred out of an active facility. Provision failure rolls the flip back to discharged (`_rollback_patient_resume`, the resume analog of create's row-delete). New audit events `patient.resumed` + `patient.resume_rollback`. **No new IAM** — `patient-mgmt`'s grants already covered the inline-provision path. One new HTTP-API route (CFN), two Lambda code updates (`patient-mgmt` + `device-api`), both in `GoSteady-Dev-Api` — one `cdk deploy` (52s).
+
+Flutter: `ResumeMonitoringDialog` (modeled on Add-Resident; name fixed, Facility/Unit/Room pre-filled from last-known placement, device required) launched from a **"Start Monitoring Again"** CTA on the §C42.7 read-only discontinued detail. On success the detail reloads `active` → the read-only chip + CTA clear and the settings gear returns automatically.
+
+## C44.2 — Monitoring-history modal + hardened endpoint
+
+A "monitoring session" was **already** a `DeviceAssignments` row (`validFrom`=start, `validUntil`=end/null=ongoing; GSI `by-patient`). The already-deployed `GET /api/v1/patients/{id}/devices` (`device-api._action_list_patient_devices`) returned **raw DDB items** and no client used it. Hardened it: `ScanIndexForward=False` (most-recent-first) + projected `_assignment_view` (`serialNumber` / `startedAt` / `endedAt` / `ongoing` / `durationSeconds` / `facilityId` / `censusId` / `assignedBy`) → `{assignments:[…], count}`. Safe reshape — no prior consumer. Flutter: `ApiClient.listPatientDevices` + `MonitoringSession` model + `FacilityRepository.monitoringHistory` + a read-only **`MonitoringHistoryModal`** (device · started→ended/ongoing · duration · unit), launched from a "Monitoring history" link on patient detail (both active + discontinued). Resume is what makes the timeline multi-row.
+
+## C44.3 — Validation
+
+- **Synthetic smoke `infra/scripts/smoke-2a-um-resume.py` — 13/13 PASS** (caregiver `rd-caregiver`, `client_rd_test`): create+provision D1 → resume-active-rejected (409) → discharge → resume w/ D2 (200, active + re-provision) → GET patient active → **monitoring-history projected + most-recent-first + prior assignment ended preserved** → cascade-not-fired-on-resume (D2 stays provisioned + open) → resume-active (409) → bad/missing serial (400) → family_viewer (403). Cleanup resets the two synthetic devices.
+- **Live Chrome on `dev.portal.gosteady.co`** (caregiver sign-in, SW cleared post-deploy): Show discontinued → Pilot CapTest read-only detail shows both new buttons + preserved 50 ft / 43 steps → **Monitoring history modal rendered real data** (`GS0000000001 · Jun 3 7:13 PM → 9:08 PM · 1h 55m · Bench`) → **Resume dialog pre-filled** (Dev Pilot Facility / Bench / Room 201, device required). Cancelled — curated §C42 state (Rosa active, Pilot CapTest discontinued) left untouched.
+- **Fixed a pre-existing red test:** `patient-mgmt/tests/test_validation.py` still imported the §C42-removed `VALID_DISCHARGE_REASONS` (suite failed to import). Realigned the discharge-reason tests to the shipped free-text validator + added `validate_resume_body` coverage → **87/87 PASS**.
+
+## C44.4 — Follow-up (low severity, documented not fixed)
+
+**Discharge-cascade vs immediate-resume race.** The discharge cascade is async (DDB stream) and ends **all** active assignments it sees at run time (~1-2s after discharge). If a resume fires *within that window*, the cascade can end the freshly-provisioned new device too. Surfaced in the smoke (back-to-back discharge→resume) and handled there by waiting for the cascade to settle before resuming — which is exactly real usage (a caregiver reaches "Start Monitoring Again" seconds-to-minutes later, long after the cascade). Practically unreachable with a human in the loop; a durable guard would scope the cascade to assignments active as-of the discharge timestamp. Filed for a future device-side pass.
+
+---
+
+*Entry owner: Claude (portal session, 2026-06-04). Same-record resume + monitoring-history modal + hardened `GET /patients/{id}/devices`; 13/13 smoke + live Chrome verified; 87/87 validation (incl. a pre-existing red-test fix). No firmware change.*

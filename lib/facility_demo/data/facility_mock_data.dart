@@ -326,6 +326,29 @@ class FacilityMockData implements FacilityRepository {
   }
 
   @override
+  Future<api.PatientDetailResponse> resumeMonitoring({
+    required String patientId,
+    required String censusId,
+    required String room,
+    required String deviceSerial,
+  }) async {
+    // Demo: flip the (discharged) record back to active with the new device.
+    return api.PatientDetailResponse(
+      patient: api.PatientFull(
+        patientId: patientId,
+        displayName: '',
+        status: 'active',
+        censusId: censusId,
+        room: room,
+        currentDevice: api.CurrentDevice(
+          serialNumber: deviceSerial,
+          status: 'provisioned',
+        ),
+      ),
+    );
+  }
+
+  @override
   Future<api.NotificationsPauseResponse> pauseNotifications({
     required String patientId,
     required int days,
@@ -373,6 +396,31 @@ class FacilityMockData implements FacilityRepository {
       serialNumber: newSerial,
       status: 'provisioned',
     );
+  }
+
+  @override
+  Future<List<api.MonitoringSession>> monitoringHistory(String patientId) async {
+    // Demo: synthesize a small two-session timeline — one prior (ended) period
+    // and the current (ongoing) one — so the history modal renders.
+    final now = DateTime.now();
+    final ongoingStart = now.subtract(const Duration(days: 5));
+    final priorStart = now.subtract(const Duration(days: 40));
+    final priorEnd = now.subtract(const Duration(days: 6));
+    return [
+      api.MonitoringSession(
+        serialNumber: 'GS0000009001',
+        startedAt: ongoingStart,
+        endedAt: null,
+        ongoing: true,
+      ),
+      api.MonitoringSession(
+        serialNumber: 'GS0000009000',
+        startedAt: priorStart,
+        endedAt: priorEnd,
+        ongoing: false,
+        durationSeconds: priorEnd.difference(priorStart).inSeconds,
+      ),
+    ];
   }
 
   _PatientGenerated _gen(String patientId) {

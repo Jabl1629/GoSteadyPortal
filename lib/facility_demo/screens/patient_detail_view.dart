@@ -15,9 +15,11 @@ import '../models/patient.dart';
 import '../state/facility_selection.dart';
 import '../state/notification_state.dart';
 import '../widgets/care_note_panel.dart';
+import '../widgets/monitoring_history_modal.dart';
 import '../widgets/notification_review_panel.dart';
 import '../widgets/pause_banner.dart';
 import '../widgets/resident_settings_dialog.dart';
+import '../widgets/resume_monitoring_dialog.dart';
 
 /// Right pane (or full-screen overlay on medium screens) of the facility
 /// shell. Empty state when no patient selected; full reuse of the existing
@@ -276,7 +278,31 @@ class _PatientView extends StatelessWidget {
               if (patient.status == PatientStatus.discharged) ...[
                 const SizedBox(height: 10),
                 _DiscontinuedTag(),
+                const SizedBox(height: 14),
+                // Same-record resume: flips discharged→active under the same
+                // patientId (history preserved). On success onRefresh reloads
+                // the bundle → patient reads active → this CTA + the read-only
+                // chip clear and the settings gear returns.
+                _StartMonitoringAgainButton(
+                  onTap: () => ResumeMonitoringDialog.show(
+                    context,
+                    patient: patient,
+                    data: data,
+                    onCompleted: onRefresh,
+                  ),
+                ),
               ],
+              const SizedBox(height: 12),
+              // Monitoring-session history — available in both active and
+              // discontinued states (read-only). Shows the device timeline
+              // that resume turns multi-row.
+              _MonitoringHistoryButton(
+                onTap: () => MonitoringHistoryModal.show(
+                  context,
+                  patientId: patient.id,
+                  data: data,
+                ),
+              ),
               const SizedBox(height: 20),
               // 2B-FAC-W: pause banner appears whenever notifications
               // are currently paused. Stacks above the care-note +
@@ -562,6 +588,60 @@ class _EmptyState extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Primary CTA on a discontinued resident's read-only detail — opens the
+/// "Start Monitoring Again" dialog (same-record resume).
+class _StartMonitoringAgainButton extends StatelessWidget {
+  const _StartMonitoringAgainButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: FilledButton.icon(
+        onPressed: onTap,
+        icon: const Icon(Icons.restart_alt_rounded, size: 18),
+        label: const Text('Start Monitoring Again'),
+        style: FilledButton.styleFrom(
+          backgroundColor: AppTheme.sage,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(100),
+          ),
+          textStyle: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+        ),
+      ),
+    );
+  }
+}
+
+/// Subtle link that opens the read-only "Monitoring history" modal. Shown for
+/// both active and discontinued residents.
+class _MonitoringHistoryButton extends StatelessWidget {
+  const _MonitoringHistoryButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        onPressed: onTap,
+        icon: const Icon(Icons.history_rounded, size: 17),
+        label: const Text('Monitoring history'),
+        style: TextButton.styleFrom(
+          foregroundColor: AppTheme.sage,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
         ),
       ),
     );

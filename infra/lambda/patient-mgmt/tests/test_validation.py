@@ -23,10 +23,10 @@ from _shared.api_error import ApiError  # noqa: E402
 from validation import (  # noqa: E402
     CARE_NOTE_MAX_CHARS,
     DEVICE_SERIAL_RE,
+    DISCHARGE_NOTES_MAX_LEN,
     DISPLAY_NAME_MAX_LEN,
     PAUSE_DAYS_MAX,
     ROOM_MAX_LEN,
-    VALID_DISCHARGE_REASONS,
     VALID_PAUSE_REASONS,
     validate_care_note_body,
     validate_care_note_text,
@@ -40,6 +40,7 @@ from validation import (  # noqa: E402
     validate_pause_body,
     validate_pause_days,
     validate_pause_reason,
+    validate_resume_body,
     validate_room,
     validate_update_patient_body,
 )
@@ -235,14 +236,29 @@ class TestPauseReason(unittest.TestCase):
 
 
 class TestDischargeReason(unittest.TestCase):
-    def test_all_valid_reasons(self):
-        for r in VALID_DISCHARGE_REASONS:
-            with self.subTest(reason=r):
-                self.assertEqual(validate_discharge_reason(r), r)
+    # The structured discharge-reason enum was dropped 2026-06-03 (§C42 —
+    # "End Monitoring" needs no reason). `reason` is now optional free-text.
+    def test_none_accepted(self):
+        self.assertIsNone(validate_discharge_reason(None))
 
-    def test_invalid_reason_rejected(self):
+    def test_empty_treated_as_none(self):
+        self.assertIsNone(validate_discharge_reason(""))
+        self.assertIsNone(validate_discharge_reason("   "))
+
+    def test_free_text_accepted(self):
+        self.assertEqual(validate_discharge_reason("Moved closer to family"),
+                         "Moved closer to family")
+
+    def test_trims_whitespace(self):
+        self.assertEqual(validate_discharge_reason("  transferred  "), "transferred")
+
+    def test_too_long_rejected(self):
         with self.assertRaises(ApiError):
-            validate_discharge_reason("retired_to_florida")
+            validate_discharge_reason("x" * (DISCHARGE_NOTES_MAX_LEN + 1))
+
+    def test_non_string_rejected(self):
+        with self.assertRaises(ApiError):
+            validate_discharge_reason(123)
 
 
 class TestDischargeNotes(unittest.TestCase):
@@ -387,16 +403,80 @@ class TestDischargeBody(unittest.TestCase):
         self.assertEqual(out, {"reason": "transferred", "notes": "Sent home"})
 
     def test_notes_optional(self):
-        out = validate_discharge_body({"reason": "deceased"})
-        self.assertEqual(out, {"reason": "deceased", "notes": None})
+        out = validate_discharge_body({"reason": "moved home"})
+        self.assertEqual(out, {"reason": "moved home", "notes": None})
 
-    def test_missing_reason_rejected(self):
-        with self.assertRaises(ApiError):
-            validate_discharge_body({"notes": "..."})
+    def test_reason_optional_after_c42(self):
+        # "End Monitoring" needs no reason — empty body is valid.
+        out = validate_discharge_body({})
+        self.assertEqual(out, {"reason": None, "notes": None})
+
+    def test_notes_only_accepted(self):
+        out = validate_discharge_body({"notes": "Family requested"})
+        self.assertEqual(out, {"reason": None, "notes": "Family requested"})
 
     def test_unknown_field_rejected(self):
         with self.assertRaises(ApiError):
             validate_discharge_body({"reason": "transferred", "dischargedBy": "x"})
+
+
+# ── composite: POST /patients/{id}/resume body ────────────────────────
+
+
+class TestResumeBody(unittest.TestCase):
+    def test_happy(self):
+        out = validate_resume_body({
+            "censusId": "cen_ws_memory",
+            "room": "12A",
+            "deviceSerial": "GS0000000123",
+        })
+        self.assertEqual(out, {
+            "censusId": "cen_ws_memory",
+            "room": "12A",
+            "deviceSerial": "GS0000000123",
+        })
+
+    def test_device_required(self):
+        # Unlike create, resume REQUIRES a device (no device-less active state).
+        with self.assertRaises(ApiError) as cm:
+            validate_resume_body({"censusId": "cen_ws_memory", "room": "12A"})
+        self.assertEqual(cm.exception.code, "INVALID_DEVICE_SERIAL")
+
+    def test_empty_device_rejected(self):
+        with self.assertRaises(ApiError) as cm:
+            validate_resume_body({
+                "censusId": "cen_ws_memory", "room": "12A", "deviceSerial": "",
+            })
+        self.assertEqual(cm.exception.code, "INVALID_DEVICE_SERIAL")
+
+    def test_bad_serial_rejected(self):
+        with self.assertRaises(ApiError) as cm:
+            validate_resume_body({
+                "censusId": "cen_ws_memory", "room": "12A", "deviceSerial": "0000000123",
+            })
+        self.assertEqual(cm.exception.code, "INVALID_DEVICE_SERIAL")
+
+    def test_missing_census_rejected(self):
+        with self.assertRaises(ApiError):
+            validate_resume_body({"room": "12A", "deviceSerial": "GS0000000123"})
+
+    def test_missing_room_rejected(self):
+        with self.assertRaises(ApiError):
+            validate_resume_body({"censusId": "cen_ws_memory", "deviceSerial": "GS0000000123"})
+
+    def test_unknown_field_rejected(self):
+        with self.assertRaises(ApiError) as cm:
+            validate_resume_body({
+                "censusId": "cen_ws_memory",
+                "room": "12A",
+                "deviceSerial": "GS0000000123",
+                "displayName": "Nope",  # name is fixed on resume — not accepted
+            })
+        self.assertIn("displayName", cm.exception.details.get("unknownFields", []))
+
+    def test_non_dict_rejected(self):
+        with self.assertRaises(ApiError):
+            validate_resume_body([])
 
 
 # ── composite: POST /patients/{id}/notifications/pause body ───────────

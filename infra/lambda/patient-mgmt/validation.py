@@ -393,6 +393,40 @@ def validate_discharge_body(body: Any) -> dict[str, Any]:
     }
 
 
+def validate_resume_body(body: Any) -> dict[str, Any]:
+    """
+    Validate POST /patients/{id}/resume body — "Start Monitoring Again".
+
+    Required: censusId, room, deviceSerial. Unlike create, deviceSerial is
+    REQUIRED here: resume is an atomic flip-to-active + provision, and a
+    device-less active resident is the anti-state §C42 eliminated (it would
+    immediately fire device_offline). The resident's name is NOT in the body —
+    resume keeps the same Patient record, so displayName is unchanged.
+
+    Returns a normalized dict: {censusId, room, deviceSerial}.
+    """
+    if not isinstance(body, dict):
+        raise ApiError(
+            code="INVALID_REQUEST",
+            message="Request body must be a JSON object",
+            status=400,
+        )
+    allowed = {"censusId", "room", "deviceSerial"}
+    unknown = set(body.keys()) - allowed
+    if unknown:
+        raise ApiError(
+            code="INVALID_REQUEST",
+            message="Unknown field(s) in body",
+            status=400,
+            details={"unknownFields": sorted(unknown), "allowedFields": sorted(allowed)},
+        )
+    return {
+        "censusId": validate_census_id(body.get("censusId")),
+        "room": validate_room(body.get("room")),
+        "deviceSerial": validate_device_serial(body.get("deviceSerial")),
+    }
+
+
 def validate_pause_body(body: Any) -> dict[str, Any]:
     """Validate POST /patients/{id}/notifications/pause body."""
     if not isinstance(body, dict):

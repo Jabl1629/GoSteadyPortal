@@ -819,10 +819,11 @@ export class ApiStack extends cdk.Stack {
     // Phase 2A-UM-P — Patient Management
     // ════════════════════════════════════════════════════════════════
     //
-    // Single patient-mgmt Lambda + 6 routes (all patient mutations):
+    // Single patient-mgmt Lambda + 7 routes (all patient mutations):
     //   POST   /api/v1/patients                                  (create + optional atomic provision)
     //   PATCH  /api/v1/patients/{id}                             (name / room / cross-facility)
     //   POST   /api/v1/patients/{id}/discharge                   (cascade via DDB Streams + 2A-DL)
+    //   POST   /api/v1/patients/{id}/resume                      ("Start Monitoring Again": discharged→active + atomic re-provision)
     //   POST   /api/v1/patients/{id}/notifications/pause         (set pause)
     //   DELETE /api/v1/patients/{id}/notifications/pause         (manual unpause)
     //   PATCH  /api/v1/patients/{id}/care-note                   (set/clear care note)
@@ -892,7 +893,7 @@ export class ApiStack extends cdk.Stack {
       resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
     }));
 
-    // Wire 6 routes to the existing HTTP API + JWT authorizer.
+    // Wire 7 routes to the existing HTTP API + JWT authorizer.
     const patientMgmtIntegration = new HttpLambdaIntegration(
       'PatientMgmtIntegration',
       patientMgmt.function,
@@ -901,6 +902,7 @@ export class ApiStack extends cdk.Stack {
       [apigwv2.HttpMethod.POST, '/api/v1/patients'],
       [apigwv2.HttpMethod.PATCH, '/api/v1/patients/{id}'],
       [apigwv2.HttpMethod.POST, '/api/v1/patients/{id}/discharge'],
+      [apigwv2.HttpMethod.POST, '/api/v1/patients/{id}/resume'],
       [apigwv2.HttpMethod.POST, '/api/v1/patients/{id}/notifications/pause'],
       [apigwv2.HttpMethod.DELETE, '/api/v1/patients/{id}/notifications/pause'],
       [apigwv2.HttpMethod.PATCH, '/api/v1/patients/{id}/care-note'],
