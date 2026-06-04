@@ -284,7 +284,7 @@ class _FacilityBlock extends StatelessWidget {
             padding: const EdgeInsets.only(left: 28),
             child: _CheckRow(
               label: unit.displayName,
-              counter: '(${_residentCountForUnit(unit.id)} res.)',
+              counter: '(${_residentCountForUnit(unit.id)})',
               state: selection.isUnitSelected(unit.id)
                   ? FacilityCheckState.all
                   : FacilityCheckState.none,

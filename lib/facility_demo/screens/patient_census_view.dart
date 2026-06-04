@@ -356,9 +356,9 @@ class _Header extends StatelessWidget {
 
   String _countLabel() {
     if (totalShown == totalSelected) {
-      return totalShown == 1 ? '1 resident' : '$totalShown residents';
+      return totalShown == 1 ? '1 device in use' : '$totalShown devices in use';
     }
-    return '$totalShown of $totalSelected residents';
+    return '$totalShown of $totalSelected devices in use';
   }
 
   @override
@@ -465,7 +465,7 @@ class _AddResidentButton extends StatelessWidget {
       onPressed: () =>
           AddResidentDialog.show(context, data: data, onCreated: onCreated),
       icon: const Icon(Icons.add_rounded, size: 18),
-      label: const Text('Add Resident'),
+      label: const Text('Start Monitoring'),
       style: FilledButton.styleFrom(
         backgroundColor: AppTheme.sage,
         foregroundColor: Colors.white,
@@ -543,22 +543,22 @@ class _EmptyState extends StatelessWidget {
       CensusFilterMode.all => (
           Icons.people_outline_rounded,
           'No units selected',
-          'Choose at least one unit from the dropdown above\nto view residents.',
+          'Choose at least one unit from the dropdown above\nto see what\'s being monitored.',
         ),
       CensusFilterMode.withNotifications => (
           Icons.check_circle_outline_rounded,
           'No notifications',
-          'No residents in the current selection need review.',
+          'Nothing in the current selection needs review.',
         ),
       CensusFilterMode.criticalOnly => (
           Icons.check_circle_outline_rounded,
           'No critical alerts',
-          'No residents in the current selection have critical notifications.',
+          'Nothing in the current selection has critical notifications.',
         ),
       CensusFilterMode.noNotifications => (
           Icons.notifications_active_outlined,
-          'All residents have notifications',
-          'Every resident in the current selection currently has at least one\nnotification awaiting review.',
+          'Everything has notifications',
+          'Everything in the current selection currently has at least one\nnotification awaiting review.',
         ),
     };
 

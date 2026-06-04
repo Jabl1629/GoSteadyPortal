@@ -9,10 +9,11 @@ import '../models/facility.dart';
 import '../models/unit.dart';
 import 'form_fields.dart';
 
-/// "Add Resident" intake form. Submits via the FacilityRepository
-/// per phase-2b-fac-w-facility-writes.md L2 — live impl hits
-/// `POST /patients` (atomic with provisioning when a deviceSerial is
-/// present); demo impl returns a synthesized response.
+/// "Start Monitoring" intake form (class name kept as AddResidentDialog for
+/// now — internal only). Submits via the FacilityRepository per
+/// phase-2b-fac-w-facility-writes.md L2 — live impl hits `POST /patients`
+/// (atomic with provisioning when a deviceSerial is present); demo impl
+/// returns a synthesized response.
 class AddResidentDialog extends StatefulWidget {
   const AddResidentDialog({super.key, required this.data, this.onCreated});
 
@@ -130,7 +131,7 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
       setState(() {
         _errorMessage = e is ApiException
             ? '${e.code}: ${e.message}'
-            : 'Could not add resident: $e';
+            : 'Could not start monitoring: $e';
       });
     } finally {
       if (mounted) setState(() => _submitting = false);
@@ -318,7 +319,7 @@ class _AddResidentDialogState extends State<AddResidentDialog> {
                                     AlwaysStoppedAnimation<Color>(Colors.white),
                               ),
                             )
-                          : const Text('Add Resident'),
+                          : const Text('Start Monitoring'),
                     ),
                   ],
                 ),
@@ -363,7 +364,7 @@ class _Header extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Add Resident',
+                'Start Monitoring',
                 style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                       fontSize: 20,
                       fontWeight: FontWeight.w600,
@@ -372,7 +373,7 @@ class _Header extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               const Text(
-                'Register a new resident and assign a device.',
+                'Assign a device to begin monitoring.',
                 style: TextStyle(
                   color: AppTheme.textSoft,
                   fontSize: 13,

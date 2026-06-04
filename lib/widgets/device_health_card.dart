@@ -18,6 +18,29 @@ class DeviceStatusBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // No cap assigned (e.g. a discharged resident) — show a clean state, not
+    // the battery/signal chips against a sentinel DeviceHealth.
+    if (!device.isAssigned) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.link_off_rounded,
+            color: AppTheme.textSoft.withOpacity(0.6),
+            size: 18,
+          ),
+          const SizedBox(width: 6),
+          const Text(
+            'No device assigned',
+            style: TextStyle(
+              color: AppTheme.textSoft,
+              fontSize: 15,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      );
+    }
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(

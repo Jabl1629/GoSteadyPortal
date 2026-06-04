@@ -48,7 +48,7 @@ enum CensusFilterMode {
   String get label {
     switch (this) {
       case CensusFilterMode.all:
-        return 'All residents';
+        return 'All';
       case CensusFilterMode.withNotifications:
         return 'Needs review';
       case CensusFilterMode.criticalOnly:

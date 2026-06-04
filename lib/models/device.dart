@@ -42,6 +42,14 @@ class DeviceHealth {
     this.heartbeatIntervalHours = 4,
   });
 
+  /// True when a real device is assigned. The repository returns a sentinel
+  /// [DeviceHealth] (serialNumber `'unassigned'`) for a patient with no current
+  /// cap (e.g. just discharged); the UI should render a "no device" state
+  /// rather than the battery/signal chips (which would otherwise show 0% /
+  /// Weak / an epoch-0 "last seen").
+  bool get isAssigned =>
+      serialNumber.isNotEmpty && serialNumber != 'unassigned';
+
   /// Battery level as 0.0 - 1.0. Prefers the device's fuel-gauge
   /// [batteryPct] when present; otherwise approximates from voltage on a
   /// Li-SOCl2 discharge curve between 3600 mV (full) and 3000 mV (empty).

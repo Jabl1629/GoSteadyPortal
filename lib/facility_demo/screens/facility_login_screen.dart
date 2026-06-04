@@ -60,7 +60,7 @@ class _FacilityLoginScreenState extends State<FacilityLoginScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Facility resident-activity portal',
+                    'Facility activity-monitoring portal',
                     style: TextStyle(
                       color: AppTheme.textSoft,
                       fontSize: 15,

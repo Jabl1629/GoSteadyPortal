@@ -8702,6 +8702,14 @@ Also: the **fixed `deploy-portal.sh` ran for the first time** (portal redeploy f
 - `GS0000000001`: **`active_monitoring`** for Rosa Delgado (`pat_8ce10709…`, Bench / Rm 202), `0.15.1-wakewindow`. Pilot CapTest (`pat_aad8e1c7…`) = `discharged` (history preserved).
 - Deployed to dev: `patient-mgmt` (reason-optional) + `discharge-cascade` (wipe) hotswaps; portal rebuilt + redeployed (End Monitoring UX).
 
+## C42.6 — Terminology: generalized the facility UI away from "resident" (2026-06-04)
+
+The facility UI called the monitored person a **"resident"** — senior-living-specific, and wrong for home-health agencies (the person is at home) and D2C (a family watching a relative). Rather than swap in another person-noun ("patient" reads clinical for D2C; "user" collides with the app's actual users — caregivers/account holders — and the monitored person usually never touches the app; "care recipient" is fine but formal), **we reframed around the device / monitoring activity and let actual names carry the person** wherever someone is shown.
+
+User-facing mapping (facility build): `N residents` → **`N devices in use`**; `Add Resident` → **`Start Monitoring`** (deliberately pairs with the new **End Monitoring**); `Resident Settings` → `Monitoring Settings`; the `Resident` section + `Edit Resident Info` → `Monitoring` section + `Edit Details`; the `Resident` name-column → `Name`; `All residents` → `All`; empty states / tooltips / login subtitle / care-note de-nouned. **"Session" was deliberately avoided** for the add action ("New monitoring session") because it collides with activity/walk *sessions* (the API's `sessions`, "Today's Activity").
+
+Scope: **user-facing strings only.** The data model is unchanged (`Patient` / `patientId` / `Patients` table / API). Internal Flutter identifiers (`AddResidentDialog`, `resident_settings_dialog.dart`, `_residentCountForUnit`, `onResidentCreated`) were left as-is — a cosmetic rename follow-up, not user-visible. Also shipped a small **"No device assigned"** polish so a device-less / just-ended detail shows a clean state instead of the sentinel `0% · Weak · epoch` chips. Verified live on `dev.portal.gosteady.co`.
+
 ---
 
-*Entry owner: Claude (portal session, 2026-06-04). "End Monitoring" consolidation (no reason, no Discontinue Device) + discharge-cascade wipe fix; full provision→activate→walk→end→wipe→recycle→re-provision→re-activate→walk loop validated on one physical cap. No firmware change.*
+*Entry owner: Claude (portal session, 2026-06-04). "End Monitoring" consolidation (no reason, no Discontinue Device) + discharge-cascade wipe fix; full provision→activate→walk→end→wipe→recycle→re-provision→re-activate→walk loop validated on one physical cap. + C42.6 terminology generalization (resident → device/monitoring). No firmware change.*

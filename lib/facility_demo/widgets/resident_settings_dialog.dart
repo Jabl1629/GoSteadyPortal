@@ -166,7 +166,7 @@ class _ResidentSettingsDialogState extends State<ResidentSettingsDialog> {
           onBack: _back,
           onClose: _close,
           onSubmit: (name) => _runWrite(
-            'Resident info updated for $name.',
+            'Details updated for $name.',
             () => widget.data.updatePatient(
               patientId: widget.patient.id,
               displayName: name,
@@ -251,7 +251,7 @@ class _MenuView extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Resident Settings',
+                    'Monitoring Settings',
                     style:
                         Theme.of(context).textTheme.headlineMedium?.copyWith(
                               fontSize: 20,
@@ -288,11 +288,11 @@ class _MenuView extends StatelessWidget {
           onTap: () => onSelect(_View.replaceDevice),
         ),
         const SizedBox(height: 18),
-        const _SectionLabel('Resident'),
+        const _SectionLabel('Monitoring'),
         const SizedBox(height: 4),
         _MenuRow(
           icon: Icons.edit_outlined,
-          label: 'Edit Resident Info',
+          label: 'Edit Details',
           subtitle: 'Name, unit, room',
           onTap: () => onSelect(_View.editInfo),
         ),
@@ -857,7 +857,7 @@ class _EditInfoFormState extends State<_EditInfoForm> {
         children: [
           _SubViewHeader(
             icon: Icons.edit_outlined,
-            title: 'Edit Resident Info',
+            title: 'Edit Details',
             subtitle: 'Update name, unit, or room number.',
             onBack: widget.onBack,
             onClose: widget.onClose,
@@ -956,7 +956,7 @@ class _PauseMonitoringFormState extends State<_PauseMonitoringForm> {
           const _WarningBox(
             text:
                 'Activity tracking continues — only alerts are paused. Use this '
-                'when the resident is off-site (hospital, family visit) so the '
+                'when they\'re off-site (hospital, family visit) so the '
                 'team isn\'t paged about expected no-data days.',
           ),
           const SizedBox(height: 16),

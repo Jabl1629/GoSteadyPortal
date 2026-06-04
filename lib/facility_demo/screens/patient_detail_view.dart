@@ -357,7 +357,7 @@ class _ErrorState extends StatelessWidget {
             ),
             const SizedBox(height: 18),
             Text(
-              'Could not load resident',
+              'Could not load',
               style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                     fontSize: 20,
                   ),
@@ -457,7 +457,7 @@ class _SettingsGearButtonState extends State<_SettingsGearButton> {
       child: GestureDetector(
         onTap: widget.onTap,
         child: Tooltip(
-          message: 'Resident settings',
+          message: 'Monitoring settings',
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 120),
             width: size,
@@ -535,14 +535,14 @@ class _EmptyState extends StatelessWidget {
             ),
             const SizedBox(height: 18),
             Text(
-              'Select a resident',
+              'Select from the census',
               style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                     fontSize: 20,
                   ),
             ),
             const SizedBox(height: 8),
             Text(
-              'Choose a resident from the census to see their\ndaily activity, trends, and device health.',
+              'Choose someone from the census to see their\ndaily activity, trends, and device health.',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: AppTheme.textSoft,

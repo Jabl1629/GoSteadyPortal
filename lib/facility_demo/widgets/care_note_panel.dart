@@ -88,7 +88,7 @@ class CareNotePanel extends StatelessWidget {
                   )
                 else
                   Text(
-                    'Tap edit to add a care note for this resident.',
+                    'Tap edit to add a care note.',
                     style: TextStyle(
                       color: AppTheme.textSoft.withOpacity(0.85),
                       fontSize: 13,

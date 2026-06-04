@@ -75,10 +75,10 @@ class PatientListView extends StatelessWidget {
   // stretch into oceans of whitespace).
   static const List<_ColumnSpec> _columns = [
     _ColumnSpec(
-      'Resident',
+      'Name',
       170,
       _CellAlign.start,
-      tooltip: 'Resident name and notification severity.',
+      tooltip: 'Name and notification severity.',
       flex: 3,
     ),
     _ColumnSpec(
@@ -99,7 +99,7 @@ class PatientListView extends StatelessWidget {
       115,
       _CellAlign.end,
       tooltip:
-          'Minutes the resident was actively moving today, per the cap\'s '
+          'Minutes actively moving today, per the cap\'s '
           'IMU + step-detection algorithm.',
     ),
     _ColumnSpec(
@@ -469,8 +469,8 @@ class _DataRowState extends State<_DataRow> {
 // ── Color tiers ────────────────────────────────────────────────────────
 //
 // Senior-population reference bands. The lower tiers (rust, amber) are
-// pegged off "this resident should probably move more"; the upper tier
-// (sage) gives a visible win for residents who are very active. The
+// pegged off "this person should probably move more"; the upper tier
+// (sage) gives a visible win for those who are very active. The
 // middle band stays neutral so the eye scans for outliers.
 
 Color _activeMinColor(int min) {
