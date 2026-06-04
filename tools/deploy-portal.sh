@@ -17,6 +17,11 @@ set -euo pipefail
 
 ENV="dev"
 BUILD_ONLY=0
+# All GoSteady stacks live in us-east-1 (IoT Core global endpoint + CloudFront
+# ACM requirement). The operator's default CLI region may differ (e.g.
+# us-east-2), so pin it explicitly — otherwise the describe-stacks calls below
+# silently find nothing and the script aborts with "Could not resolve API URL".
+REGION="us-east-1"
 
 for arg in "$@"; do
   case "$arg" in
@@ -40,14 +45,13 @@ HOSTING_STACK="${STACK_PREFIX}-Hosting"
 API_STACK="${STACK_PREFIX}-Api"
 
 echo "▸ Resolving API base URL from ${API_STACK}…"
-API_URL=$(aws cloudformation describe-stacks --stack-name "$API_STACK" \
-  --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' \
+API_URL=$(aws cloudformation describe-stacks --stack-name "$API_STACK" --region "$REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`HttpApiUrl`].OutputValue' \
   --output text 2>/dev/null || true)
 
 if [[ -z "$API_URL" || "$API_URL" == "None" ]]; then
-  # Fall back: the 2A-0 stack outputs the URL under HttpApiUrl in some
-  # CDK versions. Try that key before giving up.
-  API_URL=$(aws cloudformation describe-stacks --stack-name "$API_STACK" \
+  # Fall back: older CDK revisions exported the URL under ApiUrl / any *Url key.
+  API_URL=$(aws cloudformation describe-stacks --stack-name "$API_STACK" --region "$REGION" \
     --query 'Stacks[0].Outputs[?contains(OutputKey, `Url`)].OutputValue | [0]' \
     --output text 2>/dev/null || true)
 fi
@@ -74,13 +78,13 @@ if [[ $BUILD_ONLY -eq 1 ]]; then
 fi
 
 echo "▸ Resolving hosting outputs from ${HOSTING_STACK}…"
-BUCKET=$(aws cloudformation describe-stacks --stack-name "$HOSTING_STACK" \
+BUCKET=$(aws cloudformation describe-stacks --stack-name "$HOSTING_STACK" --region "$REGION" \
   --query 'Stacks[0].Outputs[?OutputKey==`BucketName`].OutputValue' \
   --output text)
-DIST_ID=$(aws cloudformation describe-stacks --stack-name "$HOSTING_STACK" \
+DIST_ID=$(aws cloudformation describe-stacks --stack-name "$HOSTING_STACK" --region "$REGION" \
   --query 'Stacks[0].Outputs[?OutputKey==`DistributionId`].OutputValue' \
   --output text)
-PORTAL_URL=$(aws cloudformation describe-stacks --stack-name "$HOSTING_STACK" \
+PORTAL_URL=$(aws cloudformation describe-stacks --stack-name "$HOSTING_STACK" --region "$REGION" \
   --query 'Stacks[0].Outputs[?OutputKey==`PortalUrl`].OutputValue' \
   --output text)
 
@@ -93,12 +97,18 @@ fi
 echo "  Bucket:       $BUCKET"
 echo "  Distribution: $DIST_ID"
 
-echo "▸ Syncing build/web/ → s3://$BUCKET/…"
-aws s3 sync build/web/ "s3://$BUCKET/" --delete
+echo "▸ Syncing build/web/ → s3://$BUCKET/ (protecting /d2c/)…"
+# CRITICAL: the D2C app is hosted in the SAME bucket under d2c/. It has no
+# presence in build/web/, so a bare `--delete` sweep would wipe the entire
+# D2C app on every facility deploy. Exclude d2c/* from both the upload set and
+# the delete sweep. (Recoverable via S3 versioning if it ever happens — but
+# don't rely on that. See firmware-coordination §C41.3 #3.)
+aws s3 sync build/web/ "s3://$BUCKET/" --delete --exclude "d2c/*" --region "$REGION"
 
 echo "▸ Invalidating CloudFront cache /*…"
 INVAL_ID=$(aws cloudfront create-invalidation \
   --distribution-id "$DIST_ID" \
+  --region "$REGION" \
   --paths "/*" \
   --query 'Invalidation.Id' \
   --output text)

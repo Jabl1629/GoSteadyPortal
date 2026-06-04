@@ -12,4 +12,17 @@ class Unit {
     required this.facilityId,
     required this.displayName,
   });
+
+  // Value equality by census id. Required so a [DropdownButtonFormField]'s
+  // `value` matches one of its `items` across rebuilds: the live repository
+  // derives Unit instances fresh from the cached /me/patients response on
+  // every build (see LiveFacilityRepository.allUnits), so identity equality
+  // would make a just-selected unit `!=` its rebuilt item and silently drop
+  // the selection (release build) or assert (debug). Keyed on id because the
+  // census id is canonical and unique.
+  @override
+  bool operator ==(Object other) => other is Unit && other.id == id;
+
+  @override
+  int get hashCode => id.hashCode;
 }

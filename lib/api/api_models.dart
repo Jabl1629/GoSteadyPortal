@@ -489,6 +489,7 @@ class DeviceResponse {
   final String? firmwareVersion;
   final DateTime? lastSeen;
   final double? batteryPct;
+  final int? batteryMv;
   final int? rsrpDbm;
   final int? snrDb;
 
@@ -498,19 +499,27 @@ class DeviceResponse {
     this.firmwareVersion,
     this.lastSeen,
     this.batteryPct,
+    this.batteryMv,
     this.rsrpDbm,
     this.snrDb,
   });
 
   factory DeviceResponse.fromJson(Map<String, dynamic> json) {
+    // `GET /devices/{serial}` nests live (Shadow-sourced) values under
+    // `telemetry`; device-lifecycle responses (provision / end-assignment)
+    // carry only the registry view with no telemetry. Read nested-first,
+    // fall back to top-level for compat.
+    final t = json['telemetry'] as Map<String, dynamic>?;
     return DeviceResponse(
       serialNumber: (json['serialNumber'] as String?) ?? '',
       status: json['status'] as String?,
-      firmwareVersion: json['firmwareVersion'] as String?,
-      lastSeen: _parseTs(json['lastSeen']),
-      batteryPct: _parseDouble(json['batteryPct']),
-      rsrpDbm: _parseInt(json['rsrpDbm']),
-      snrDb: _parseInt(json['snrDb']),
+      firmwareVersion:
+          (t?['firmware'] as String?) ?? json['firmwareVersion'] as String?,
+      lastSeen: _parseTs(t?['lastSeen'] ?? json['lastSeen']),
+      batteryPct: _parseDouble(t?['batteryPct'] ?? json['batteryPct']),
+      batteryMv: _parseInt(t?['batteryMv'] ?? json['batteryMv']),
+      rsrpDbm: _parseInt(t?['rsrpDbm'] ?? json['rsrpDbm']),
+      snrDb: _parseInt(t?['snrDb'] ?? json['snrDb']),
     );
   }
 }

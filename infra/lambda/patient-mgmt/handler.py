@@ -353,6 +353,13 @@ def _action_create_patient(event: dict[str, Any], claims: dict[str, Any]) -> dic
         "patientId": patient_id,
         "displayName": display_name,
         "status": "active",
+        # Composite range key for the by-census-status / by-client-status GSIs.
+        # MUST be `<status>_<patientId>` (underscore) so the patient-api readers'
+        # `status_patientId begins_with("active_")` filter matches — without this
+        # attribute the new patient is absent from both GSIs and never appears in
+        # /me/patients or the census roster. Underscore (not `#`) per 0B-rev and
+        # patient-api/queries.py.
+        "status_patientId": f"active_{patient_id}",
         "clientId": target_client_id,
         "facilityId": facility_id,
         "censusId": census_id,
@@ -872,6 +879,11 @@ def _action_discharge_patient(
 
     update_expr_parts = [
         "#status = :discharged",
+        # Keep the GSI range key in sync with status so the discharged patient
+        # drops out of the active roster (patient-api filters
+        # status_patientId begins_with("active_")). Without this the row keeps
+        # `active_<id>` and lingers in /me/patients + the census after discharge.
+        "status_patientId = :spi_discharged",
         "dischargedAt = :now",
         "dischargeReason = :reason",
         "dischargedBy = :actor",
@@ -879,6 +891,7 @@ def _action_discharge_patient(
     attr_names = {"#status": "status"}
     attr_values: dict[str, Any] = {
         ":discharged": "discharged",
+        ":spi_discharged": f"discharged_{patient_id}",
         ":active": "active",
         ":now": now_iso,
         ":reason": body["reason"],

@@ -14,6 +14,12 @@ class DeviceHealth {
   /// Li-SOCl2 nominal is ~3600 mV fresh, ~3000 mV near end-of-life.
   final int batteryMv;
 
+  /// Fuel-gauge state-of-charge (0.0–1.0) reported by the device, when
+  /// available. Preferred over [batteryMv] because the on-device nPM1300
+  /// gauge is more accurate than re-deriving from voltage — and the mV
+  /// curve below assumes a different cell chemistry than the pilot LiPo.
+  final double? batteryPct;
+
   /// Cellular signal strength in dBm. Typical LTE-M range: -70 (great) to
   /// -110 (usable) to -120 (marginal).
   final int signalDbm;
@@ -32,12 +38,15 @@ class DeviceHealth {
     required this.batteryMv,
     required this.signalDbm,
     required this.lastDataReceived,
+    this.batteryPct,
     this.heartbeatIntervalHours = 4,
   });
 
-  /// Battery level as 0.0 - 1.0. Approximation based on Li-SOCl2 discharge
-  /// curve between 3600 mV (full) and 3000 mV (end of life).
+  /// Battery level as 0.0 - 1.0. Prefers the device's fuel-gauge
+  /// [batteryPct] when present; otherwise approximates from voltage on a
+  /// Li-SOCl2 discharge curve between 3600 mV (full) and 3000 mV (empty).
   double get batteryLevel {
+    if (batteryPct != null) return batteryPct!.clamp(0.0, 1.0);
     const fullMv = 3600;
     const emptyMv = 3000;
     final raw = (batteryMv - emptyMv) / (fullMv - emptyMv);

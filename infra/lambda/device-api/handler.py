@@ -171,6 +171,53 @@ def _set_shadow_desired(serial: str, fields: dict[str, Any]) -> None:
     iot_data.update_thing_shadow(thingName=serial, payload=payload.encode())
 
 
+def _shadow_telemetry(serial: str) -> dict[str, Any] | None:
+    """
+    Project the device's reported Shadow state into the live telemetry the
+    portal surfaces. Heartbeats land in the Shadow `reported` state, NOT in
+    DynamoDB, so this is the only source for live battery / signal / firmware.
+
+    Returns a camelCase dict of whatever the device has actually reported, or
+    None if the device has no shadow yet (never connected) or the read fails —
+    telemetry is strictly best-effort and must never fail the device read. The
+    full reported set (uptime, boot count, fault counters, watchdog hits, reset
+    reason) is included, not just battery/signal, so a future device-centric
+    screen / analytics surface can render diagnostics off this one endpoint
+    without a second contract (the V1 patient card uses only the
+    battery/signal/firmware/lastSeen subset).
+    """
+    try:
+        resp = iot_data.get_thing_shadow(thingName=serial)
+        reported = (
+            json.loads(resp["payload"].read()).get("state", {}).get("reported", {}) or {}
+        )
+    except iot_data.exceptions.ResourceNotFoundException:
+        return None
+    except (ClientError, KeyError, ValueError, AttributeError) as exc:
+        logger.warning(
+            "shadow_telemetry_read_failed", extra={"serial": serial, "error": str(exc)}
+        )
+        return None
+
+    # snake_case (firmware heartbeat schema) → camelCase (API convention).
+    # `ts` is the heartbeat timestamp → the authoritative lastSeen.
+    field_map = {
+        "battery_pct": "batteryPct",
+        "battery_mv": "batteryMv",
+        "rsrp_dbm": "rsrpDbm",
+        "snr_db": "snrDb",
+        "firmware": "firmware",
+        "uptime_s": "uptimeS",
+        "boot_count": "bootCount",
+        "fault_counters": "faultCounters",
+        "watchdog_hits": "watchdogHits",
+        "reset_reason": "resetReason",
+        "ts": "lastSeen",
+    }
+    out = {camel: reported[snake] for snake, camel in field_map.items() if snake in reported}
+    return out or None
+
+
 # ── Action handlers ────────────────────────────────────────────────────
 
 
@@ -187,7 +234,14 @@ def _action_get_device(event: dict[str, Any], claims: dict[str, Any], serial: st
     owning_facility = device.get("owningFacilityId")
     enforce_scope(claims, target_facility_id=owning_facility)
 
-    return ok_response({"device": _device_view(device)})
+    view = _device_view(device)
+    # Fold in live Shadow telemetry (battery / signal / firmware / lastSeen +
+    # richer diagnostics). Best-effort: a device that never connected has no
+    # shadow → no `telemetry` key, registry view still returned.
+    telemetry = _shadow_telemetry(serial)
+    if telemetry is not None:
+        view["telemetry"] = telemetry
+    return ok_response({"device": view})
 
 
 def _action_list_patient_devices(

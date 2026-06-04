@@ -199,23 +199,34 @@ class LiveFacilityRepository implements FacilityRepository {
 
   @override
   Future<DeviceHealth> deviceFor(String patientId) async {
-    // Per phase-2b-fac-r Q5 lean: V1 surfaces what's on
-    // /patients/{id}.currentDevice; firmware version + battery mV +
-    // signal dBm + sensor model are 2A-RD-follow-up. Stub the missing
-    // fields with reasonable defaults so the existing DeviceHealth
-    // shape renders. Real values fill in if a future device-detail
-    // endpoint ships.
+    // Live battery / signal / firmware come from `GET /devices/{serial}`'s
+    // Shadow-sourced telemetry (the device-detail endpoint shipped 2026-06-03,
+    // coord §C41.4 — replaces the prior hardcoded stubs). The patient detail
+    // gives the assigned serial + an assignment-time lastSeen fallback;
+    // sensorModel stays static (not device-reported).
     final full = await _fetchPatientDetail(patientId);
-    final dev = full.currentDevice;
+    final serial = full.currentDevice?.serialNumber;
 
-    // Cloud-side 2A-RD bug: `currentDevice.lastSeen` returns the value
-    // of `Device Registry.firstHeartbeatAt` instead of the actual most-
-    // recent payload timestamp. Workaround: also pull the 24h activity
-    // (cached or fresh) and use the latest sessionEnd if it's more
-    // recent. File: 2A-RD-follow-up to fix the response field. Until
-    // then this client-side fallback keeps "last seen" accurate.
+    if (serial == null || serial.isEmpty) {
+      // No device assigned — placeholder the card renders as offline/empty.
+      return DeviceHealth(
+        serialNumber: 'unassigned',
+        firmwareVersion: '—',
+        sensorModel: 'BMI270',
+        batteryMv: 0,
+        signalDbm: -120,
+        lastDataReceived: DateTime.fromMillisecondsSinceEpoch(0),
+        heartbeatIntervalHours: 1,
+      );
+    }
+
+    final device = await _api.getDevice(serial);
+
+    // lastSeen: the device's last heartbeat (telemetry.lastSeen = the real
+    // reported.ts) OR a more-recent activity uplink — a walk can post after
+    // the last heartbeat — whichever is newer.
+    DateTime? bestLastSeen = device.lastSeen ?? full.currentDevice?.lastSeen;
     final sessions = await _fetchActivity(patientId, ActivityRange.h24);
-    DateTime? bestLastSeen = dev?.lastSeen;
     if (sessions.isNotEmpty) {
       final latest = sessions
           .map((s) => s.sessionEnd)
@@ -226,11 +237,12 @@ class LiveFacilityRepository implements FacilityRepository {
     }
 
     return DeviceHealth(
-      serialNumber: dev?.serialNumber ?? 'unassigned',
-      firmwareVersion: '—',
-      sensorModel: 'BMI270',
-      batteryMv: 3600, // stub: shows full until a real value arrives
-      signalDbm: -80, // stub: shows ~70% bar
+      serialNumber: device.serialNumber.isNotEmpty ? device.serialNumber : serial,
+      firmwareVersion: device.firmwareVersion ?? '—',
+      sensorModel: 'BMI270', // not device-reported; static for V1
+      batteryMv: device.batteryMv ?? 0,
+      batteryPct: device.batteryPct, // preferred — real fuel-gauge SoC
+      signalDbm: device.rsrpDbm ?? -120,
       lastDataReceived: bestLastSeen ?? DateTime.now(),
       heartbeatIntervalHours: 1,
     );

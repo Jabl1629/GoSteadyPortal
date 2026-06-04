@@ -90,12 +90,16 @@ class ApiClient {
     return AlertsResponse.fromJson(body);
   }
 
+  /// `GET /api/v1/devices/{serial}` — device-centric detail: Device
+  /// Registry view + live Shadow `telemetry` (battery / signal / firmware /
+  /// lastSeen + diagnostics). The patient-detail device card uses the
+  /// battery/signal/firmware subset; the full payload backs a future
+  /// device-centric screen. Telemetry is best-effort server-side (a device
+  /// that never connected has no `telemetry`).
   Future<DeviceResponse> getDevice(String serial) async {
-    // NOTE: 2A-RD spec doesn't ship /devices/{serial}; per
-    // phase-2b-fac-r Q5 we surface this stub for follow-on. V1 patient-
-    // detail card uses /patients/{id}.currentDevice fields.
-    throw UnimplementedError(
-      'GET /devices/{serial} not in 2A-RD; see phase-2b-fac-r Q5',
+    final body = await _get('/api/v1/devices/$serial');
+    return DeviceResponse.fromJson(
+      (body['device'] as Map<String, dynamic>?) ?? const {},
     );
   }
 
