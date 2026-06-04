@@ -8713,3 +8713,29 @@ Scope: **user-facing strings only.** The data model is unchanged (`Patient` / `p
 ---
 
 *Entry owner: Claude (portal session, 2026-06-04). "End Monitoring" consolidation (no reason, no Discontinue Device) + discharge-cascade wipe fix; full provision→activate→walk→end→wipe→recycle→re-provision→re-activate→walk loop validated on one physical cap. + C42.6 terminology generalization (resident → device/monitoring). No firmware change.*
+
+---
+
+# §C43 — Fuel gauge fix: voltage-based (OCV) SoC (2026-06-04)
+
+Entry owner: Claude (firmware session) | Trigger: a battery-discharge run on `GS9999999998` (off-charger since 2026-05-31 to calibrate the §C38 battery model) surfaced a fuel-gauge bug that was also producing **false `battery_critical` alarms** on the per-device dashboard. **Firmware-only fix; no cloud contract change.**
+
+## C43.1 — The finding
+
+After 3.4 days off-charger the dashboard showed `battery_pct = 0` and the device looked dead — but it was fully alive (heartbeating, 80 h uptime, **never browned out**, green LED on motion). The Shadow showed the truth: **`battery_mv = 4086` (4.09 V ≈ 85–90% on a LiPo)**. The cell had barely drained (4.2 → 4.09 V in 3.4 days) — which actually *validates* the low-power firmware. It was the **model SoC that was garbage**, not the cell.
+
+Root cause: the `nrf_fuel_gauge` coulomb-fused estimate diverges at this device's **sub-mA idle draw** — the nPM1300 current measurement is unreliable that low, so the coulomb term drags SoC to 0 over a day even at a healthy voltage (it "thought" it drew ~30 mA; voltage says sub-mA). Confirmed on the bench: at a fully-charged **4.213 V** the old gauge read **12%**. FMEA 3.1 manifesting harder than the spec anticipated.
+
+## C43.2 — The fix (`0.12.1-psm` / `0.13.2-pilot` / `0.15.2-wakewindow`)
+
+`battery_pct` now comes from a **voltage→OCV lookup table** (generic single-cell LiPo, lightly EMA-smoothed for load sag) in `battery.c`, unconditional across builds. At our currents terminal voltage ≈ OCV, so it's robust, monotonic, and never diverges. The `nrf_fuel_gauge` lib is kept only for a diagnostic log. **Verified on GS9999999998:** 4.213 V → 100% (was 12%); heartbeat + Shadow now report `battery_pct = 1.0`.
+
+## C43.3 — Cloud-facing notes
+
+- **No contract change.** The cloud threshold/alarm logic was correct; the device was sending bad SoC. Earlier `GS9999999998` `battery_critical` alarms (≈ 06/02–06/04) were **false** — disregard them.
+- The §C38 battery-model calibration is **unblocked but not done**: SoC from the prior discharge run is unusable; a fresh on-battery run on the OCV firmware will give a usable `battery_pct` trend. Qualitatively, the ~0.1 V drop over 3.4 days already says battery life is long.
+- Follow-up (firmware, low priority): swap the generic LiPo OCV curve for a cell-characterised **LP803448** curve after a proper discharge characterization.
+
+---
+
+*Entry owner: Claude (firmware session, 2026-06-04). Voltage-based OCV SoC replaces the diverging coulomb gauge; verified on GS9999999998. Earlier GS9999999998 battery_critical alarms were false. No cloud contract change.*
