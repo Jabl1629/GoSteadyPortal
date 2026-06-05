@@ -8787,7 +8787,9 @@ Ran the **entire** end→wipe→recycle→resume→re-activate→walk cycle on t
 4. **Re-activate** → cap exited pre-activation, `device.activated` + `device.first_heartbeat` → `active_monitoring`, blue LED off. ✓
 5. **Walk** → activity uplink to Rosa: **16 steps / 39.42 ft / outdoor**. Rosa now has **6 sessions under one record**; the Monitoring-history modal shows her two GS0000000001 periods (resumed `Ongoing` + original `14h 26m`, ended at End-Monitoring).
 
-**Operational finding (device-side, worth a runbook note): post-wipe re-activation of the *same physical cap* required a REBOOT, not a shake.** After step 2 the cap acked the wipe at 17:53:01 and disconnected; the resume queued `act_62efdc4f` at 17:54:47 (after that connect). Repeated **shakes did not produce a new connect** (`boot_count` stuck at 7, no coordinator events, `reported.last_cmd_id` stuck on the old cmd) — the post-wipe pre-activation wake/motion-connect on `0.15.1-wakewindow` is gated/rate-limited. A **power-cycle** (`boot_count` 7→8) forced a fresh connect within seconds → coordinator delivered `act_62efdc4f` → activated. **Cloud was correct throughout** (cmd properly queued in `outstandingActivationCmds` + Shadow `desired`, within the 24h window); the gap was purely the cap not reconnecting on motion. Runbook: when resuming onto the just-wiped same cap, **reboot it** (don't rely on a shake) to drain the queued activate cmd. Possible firmware follow-up: allow a motion-connect shortly after a wipe-recycle so a shake suffices.
+**Operational finding (device-side, worth a runbook note): post-wipe re-activation of the *same physical cap* required a REBOOT, not a shake.** After step 2 the cap acked the wipe at 17:53:01 and disconnected; the resume queued `act_62efdc4f` at 17:54:47 (after that connect). Repeated **shakes did not produce a new connect** (`boot_count` stuck at 7, no coordinator events, `reported.last_cmd_id` stuck on the old cmd). A **power-cycle** (`boot_count` 7→8) forced a fresh connect within seconds → coordinator delivered `act_62efdc4f` → activated. **Cloud was correct throughout** (cmd properly queued in `outstandingActivationCmds` + Shadow `desired`, within the 24h window); the gap was purely the cap not reconnecting on motion.
+
+> **⚠ ROOT CAUSE CORRECTED in §C45 (2026-06-04).** The hypothesis here — "the wake/motion-connect is gated/rate-limited" / "PSM cold-wake" — was **WRONG** (it was never validated against a console). A bench reproduction with uart0 attached found the real bug: the heartbeat thread is parked in the activated-branch `k_sleep(1h)` across the wipe transition, so it isn't serving wake windows at all. **Fixed in `0.15.3-wakewindow`** + validated (a shake now reactivates with no reboot). See §C45. The "reboot it" runbook note is obsolete on `0.15.3+`.
 
 ## C44.6 — UX: detail actions laid out horizontally
 
@@ -8796,3 +8798,57 @@ The read-only chip + "Start Monitoring Again" CTA + "Monitoring history" link we
 ---
 
 *Entry owner: Claude (portal session, 2026-06-04). Same-record resume + monitoring-history modal + hardened `GET /patients/{id}/devices`; 13/13 smoke + 87/87 validation (incl. a pre-existing red-test fix); **full end→wipe→recycle→resume→re-activate→walk cycle re-validated on the physical `GS0000000001` (C44.5)** + horizontal action layout (C44.6). No firmware change. Device-side finding: reboot (not shake) needed to re-activate the same cap immediately post-wipe.*
+
+---
+
+# §C45 — Firmware fix: wipe→shake reactivation hang (`0.15.3-wakewindow`) (2026-06-04)
+
+Entry owner: Claude (firmware session) | Trigger: §C44.5's "reboot needed post-wipe" finding got a proper bench investigation with the **uart0 console attached** — which overturned the §C44.5 hypothesis and found a real threading bug. **Firmware-only fix; no cloud contract change.** Flashed + validated on `GS0000000001`.
+
+## C45.1 — The investigation overturned the §C44.5 hypothesis
+
+§C44.5 guessed the post-wipe shake failure was a "rate-limited / PSM-cold-wake motion-connect" — **never validated against a console.** With uart0 attached and the cap on USB (warm modem, `rrc=idle`, signal even *stronger* at −91 dBm), the reproduction showed the wake window **opening but never connecting**:
+
+```
+preact: shake → wake window (blue pulse, connecting to activate)
+cellular: rrc=idle
+(… nothing. zero `aws_iot_connect`, zero `preact wake: connected`.)
+```
+
+So it is **not** RF / PSM / battery — it reproduced on USB with a healthy modem. It's a **thread-state bug.**
+
+## C45.2 — Root cause
+
+The wake-window coordinator (`main.c::run_preact_wake_window`) and the actual connection live in **two threads** synced by `preact_wake_sem`. The cloud/heartbeat thread (`cloud.c::heartbeat_thread_fn`) loop ends its **activated** branch with a blind `k_sleep(HEARTBEAT_INTERVAL)` — a **1-hour sleep that never re-checks activation**. When a wipe flips the cap `activated → pre-activation` *mid-sleep*, the thread stays **parked in the activated branch for up to an hour**, never entering the pre-activation branch that waits on `preact_wake_sem`. So every shake opens a blue-pulsing wake window that **no thread is listening to connect for**, and the queued `activate` cmd is never collected. A **reboot** works because a fresh thread fires a boot heartbeat that connects (and the §C24 coordinator re-delivers the cmd) — which is the only thing that recovered it.
+
+## C45.3 — The fix (`0.15.3-wakewindow`)
+
+Make the activated cadence sleep **interruptible by de-activation** (`src/cloud.c` + `src/activation.c` + `src/cloud.h`):
+- new `heartbeat_wake_sem`; the activated branch now `k_sem_take(&heartbeat_wake_sem, HEARTBEAT_INTERVAL)` instead of `k_sleep` (identical on a normal expiry);
+- `gosteady_activation_clear()` (the wipe / de-provision path) calls new `gosteady_cloud_notify_deactivated()` which gives the sem.
+
+So the instant the wipe clears activation, the cloud thread wakes, re-checks `is_activated()`, drops into the pre-activation wake-window branch, and the **next shake connects**. No change to `run_preact_wake_window` or its motion timeout. Single point of de-activation covers both wipe and any future cloud-side de-provision.
+
+## C45.4 — Validation (`GS0000000001`, console-confirmed)
+
+Flashed `0.15.3-wakewindow` (`nrfjprog --recover`, boot_count 10), then re-ran End-Monitoring → wipe → Resume → shake **with no power-cycle** (`uptime_s` 11204 = 3.1 h continuous, `boot_count` unchanged):
+
+```
+preact: wake window ended without activation → ship sleep    ← 1st window (nothing queued) timed out at the 600s hard cap — timeout INTACT
+preact: shake → wake window …                                ← shook again after Resume
+activate cmd received: act_1a6d757d…                          ← wake window CONNECTED + got the cmd
+activation applied … persisted to /lfs/activation.bin
+preact: ACTIVATED during wake window → green confirm → normal ← GREEN, no reboot
+```
+
+Confirms both: (a) a shake reactivates with **no reboot** (the bug is fixed), and (b) the wake-window **motion timeout is intact** (the un-queued first window correctly ended → ship sleep). Operator validated green on the cap.
+
+## C45.5 — Notes
+
+- **No cloud change.** Cloud was correct throughout in §C44.5 and here (cmd queued in `outstandingActivationCmds` + Shadow `desired.activated_at`, delivered by the §C24 coordinator on connect). The §C44.5 "reboot it" runbook note is obsolete on `0.15.3+`.
+- **Secondary robustness gap (not fixed, low priority):** `connect_publish_stay` is still a single connect attempt with no retry / no `lte_lc_offline()+normal()` re-attach (vs the boot heartbeat's 3 retries). Moot for this bug, but worth hardening if weak-signal wake-window connects ever flake. Filed.
+- Dev-unit pointer: `GS0000000001` now on **`0.15.3-wakewindow`** (was `0.15.1`).
+
+---
+
+*Entry owner: Claude (firmware session, 2026-06-04). Real root cause of the wipe→shake reactivation hang = heartbeat thread parked in the activated `k_sleep` across the wipe transition (NOT PSM/rate-limit as §C44.5 guessed). Fixed in `0.15.3-wakewindow` (interruptible activated sleep + de-activation wake); console-validated on `GS0000000001` — shake reactivates with no reboot, motion timeout intact. No cloud contract change.*
