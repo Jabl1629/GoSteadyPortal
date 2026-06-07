@@ -285,9 +285,10 @@ class ActivityResponse {
 }
 
 /// One walking session emitted by the firmware on session-stop. Per
-/// phase-2a-read.md §Response shapes. Note: gait fields are NOT
-/// present in this API response (per phase-2b-fac-r L8 — V1 firmware
-/// + 2A-RD don't emit per-session gait).
+/// phase-2a-read.md §Response shapes. `gaitSpeedFts` (ft/s, session-avg
+/// walking speed) is present as of firmware 0.16.0-gait + 2A-RD gait
+/// plumbing (spec 2026-06-07-gait-speed.md); null when the firmware
+/// omitted it (on-device guards failed) or pre-0.16.0 cohorts.
 class ActivitySession {
   final DateTime sessionStart;
   final DateTime sessionEnd;
@@ -300,6 +301,7 @@ class ActivitySession {
   final double? roughnessR;
   final String? surfaceClass;
   final String? firmwareVersion;
+  final double? gaitSpeedFts;
 
   const ActivitySession({
     required this.sessionStart,
@@ -313,6 +315,7 @@ class ActivitySession {
     this.roughnessR,
     this.surfaceClass,
     this.firmwareVersion,
+    this.gaitSpeedFts,
   });
 
   factory ActivitySession.fromJson(Map<String, dynamic> json) {
@@ -328,6 +331,7 @@ class ActivitySession {
       roughnessR: _parseDouble(json['roughnessR']),
       surfaceClass: json['surfaceClass'] as String?,
       firmwareVersion: json['firmwareVersion'] as String?,
+      gaitSpeedFts: _parseDouble(json['gaitSpeedFts']),
     );
   }
 }

@@ -182,9 +182,9 @@ class FacilityMockData implements FacilityRepository {
     }
 
     double meanGait(List<DailyActivity> days) {
-      final active = days.where((d) => d.avgGaitSpeedMs > 0).toList();
+      final active = days.where((d) => d.avgGaitSpeedFts > 0).toList();
       if (active.isEmpty) return 0;
-      final total = active.fold<double>(0, (s, d) => s + d.avgGaitSpeedMs);
+      final total = active.fold<double>(0, (s, d) => s + d.avgGaitSpeedFts);
       return total / active.length;
     }
 
@@ -451,7 +451,7 @@ class FacilityMockData implements FacilityRepository {
         date: date,
         targetSteps: dailySteps,
         cadence: spec.stepsPerActiveMinute,
-        baselineGaitSpeedMs: dayGait,
+        baselineGaitSpeedFts: dayGait,
         rng: rng,
         gaitRng: gaitRng,
       ));
@@ -462,7 +462,7 @@ class FacilityMockData implements FacilityRepository {
       date: startOfToday,
       targetSteps: spec.targetStepsToday,
       cadence: spec.stepsPerActiveMinute,
-      baselineGaitSpeedMs: spec.baselineGaitSpeedMs,
+      baselineGaitSpeedFts: spec.baselineGaitSpeedFts,
       targetActiveMin: spec.targetActiveMinToday,
       rng: rng,
       gaitRng: gaitRng,
@@ -478,14 +478,14 @@ class FacilityMockData implements FacilityRepository {
       var weekMax = 0.0;
       for (final d in chunk) {
         if (d.totalTimeInMotionMinutes <= 0) continue;
-        final dayAvg = d.avgGaitSpeedMs;
+        final dayAvg = d.avgGaitSpeedFts;
         if (dayAvg <= 0) continue;
         weightedNum += dayAvg * d.totalTimeInMotionMinutes;
         weightedDen += d.totalTimeInMotionMinutes;
-        if (d.minGaitSpeedMs > 0 && d.minGaitSpeedMs < weekMin) {
-          weekMin = d.minGaitSpeedMs;
+        if (d.minGaitSpeedFts > 0 && d.minGaitSpeedFts < weekMin) {
+          weekMin = d.minGaitSpeedFts;
         }
-        if (d.maxGaitSpeedMs > weekMax) weekMax = d.maxGaitSpeedMs;
+        if (d.maxGaitSpeedFts > weekMax) weekMax = d.maxGaitSpeedFts;
       }
       final weekAvg = weightedDen == 0 ? 0.0 : weightedNum / weightedDen;
       weeks.add(WeeklyActivity(
@@ -494,9 +494,9 @@ class FacilityMockData implements FacilityRepository {
         totalDistanceFt: chunk.fold(0.0, (s, d) => s + d.totalDistanceFt),
         totalTimeInMotionMinutes:
             chunk.fold(0, (s, d) => s + d.totalTimeInMotionMinutes),
-        avgGaitSpeedMs: weekAvg,
-        minGaitSpeedMs: weekMin == double.infinity ? 0 : weekMin,
-        maxGaitSpeedMs: weekMax,
+        avgGaitSpeedFts: weekAvg,
+        minGaitSpeedFts: weekMin == double.infinity ? 0 : weekMin,
+        maxGaitSpeedFts: weekMax,
       ));
     }
 
@@ -526,15 +526,15 @@ class FacilityMockData implements FacilityRepository {
   }
 
   /// Gait speed counterpart of [_historicalAmplitude]. For a declining
-  /// patient, gait speed slopes from `historicalPeakGaitSpeedMs` down to
-  /// `baselineGaitSpeedMs` over the 182-day window.
+  /// patient, gait speed slopes from `historicalPeakGaitSpeedFts` down to
+  /// `baselineGaitSpeedFts` over the 182-day window.
   double _historicalGaitSpeed(_ActivitySpec spec, int dayOffset) {
-    if (!spec.hasDecayingTrend || spec.historicalPeakGaitSpeedMs <= 0) {
-      return spec.baselineGaitSpeedMs;
+    if (!spec.hasDecayingTrend || spec.historicalPeakGaitSpeedFts <= 0) {
+      return spec.baselineGaitSpeedFts;
     }
     final progress = (182 - dayOffset) / 181.0;
-    final peak = spec.historicalPeakGaitSpeedMs;
-    final base = spec.baselineGaitSpeedMs;
+    final peak = spec.historicalPeakGaitSpeedFts;
+    final base = spec.baselineGaitSpeedFts;
     return peak + (base - peak) * progress;
   }
 
@@ -544,7 +544,7 @@ class FacilityMockData implements FacilityRepository {
     required DateTime date,
     required int targetSteps,
     required double cadence,
-    required double baselineGaitSpeedMs,
+    required double baselineGaitSpeedFts,
     int? targetActiveMin,
     required Random rng,
     required Random gaitRng,
@@ -614,7 +614,7 @@ class FacilityMockData implements FacilityRepository {
       if (s > 0) {
         final intensity = _intensityCurve(h);
         final paceJitter = 0.90 + gaitRng.nextDouble() * 0.20;
-        avgSpeed = baselineGaitSpeedMs * (0.85 + intensity * 0.30) * paceJitter;
+        avgSpeed = baselineGaitSpeedFts * (0.85 + intensity * 0.30) * paceJitter;
         minSpeed = avgSpeed * (0.65 + gaitRng.nextDouble() * 0.10);
         maxSpeed = avgSpeed * (1.20 + gaitRng.nextDouble() * 0.20);
       }
@@ -623,9 +623,9 @@ class FacilityMockData implements FacilityRepository {
         steps: s,
         distanceFt: distance,
         timeInMotionMinutes: motionMin,
-        avgGaitSpeedMs: avgSpeed,
-        minGaitSpeedMs: minSpeed,
-        maxGaitSpeedMs: maxSpeed,
+        avgGaitSpeedFts: avgSpeed,
+        minGaitSpeedFts: minSpeed,
+        maxGaitSpeedFts: maxSpeed,
       ));
     }
 
@@ -653,9 +653,9 @@ class FacilityMockData implements FacilityRepository {
               steps: hours[h].steps,
               distanceFt: hours[h].distanceFt,
               timeInMotionMinutes: newMin,
-              avgGaitSpeedMs: hours[h].avgGaitSpeedMs,
-              minGaitSpeedMs: hours[h].minGaitSpeedMs,
-              maxGaitSpeedMs: hours[h].maxGaitSpeedMs,
+              avgGaitSpeedFts: hours[h].avgGaitSpeedFts,
+              minGaitSpeedFts: hours[h].minGaitSpeedFts,
+              maxGaitSpeedFts: hours[h].maxGaitSpeedFts,
             );
           }
         }
@@ -743,7 +743,7 @@ class FacilityMockData implements FacilityRepository {
       batteryMv: 3550,
       signalDbm: -82,
       lastSeenAgo: const Duration(minutes: 47),
-      baselineGaitSpeedMs: 0.65,
+      baselineGaitSpeedFts: 2.13,
       alertsThisWeek: 1,
     ),
     'pt_002': _ActivitySpec(
@@ -758,7 +758,7 @@ class FacilityMockData implements FacilityRepository {
       batteryMv: 3520,
       signalDbm: -91,
       lastSeenAgo: const Duration(hours: 1, minutes: 12),
-      baselineGaitSpeedMs: 0.55,
+      baselineGaitSpeedFts: 1.80,
       alertsThisWeek: 3,
     ),
     'pt_003': _ActivitySpec(
@@ -769,7 +769,7 @@ class FacilityMockData implements FacilityRepository {
       batteryMv: 3120, // low — offline-y
       signalDbm: -108,
       lastSeenAgo: const Duration(hours: 9, minutes: 22),
-      baselineGaitSpeedMs: 0.62,
+      baselineGaitSpeedFts: 2.03,
       alertsThisWeek: 2,
     ),
     'pt_004': _ActivitySpec(
@@ -783,7 +783,7 @@ class FacilityMockData implements FacilityRepository {
       batteryMv: 3580,
       signalDbm: -75,
       lastSeenAgo: const Duration(minutes: 31),
-      baselineGaitSpeedMs: 0.85,
+      baselineGaitSpeedFts: 2.79,
       alertsThisWeek: 0,
     ),
     'pt_005': _ActivitySpec(
@@ -794,7 +794,7 @@ class FacilityMockData implements FacilityRepository {
       batteryMv: 3540,
       signalDbm: -84,
       lastSeenAgo: const Duration(minutes: 58),
-      baselineGaitSpeedMs: 0.70,
+      baselineGaitSpeedFts: 2.30,
       alertsThisWeek: 1,
     ),
     'pt_006': _ActivitySpec(
@@ -812,8 +812,8 @@ class FacilityMockData implements FacilityRepository {
       batteryMv: 3470,
       signalDbm: -97,
       lastSeenAgo: const Duration(hours: 2, minutes: 5),
-      baselineGaitSpeedMs: 0.50,
-      historicalPeakGaitSpeedMs: 0.78,
+      baselineGaitSpeedFts: 1.64,
+      historicalPeakGaitSpeedFts: 2.56,
       alertsThisWeek: 5,
     ),
     'pt_007': _ActivitySpec(
@@ -827,7 +827,7 @@ class FacilityMockData implements FacilityRepository {
       batteryMv: 3560,
       signalDbm: -80,
       lastSeenAgo: const Duration(minutes: 22),
-      baselineGaitSpeedMs: 0.75,
+      baselineGaitSpeedFts: 2.46,
       alertsThisWeek: 1,
     ),
     'pt_008': _ActivitySpec(
@@ -838,7 +838,7 @@ class FacilityMockData implements FacilityRepository {
       batteryMv: 3540,
       signalDbm: -86,
       lastSeenAgo: const Duration(minutes: 39),
-      baselineGaitSpeedMs: 0.65,
+      baselineGaitSpeedFts: 2.13,
       alertsThisWeek: 0,
     ),
     'pt_009': _ActivitySpec(
@@ -852,7 +852,7 @@ class FacilityMockData implements FacilityRepository {
       batteryMv: 3500,
       signalDbm: -89,
       lastSeenAgo: const Duration(hours: 1, minutes: 4),
-      baselineGaitSpeedMs: 0.55,
+      baselineGaitSpeedFts: 1.80,
       alertsThisWeek: 1,
     ),
     'pt_010': _ActivitySpec(
@@ -863,7 +863,7 @@ class FacilityMockData implements FacilityRepository {
       batteryMv: 3490,
       signalDbm: -94,
       lastSeenAgo: const Duration(hours: 1, minutes: 38),
-      baselineGaitSpeedMs: 0.50,
+      baselineGaitSpeedFts: 1.64,
       alertsThisWeek: 2,
     ),
   };
@@ -882,11 +882,11 @@ class _ActivitySpec {
 
   /// Today / recent-baseline average gait speed in m/s. Walker users
   /// typically span ~0.4–0.9 m/s.
-  final double baselineGaitSpeedMs;
+  final double baselineGaitSpeedFts;
 
   /// 6-months-ago peak gait speed for patients with `hasDecayingTrend`.
   /// Ignored otherwise.
-  final double historicalPeakGaitSpeedMs;
+  final double historicalPeakGaitSpeedFts;
 
   /// Total alerts fired for this patient over the last 7 days. Pre-baked
   /// per-patient so the list view's "Alerts (7d)" column shows a
@@ -904,8 +904,8 @@ class _ActivitySpec {
     required this.batteryMv,
     required this.signalDbm,
     required this.lastSeenAgo,
-    required this.baselineGaitSpeedMs,
-    this.historicalPeakGaitSpeedMs = 0,
+    required this.baselineGaitSpeedFts,
+    this.historicalPeakGaitSpeedFts = 0,
     this.alertsThisWeek = 0,
   });
 }
@@ -966,7 +966,7 @@ class PatientRowStats {
   final Trend stepsTrend7d;
   final double stepsRecentAvg;              // mean of last 7 days
   final double stepsPriorAvg;               // mean of days 8-14
-  final double gaitSpeed3dAvg;              // m/s, last 3 days
+  final double gaitSpeed3dAvg;              // ft/s, last 3 days
   final Trend gaitSpeedTrend;
   final double gaitSpeedPriorAvg;
 

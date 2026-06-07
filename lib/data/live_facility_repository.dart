@@ -317,9 +317,9 @@ class LiveFacilityRepository implements FacilityRepository {
 
   @override
   Future<PatientRowStats> rowStatsFor(String patientId) async {
-    // Per phase-2b-fac-r L5: List view's 11-column trend/avg/gait
-    // metrics are derived from /activity?range=7d (+ 30d for 30-day
-    // avg). Gait fields zero per L8.
+    // Per phase-2b-fac-r L5: List view's trend/avg/gait metrics are derived
+    // from /activity?range=7d (+ 30d for 30-day avg). Gait (ft/s) is live as
+    // of firmware 0.16.0-gait + 2A-RD gait plumbing (spec 2026-06-07).
     final last7Sessions = await _fetchActivity(patientId, ActivityRange.d7);
     final last30Sessions = await _fetchActivity(patientId, ActivityRange.d30);
     final last7 = SessionAdapter.toDailyList(last7Sessions);
@@ -336,12 +336,31 @@ class LiveFacilityRepository implements FacilityRepository {
       return days.fold<int>(0, (s, d) => s + d.totalSteps) / days.length;
     }
 
+    // Mean of per-day gait (ft/s) over days with any walking. Days the
+    // resident didn't walk (avg 0) are excluded so they don't drag the mean.
+    double meanGait(List<DailyActivity> days) {
+      final active = days.where((d) => d.avgGaitSpeedFts > 0).toList();
+      if (active.isEmpty) return 0;
+      return active.fold<double>(0, (s, d) => s + d.avgGaitSpeedFts) /
+          active.length;
+    }
+
     final activeMin7d = meanActiveMin(last7);
     final activeMin30d = meanActiveMin(last30);
     final activeMinTrend = Trend.compute(activeMin7d, activeMin30d);
     final stepsRecent = meanSteps(last7);
     final stepsPrior = meanSteps(last30);
     final stepsTrend = Trend.compute(stepsRecent, stepsPrior);
+
+    // Gait: 3-day average vs the prior 30-day baseline (days are ascending,
+    // .last = today). 3% trend threshold per US-09 / the census spec.
+    List<DailyActivity> tail(List<DailyActivity> days, int n) =>
+        days.length <= n ? days : days.sublist(days.length - n);
+    final gaitRecent = meanGait(tail(last30, 3));
+    final gaitPrior = meanGait(
+      last30.length > 3 ? last30.sublist(0, last30.length - 3) : const [],
+    );
+    final gaitTrend = Trend.compute(gaitRecent, gaitPrior, threshold: 0.03);
 
     final summary = _findSummary(patientId);
 
@@ -358,10 +377,9 @@ class LiveFacilityRepository implements FacilityRepository {
       stepsTrend7d: stepsTrend,
       stepsRecentAvg: stepsRecent,
       stepsPriorAvg: stepsPrior,
-      // Gait fields zero — phase-2b-fac-r L8 (gait UI hidden in live mode).
-      gaitSpeed3dAvg: 0,
-      gaitSpeedTrend: Trend.flat,
-      gaitSpeedPriorAvg: 0,
+      gaitSpeed3dAvg: gaitRecent,
+      gaitSpeedTrend: gaitTrend,
+      gaitSpeedPriorAvg: gaitPrior,
     );
   }
 

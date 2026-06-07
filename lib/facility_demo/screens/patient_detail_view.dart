@@ -342,9 +342,10 @@ class _PatientView extends StatelessWidget {
                 last30: bundle.last30,
                 last6Months: bundle.last6m,
                 onDeviceTap: () => _openDeviceScreen(context),
-                // Per phase-2b-fac-r L4 + L8: hide gait chart + 6M tab in
-                // live mode. Demo build keeps showing both.
-                hideGait: BuildMode.current.isLive,
+                // Gait chart shows whenever there's gait data (live as of
+                // firmware 0.16.0-gait; demo always has it). 6M tab still
+                // hidden in live mode pending the Phase 1C-full daily rollup.
+                hideGait: !bundle.last30.any((d) => d.avgGaitSpeedFts > 0),
                 hide6MonthTab: BuildMode.current.isLive,
               ),
             ],

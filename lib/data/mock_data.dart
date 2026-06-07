@@ -71,14 +71,14 @@ class MockDataSource {
       var weekMax = 0.0;
       for (final d in chunk) {
         if (d.totalTimeInMotionMinutes <= 0) continue;
-        final dayAvg = d.avgGaitSpeedMs;
+        final dayAvg = d.avgGaitSpeedFts;
         if (dayAvg <= 0) continue;
         weightedNum += dayAvg * d.totalTimeInMotionMinutes;
         weightedDen += d.totalTimeInMotionMinutes;
-        if (d.minGaitSpeedMs > 0 && d.minGaitSpeedMs < weekMin) {
-          weekMin = d.minGaitSpeedMs;
+        if (d.minGaitSpeedFts > 0 && d.minGaitSpeedFts < weekMin) {
+          weekMin = d.minGaitSpeedFts;
         }
-        if (d.maxGaitSpeedMs > weekMax) weekMax = d.maxGaitSpeedMs;
+        if (d.maxGaitSpeedFts > weekMax) weekMax = d.maxGaitSpeedFts;
       }
       final weekAvg = weightedDen == 0 ? 0.0 : weightedNum / weightedDen;
       weeks.add(WeeklyActivity(
@@ -87,9 +87,9 @@ class MockDataSource {
         totalDistanceFt: chunk.fold(0.0, (s, d) => s + d.totalDistanceFt),
         totalTimeInMotionMinutes:
             chunk.fold(0, (s, d) => s + d.totalTimeInMotionMinutes),
-        avgGaitSpeedMs: weekAvg,
-        minGaitSpeedMs: weekMin == double.infinity ? 0 : weekMin,
-        maxGaitSpeedMs: weekMax,
+        avgGaitSpeedFts: weekAvg,
+        minGaitSpeedFts: weekMin == double.infinity ? 0 : weekMin,
+        maxGaitSpeedFts: weekMax,
       ));
     }
     return weeks;
@@ -140,10 +140,10 @@ class MockDataSource {
     // Roughly 1 minute of motion per 15 steps, capped at 55 min/hr.
     final motionMinutes = min((steps / 15).round(), 55);
 
-    // Gait speed in m/s — typical walker user range. Modulated by
-    // intensity so peak hours show stronger pace.
+    // Gait speed in ft/s — typical walker user range (~2.1 ft/s ≈ 0.65 m/s).
+    // Modulated by intensity so peak hours show stronger pace.
     final paceJitter = 0.85 + _rng.nextDouble() * 0.30;
-    final avgSpeed = 0.65 * (0.85 + intensity * 0.30) * paceJitter;
+    final avgSpeed = 2.13 * (0.85 + intensity * 0.30) * paceJitter;
     final minSpeed = avgSpeed * (0.65 + _rng.nextDouble() * 0.10);
     final maxSpeed = avgSpeed * (1.20 + _rng.nextDouble() * 0.20);
 
@@ -152,9 +152,9 @@ class MockDataSource {
       steps: steps,
       distanceFt: distanceFt,
       timeInMotionMinutes: motionMinutes,
-      avgGaitSpeedMs: avgSpeed,
-      minGaitSpeedMs: minSpeed,
-      maxGaitSpeedMs: maxSpeed,
+      avgGaitSpeedFts: avgSpeed,
+      minGaitSpeedFts: minSpeed,
+      maxGaitSpeedFts: maxSpeed,
     );
   }
 

@@ -48,7 +48,7 @@ class TrendChartCard extends StatelessWidget {
       case ChartMetric.timeInMotion:
         return 'min';
       case ChartMetric.gaitSpeed:
-        return 'm/s';
+        return 'ft/s';
     }
   }
 
@@ -103,9 +103,9 @@ class TrendChartCard extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _SummaryStat(label: 'Range', value: '$loStr–$hiStr', unit: 'm/s'),
+        _SummaryStat(label: 'Range', value: '$loStr–$hiStr', unit: 'ft/s'),
         const SizedBox(width: 16),
-        _SummaryStat(label: 'Avg', value: avgStr, unit: 'm/s'),
+        _SummaryStat(label: 'Avg', value: avgStr, unit: 'ft/s'),
       ],
     );
   }
@@ -276,9 +276,9 @@ class TrendChartCard extends StatelessWidget {
           case ChartMetric.timeInMotion:
             val = a.timeInMotionMinutes.toDouble();
           case ChartMetric.gaitSpeed:
-            val = a.avgGaitSpeedMs;
-            minVal = a.minGaitSpeedMs;
-            maxVal = a.maxGaitSpeedMs;
+            val = a.avgGaitSpeedFts;
+            minVal = a.minGaitSpeedFts;
+            maxVal = a.maxGaitSpeedFts;
         }
       }
       return _DataPoint(
@@ -305,9 +305,9 @@ class TrendChartCard extends StatelessWidget {
         case ChartMetric.timeInMotion:
           val = d.totalTimeInMotionMinutes.toDouble();
         case ChartMetric.gaitSpeed:
-          val = d.avgGaitSpeedMs;
-          minVal = d.minGaitSpeedMs;
-          maxVal = d.maxGaitSpeedMs;
+          val = d.avgGaitSpeedFts;
+          minVal = d.minGaitSpeedFts;
+          maxVal = d.maxGaitSpeedFts;
       }
       final label = shortLabel
           ? DateFormat('E').format(d.date)
@@ -336,9 +336,9 @@ class TrendChartCard extends StatelessWidget {
         case ChartMetric.timeInMotion:
           val = w.totalTimeInMotionMinutes.toDouble();
         case ChartMetric.gaitSpeed:
-          val = w.avgGaitSpeedMs;
-          minVal = w.minGaitSpeedMs;
-          maxVal = w.maxGaitSpeedMs;
+          val = w.avgGaitSpeedFts;
+          minVal = w.minGaitSpeedFts;
+          maxVal = w.maxGaitSpeedFts;
       }
       final label = DateFormat('MMM').format(w.weekStart);
       final tip = 'Week of ${DateFormat('MMM d').format(w.weekStart)}';
@@ -371,11 +371,11 @@ class TrendChartCard extends StatelessWidget {
               final lo = e.minValue!.toStringAsFixed(2);
               final hi = e.maxValue!.toStringAsFixed(2);
               text = '${e.tooltip}\n'
-                  'avg  $avgStr m/s\n'
-                  'min  $lo m/s\n'
-                  'max  $hi m/s';
+                  'avg  $avgStr ft/s\n'
+                  'min  $lo ft/s\n'
+                  'max  $hi ft/s';
             } else {
-              text = '${e.tooltip}\navg  $avgStr m/s';
+              text = '${e.tooltip}\navg  $avgStr ft/s';
             }
           } else {
             final v = rod.toY.round();
@@ -535,7 +535,7 @@ double _niceMax(double raw) {
   return (padded / magnitude).ceil() * magnitude.toDouble();
 }
 
-/// Nicely-rounded ceiling for fractional metrics (gait speed in m/s).
+/// Nicely-rounded ceiling for fractional metrics (gait speed in ft/s).
 /// Picks 0.5 / 1.0 / 1.5 / 2.0 / 3.0 etc. based on the input range.
 double _niceMaxFractional(double raw) {
   if (raw <= 0) return 1.0;

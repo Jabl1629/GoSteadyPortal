@@ -56,6 +56,10 @@ ACTIVITY_TTL_SECONDS = 13 * 30 * 86_400
 MAX_STEPS = 100_000
 MAX_DISTANCE_FT = 50_000
 MAX_ACTIVE_MIN = 1_440
+# Gait speed (ft/s), 0.16.0-gait+. ~6 ft/s is brisk community ambulation;
+# walker users are far slower. Cap generously at 10 (running) — out-of-range
+# values drop just the field, not the whole row (it's optional).
+MAX_GAIT_FTS = 10
 
 REQUIRED_FIELDS = ("session_start", "session_end", "steps", "distance_ft", "active_min")
 NAMED_FIELDS = {
@@ -65,6 +69,7 @@ NAMED_FIELDS = {
     "roughness_R",
     "surface_class",
     "firmware_version",
+    "gait_speed_fts",
 }
 ALLOWED_SURFACE_CLASS = {"indoor", "outdoor"}
 
@@ -224,6 +229,23 @@ def handler(event: dict, _context):
         )
         surface_class = None
 
+    # Gait speed (ft/s) — optional (0.16.0-gait+). Firmware omits it when its
+    # on-device guards fail. Drop just the field if unparseable / out of range;
+    # never reject the whole row over an optional analytic field.
+    gait_fts = event.get("gait_speed_fts")
+    if gait_fts is not None:
+        try:
+            gait_fts = float(gait_fts)
+        except (TypeError, ValueError):
+            gait_fts = None
+        else:
+            if not 0.0 <= gait_fts <= MAX_GAIT_FTS:
+                logger.warning(
+                    "gait_out_of_range",
+                    extra={"serial": serial, "gait_speed_fts": gait_fts},
+                )
+                gait_fts = None
+
     item: dict[str, Any] = {
         "patientId": patient.patientId,
         "timestamp": session_end_iso,
@@ -249,6 +271,8 @@ def handler(event: dict, _context):
         item["surfaceClass"] = surface_class
     if "firmware_version" in event:
         item["firmwareVersion"] = str(event["firmware_version"])
+    if gait_fts is not None:
+        item["gaitSpeedFts"] = Decimal(str(gait_fts))
 
     extras = _build_extras(event)
     if extras:

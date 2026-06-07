@@ -66,9 +66,6 @@ class PatientListView extends StatelessWidget {
   final String? selectedPatientId;
   final ValueChanged<String> onSelect;
 
-  /// 1 m/s = 3.28084 ft/s. Used for the list-view Gait Speed cell.
-  static const double mpsToFps = 3.28084;
-
   // Fixed column widths — sum is the table's natural minimum width.
   // `flex` columns absorb extra horizontal space when the viewport is
   // wider than the minimum (kept 0 for numeric columns so they don't
@@ -315,7 +312,7 @@ class _DataRowState extends State<_DataRow> {
     final unitOnly = r.unitDisplay.replaceAll('Assisted Living — ', 'AL ');
 
     final activeMin7d = stats.activeMinutes7dAvg.round();
-    final gaitFps = stats.gaitSpeed3dAvg * PatientListView.mpsToFps;
+    final gaitFps = stats.gaitSpeed3dAvg; // already ft/s (0.16.0-gait+)
 
     Color rowBg;
     if (widget.selected) {

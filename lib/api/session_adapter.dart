@@ -10,8 +10,8 @@ import 'api_models.dart';
 /// server) for daily; bucket by sessionStart hour for 24H view.
 ///
 /// Gait fields are NOT present in the API response (per L8) — the
-/// resulting HourlyActivity / DailyActivity have `avgGaitSpeedMs`,
-/// `minGaitSpeedMs`, `maxGaitSpeedMs` set to 0. The screens that
+/// resulting HourlyActivity / DailyActivity have `avgGaitSpeedFts`,
+/// `minGaitSpeedFts`, `maxGaitSpeedFts` set to 0. The screens that
 /// render those are hidden in live mode.
 class SessionAdapter {
   SessionAdapter._();
@@ -177,6 +177,14 @@ class SessionAdapter {
     final hoursSteps = List<double>.filled(24, 0);
     final hoursDist = List<double>.filled(24, 0);
     final hoursMin = List<double>.filled(24, 0);
+    // Gait (ft/s) — 0.16.0-gait+. Per-session avg; the firmware omits it
+    // (null) when its on-device guards fail. The hour's avg is a duration-
+    // weighted mean over the sessions overlapping it; min/max are the spread
+    // of per-session gait across those sessions.
+    final hoursGaitNum = List<double>.filled(24, 0); // Σ gait·sliceMs
+    final hoursGaitDen = List<double>.filled(24, 0); // Σ sliceMs (gait present)
+    final hoursGaitMin = List<double>.filled(24, double.infinity);
+    final hoursGaitMax = List<double>.filled(24, 0);
 
     for (final s in daySessions) {
       final start = s.sessionStart.isBefore(dayMidnight)
@@ -186,6 +194,9 @@ class SessionAdapter {
       final end = s.sessionEnd.isAfter(endCap) ? endCap : s.sessionEnd;
       final totalMs = end.difference(start).inMilliseconds;
       if (totalMs <= 0) continue;
+
+      final gait = s.gaitSpeedFts; // null when firmware omitted it
+      final hasGait = gait != null && gait > 0;
 
       // Distribute steps/distance/minutes proportionally across the
       // hour buckets the session spans.
@@ -206,18 +217,27 @@ class SessionAdapter {
         hoursDist[h] += s.distanceFt * frac;
         hoursMin[h] += s.activeMinutes * frac;
 
+        if (hasGait) {
+          hoursGaitNum[h] += gait * sliceMs;
+          hoursGaitDen[h] += sliceMs;
+          if (gait < hoursGaitMin[h]) hoursGaitMin[h] = gait;
+          if (gait > hoursGaitMax[h]) hoursGaitMax[h] = gait;
+        }
+
         cursor = sliceEnd;
       }
     }
 
     return List<HourlyActivity>.generate(24, (h) {
+      final gaitAvg = hoursGaitDen[h] > 0 ? hoursGaitNum[h] / hoursGaitDen[h] : 0.0;
       return HourlyActivity(
         hour: dayMidnight.add(Duration(hours: h)),
         steps: hoursSteps[h].round(),
         distanceFt: hoursDist[h],
         timeInMotionMinutes: hoursMin[h].round(),
-        // Gait fields zero — phase-2b-fac-r L8 (firmware doesn't emit
-        // per-session gait yet).
+        avgGaitSpeedFts: gaitAvg,
+        minGaitSpeedFts: hoursGaitMin[h].isFinite ? hoursGaitMin[h] : 0.0,
+        maxGaitSpeedFts: hoursGaitMax[h],
       );
     });
   }

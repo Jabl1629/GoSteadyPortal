@@ -181,6 +181,7 @@ def _activity_view(row: dict[str, Any]) -> dict[str, Any]:
         "roughnessR": row.get("roughnessR"),
         "surfaceClass": row.get("surfaceClass"),
         "firmwareVersion": row.get("firmwareVersion"),
+        "gaitSpeedFts": row.get("gaitSpeedFts"),  # 0.16.0-gait+; null when firmware omitted it
     }
 
 
