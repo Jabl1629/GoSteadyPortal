@@ -58,7 +58,9 @@ class TrendChartCard extends StatelessWidget {
       TimeRange.week || TimeRange.month => 'day',
       TimeRange.sixMonth => 'week',
     };
-    return metric == ChartMetric.gaitSpeed ? 'Average per $base' : 'Per $base';
+    // Non-gait labels omit the "Per" prefix — the subtitle adds it (see
+    // _perLabelHasOwnPrefix). Gait carries its own "Average per …" prefix.
+    return metric == ChartMetric.gaitSpeed ? 'Average per $base' : base;
   }
 
   /// Whether the chart-card subtitle should be prefixed with "Per".

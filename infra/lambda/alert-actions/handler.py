@@ -79,8 +79,14 @@ _alerts = _ddb.Table(ALERTS_TABLE)
 _role_assignments = _ddb.Table(ROLE_ASSIGNMENTS_TABLE)
 
 # Compound alert SK regex: ISO 8601 UTC + '#' + alert_type
+# Alert SK = "{eventTimestamp ISO-8601}#{alertType}". Accept either a Zulu
+# suffix OR a numeric UTC offset (±HH:MM), with optional fractional seconds —
+# rows are written from several sources and some carry facility-local offsets
+# (e.g. -06:00) rather than Z (see api_models.dart AlertRow.eventTimestampRaw).
+# The client round-trips the exact stored timestamp, so the ack must accept
+# whatever valid ISO-8601 form it was written with.
 _SK_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
     r"#"
     r"[a-z_]+$"
 )

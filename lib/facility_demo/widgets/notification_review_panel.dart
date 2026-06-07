@@ -124,8 +124,8 @@ class _NotificationCardState extends State<_NotificationCard> {
   }
 
   Future<void> _submitNote() async {
+    // The note is optional — acknowledge with or without one.
     final text = _noteCtrl.text.trim();
-    if (text.isEmpty) return;
     final n = widget.notification;
     setState(() {
       _submitting = true;
@@ -141,13 +141,13 @@ class _NotificationCardState extends State<_NotificationCard> {
         await widget.data.ackAlert(
           patientId: n.patientId,
           sk: n.sk!,
-          notes: text,
+          notes: text.isEmpty ? null : text,
         );
       }
       if (!mounted) return;
       // Persist the note locally (kept for demo continuity) + dismiss.
       // Parent then refreshes the bundle so the row disappears.
-      widget.state.addNote(n, text);
+      if (text.isNotEmpty) widget.state.addNote(n, text);
       widget.state.dismiss(n);
       _noteCtrl.clear();
       widget.onAcked?.call();
@@ -228,7 +228,7 @@ class _NotificationCardState extends State<_NotificationCard> {
           const SizedBox(height: 8),
           _NoteInput(
             controller: _noteCtrl,
-            canSubmit: _hasText && !_submitting,
+            canSubmit: !_submitting, // note is optional
             submitting: _submitting,
             onSubmit: _submitNote,
           ),
@@ -352,7 +352,7 @@ class _NoteInput extends StatelessWidget {
           textInputAction: TextInputAction.send,
           style: const TextStyle(fontSize: 13, color: AppTheme.textDark),
           decoration: InputDecoration(
-            hintText: 'Add a note before acknowledging…',
+            hintText: 'Add a note (optional)…',
             hintStyle: TextStyle(
               color: AppTheme.textSoft.withOpacity(0.7),
               fontSize: 13,
@@ -461,7 +461,7 @@ class _AcknowledgeButtonState extends State<_AcknowledgeButton> {
                 ),
               const SizedBox(width: 6),
               Text(
-                widget.submitting ? 'Acknowledging…' : 'Acknowledge + Save Note',
+                widget.submitting ? 'Acknowledging…' : 'Acknowledge',
                 style: TextStyle(
                   color: enabled || widget.submitting
                       ? Colors.white
