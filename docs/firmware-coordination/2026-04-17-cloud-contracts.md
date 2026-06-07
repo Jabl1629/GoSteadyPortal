@@ -8852,3 +8852,45 @@ Confirms both: (a) a shake reactivates with **no reboot** (the bug is fixed), an
 ---
 
 *Entry owner: Claude (firmware session, 2026-06-04). Real root cause of the wipe→shake reactivation hang = heartbeat thread parked in the activated `k_sleep` across the wipe transition (NOT PSM/rate-limit as §C44.5 guessed). Fixed in `0.15.3-wakewindow` (interruptible activated sleep + de-activation wake); console-validated on `GS0000000001` — shake reactivates with no reboot, motion timeout intact. No cloud contract change.*
+
+---
+
+# §C46 — Gait speed: cross-team feature design + distance/step-counter algo review (2026-06-07)
+
+Entry owner: Claude (firmware+cloud session) | Trigger: kick off the gait-speed feature (firmware → algo → cloud → portal). Spec-first per Jace. **Design only — nothing implemented yet.** Full spec: [`docs/specs/2026-06-07-gait-speed.md`](../specs/2026-06-07-gait-speed.md).
+
+## C46.1 — The feature
+
+Gait speed (clinical "sixth vital sign") was built-for and then suppressed across the stack: the portal already models `avgGaitSpeed*`/min/max + renders a chart, but **zeroes it in live mode** (`phase-2b-fac-r` L8/Q1) because firmware doesn't emit it and 2A-RD doesn't carry it. This closes that gap end-to-end.
+
+**Locked decisions:** (D1) unit on the wire + storage = **feet/second** (device-native, matches US-19 display unit, retires the portal's m/s-store/ft/s-display split); (D2) firmware emits **one session-average** gait value, portal derives window min/max as the across-session spread; (D3) firmware **pre-computes** gait — cloud can't derive it (`active_min` is minute-rounded → div-by-zero on short walks; cloud never sees float walking-time); (D6) gait is a **within-resident trend, never an absolute** (no tiering, US-10) — distance's 22% MAPE floor is inherited.
+
+## C46.2 — Contract delta (the only firmware↔cloud change)
+
+One new **optional** activity field on `gs/{serial}/activity`:
+
+| Field | Required | Validation | Notes |
+|---|---|---|---|
+| `gait_speed_fts` | No | Float, 0–10 | Session-average walking speed (ft/s). **Absent** when the on-device guards fail (too few steps / too little walking time / long-session distance saturation). |
+
+Cloud: add to `activity-processor` `NAMED_FIELDS` + validate + write `gaitSpeedFts` (Decimal, mirrors `roughnessR`); add to `patient-api` `_activity_view()`. **No DDB schema change, no new table.** Accept-all means an old-firmware activity without the field is still valid.
+
+## C46.3 — Algo review findings folded into the spec
+
+A review of the shipped distance + step calculator (requested before locking scope) surfaced two gait-relevant issues, both fixed at session-finalize with the per-sample hot path untouched and **distance validation preserved**:
+
+- **Step over-count (live: 53 reported for a 33-step slow walk).** The "step detector" is a deliberately-loose *impulse* detector (~2 impulses/step; "the regression absorbs the ratio" for distance). Measured **mean 1.47× over-count, variable 1.0–2.0×, worst at slow gait** across 15 hand-counted walks. Fix = a **decoupled refractory-merge (~0.8 s)** applied to the *count only* — distance keeps the full impulse train. Cuts step MAPE **47%→16%**, slow-walk error **78%→7%**, **zero distance cost**. Two refinements prototyped + **rejected on data**: autocorrelation-cadence (worse/unstable) and amplitude-aware merge (recovers fast walks but re-breaks slow, net worse). `steps` keeps its name but sharpens ~30% — split cohorts on `firmware_version`.
+- **Gait denominator bias.** `motion_duration_s` (the gait denominator candidate) over-counts by the σ-gate's **2 s `exit_hold` tail per bout** + jostle → biases gait low, structure-dependently (corrupts the trend). Fix = derive walking-time from the **same peak train** that produces distance (gated inter-peak gaps), keeping numerator/denominator consistent. `active_min` is **unchanged** (stays the "time in motion" metric).
+
+Deferred to algo-v1.5 (need more labeled data; collection paused at 19/30): the fast-walk step under-count + a cadence-adaptive counter, and the multi-feature distance retrain that would lower the 22% floor.
+
+## C46.4 — Action items
+
+- **Firmware** (`0.16.0-gait`): merged step count + peak-train walking-time + `gait_speed_fts` in `gs_pipeline_finalize`; conditional emit in `build_activity_payload()`; host fixtures + reference-vector regen; new algo params via `export_c_header.py` (don't hand-edit the generated header); bump `GS_ALGO_VERSION_STR`.
+- **Cloud:** `activity-processor` + `patient-api` field plumbing; deploy `--force`.
+- **Portal:** reconcile model to ft/s (`avgGaitSpeedFts`…), add `gaitSpeedFts` to `ActivitySession.fromJson`, populate gait in `session_adapter` + `live_facility_repository.rowStatsFor` (stop zeroing), un-suppress `hideGait` on data presence, chart label m/s→ft/s, drop the now-redundant `mpsToFps` in the list view, convert demo seeds ×3.28. Keep the demo build green.
+- **Docs (when code lands, not before):** `ARCHITECTURE.md` §7 Activity table gets the `gait_speed_fts` row; firmware `GOSTEADY_CONTEXT.md` activity-schema cache updated in lockstep.
+
+---
+
+*Entry owner: Claude (firmware+cloud session, 2026-06-07). Gait-speed feature design locked spec-first; one new optional wire field (`gait_speed_fts`, ft/s). Folds in two measured algo fixes (decoupled merge-0.8 step counter: 47%→16% step MAPE, slow 78%→7%, zero distance cost; peak-train walking-time denominator removing the σ-gate exit-hold bias). Nothing implemented yet — see `docs/specs/2026-06-07-gait-speed.md` for the full design + file-level checklist.*
