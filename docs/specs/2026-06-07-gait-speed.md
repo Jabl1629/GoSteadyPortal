@@ -152,7 +152,7 @@ Emit `gait_speed_fts` **only if all hold**, else omit the field entirely
 |---|---|---|
 | Floor — steps | merged `steps` ≥ `GS_GAIT_MIN_STEPS` (5) | too few steps → no meaningful cadence |
 | Floor — time | `walking_time_s` ≥ `GS_GAIT_MIN_WALK_S` (3.0) | guards divide-by-near-zero |
-| Long-session | NOT `buffer_overflowed` AND `n_peaks < GS_PIPELINE_MAX_PEAKS` | distance freezes at the 512-peak cap / 120 s buffer while walking-time keeps growing → gait would falsely collapse (`gs_pipeline.c:90-94`) |
+| Long-session | `n_peaks < GS_PIPELINE_MAX_PEAKS` | distance freezes at the 512-peak cap while walking-time keeps growing → gait would falsely collapse (`gs_pipeline.c:90-94`). **Revised 0.16.1-gait:** originally also gated on `!buffer_overflowed`, but the 120 s roughness-buffer overflow only affects surface classification (distance + walking-time stay valid up to the peak cap) — it was dropping gait on legitimate 2-min+ walks (observed on `GS0000000001`). Now gated on the peak cap alone. |
 
 ---
 

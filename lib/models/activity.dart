@@ -63,9 +63,14 @@ class DailyActivity {
     var num = 0.0;
     var den = 0;
     for (final h in hours) {
-      if (h.timeInMotionMinutes <= 0 || h.avgGaitSpeedFts <= 0) continue;
-      num += h.avgGaitSpeedFts * h.timeInMotionMinutes;
-      den += h.timeInMotionMinutes;
+      if (h.avgGaitSpeedFts <= 0) continue;
+      // Weight by time in motion, but FLOOR at 1: short walks round
+      // timeInMotionMinutes to 0 while still carrying a valid gait reading —
+      // don't let them fall out of the day's average (which would zero a
+      // short-walk-only day and hide the gait UI).
+      final w = h.timeInMotionMinutes > 0 ? h.timeInMotionMinutes : 1;
+      num += h.avgGaitSpeedFts * w;
+      den += w;
     }
     return den == 0 ? 0 : num / den;
   }
