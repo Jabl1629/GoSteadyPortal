@@ -115,12 +115,21 @@ class SessionAdapter {
     final hoursSteps = List<double>.filled(24, 0);
     final hoursDist = List<double>.filled(24, 0);
     final hoursMin = List<double>.filled(24, 0);
+    // Gait (ft/s), 0.16.0-gait+ — same accumulation as _bucketByHour: a
+    // duration-weighted mean per hour + per-hour min/max across sessions.
+    final hoursGaitNum = List<double>.filled(24, 0);
+    final hoursGaitDen = List<double>.filled(24, 0);
+    final hoursGaitMin = List<double>.filled(24, double.infinity);
+    final hoursGaitMax = List<double>.filled(24, 0);
 
     for (final s in sessions) {
       final start = s.sessionStart.toLocal();
       final end = s.sessionEnd.toLocal();
       final totalMs = end.difference(start).inMilliseconds;
       if (totalMs <= 0) continue;
+
+      final gait = s.gaitSpeedFts;
+      final hasGait = gait != null && gait > 0;
 
       var cursor = start;
       while (cursor.isBefore(end)) {
@@ -139,6 +148,13 @@ class SessionAdapter {
         hoursDist[h] += s.distanceFt * frac;
         hoursMin[h] += s.activeMinutes * frac;
 
+        if (hasGait) {
+          hoursGaitNum[h] += gait * sliceMs;
+          hoursGaitDen[h] += sliceMs;
+          if (gait < hoursGaitMin[h]) hoursGaitMin[h] = gait;
+          if (gait > hoursGaitMax[h]) hoursGaitMax[h] = gait;
+        }
+
         cursor = sliceEnd;
       }
     }
@@ -150,11 +166,15 @@ class SessionAdapter {
     );
 
     return List<HourlyActivity>.generate(24, (h) {
+      final gaitAvg = hoursGaitDen[h] > 0 ? hoursGaitNum[h] / hoursGaitDen[h] : 0.0;
       return HourlyActivity(
         hour: dayMidnight.add(Duration(hours: h)),
         steps: hoursSteps[h].round(),
         distanceFt: hoursDist[h],
         timeInMotionMinutes: hoursMin[h].round(),
+        avgGaitSpeedFts: gaitAvg,
+        minGaitSpeedFts: hoursGaitMin[h].isFinite ? hoursGaitMin[h] : 0.0,
+        maxGaitSpeedFts: hoursGaitMax[h],
       );
     });
   }
