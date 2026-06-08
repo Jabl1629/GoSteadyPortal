@@ -220,6 +220,7 @@ export class PerDeviceDashboard extends Construct {
           // populated.
           'fields @timestamp, subject.deviceSerial as serial, after.sessionEnd as session_end, ' +
             'after.steps as steps, after.distanceFt as distance_ft, ' +
+            'after.gaitSpeedFts as gait_fts, ' +
             'after.activeMinutes as active_min, after.roughnessR as R, ' +
             'after.surfaceClass as surface, after.firmwareVersion as firmware',
           'filter event = "patient.activity.create"',

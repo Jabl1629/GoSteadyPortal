@@ -317,6 +317,8 @@ def handler(event: dict, _context):
         audit_after["surfaceClass"] = item["surfaceClass"]
     if "firmwareVersion" in item:
         audit_after["firmwareVersion"] = item["firmwareVersion"]
+    if "gaitSpeedFts" in item:
+        audit_after["gaitSpeedFts"] = item["gaitSpeedFts"]
 
     emit_audit(
         "patient.activity.create",
