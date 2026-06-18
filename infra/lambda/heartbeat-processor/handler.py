@@ -32,6 +32,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from _shared import audit_logger, emit_audit, get_logger, get_metrics
+from _shared.device_time import resolve_heartbeat_ts
 from _shared.audit_catalog import (
     AUDIT_DEVICE_ACTIVATED,
     AUDIT_DEVICE_BATTERY_SWAPPED,
@@ -47,7 +48,10 @@ DEVICE_TABLE = os.environ["DEVICE_TABLE"]
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "dev")
 ACK_WINDOW_HOURS = int(os.environ.get("ACTIVATION_ACK_WINDOW_HOURS", "24"))
 
-REQUIRED_FIELDS = ("ts", "battery_pct", "rsrp_dbm", "snr_db")
+# `ts` is no longer required: firmware 0.17.0-time omits it when the device
+# clock is unsynced (clock_synced=false), and the cloud substitutes its trusted
+# receive time (spec §6 / Open-Q4). The signal/battery fields stay required.
+REQUIRED_FIELDS = ("battery_pct", "rsrp_dbm", "snr_db")
 
 logger = get_logger()
 metrics = get_metrics()
@@ -65,10 +69,8 @@ def _validate(event: dict) -> tuple[bool, str]:
     for f in REQUIRED_FIELDS:
         if f not in event:
             return False, f"missing:{f}"
-    try:
-        _parse_iso(event["ts"])
-    except (TypeError, ValueError) as e:
-        return False, f"bad_timestamp:{e}"
+    # ts is optional + resolved (never rejected) by resolve_heartbeat_ts — a
+    # missing/implausible ts under clock_synced=false gets the server time.
     try:
         pct = float(event["battery_pct"])
         rsrp = float(event["rsrp_dbm"])
@@ -84,17 +86,23 @@ def _validate(event: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _shadow_reported(event: dict) -> dict[str, Any]:
+def _shadow_reported(event: dict, effective_ts_iso: str) -> dict[str, Any]:
     """
     Build the Shadow.reported payload from the heartbeat — accept all fields
     per D16. JSON-serializable types only (no Decimal); Shadow stores numbers
     natively.
+
+    `ts` and `lastSeen` are set to `effective_ts_iso` (the server receive time
+    when the device clock was unsynced), so device-health never shows a
+    1980/2080 ts or a missing one. `clock_synced` / `time_source` flow through
+    from the event for observability.
     """
     SKIP = {"thingName"}
     reported: dict[str, Any] = {
         k: v for k, v in event.items() if k not in SKIP
     }
-    reported["lastSeen"] = event["ts"]
+    reported["ts"] = effective_ts_iso
+    reported["lastSeen"] = effective_ts_iso
     return reported
 
 
@@ -573,12 +581,32 @@ def handler(event: dict, _context):
         metrics.add_metric(name="heartbeat_reject_count", unit=MetricUnit.Count, value=1)
         return {"statusCode": 400, "body": f"invalid payload: {reason}"}
 
-    heartbeat_ts = _parse_iso(event["ts"])
+    # spec §6 / Open-Q4: resolve the effective timestamp. When the device clock
+    # was synced + its ts plausible, use it; otherwise substitute our trusted
+    # receive time so lastSeen / device-health never shows 1980/2080 and a
+    # no-time device still registers as alive.
+    ingested_at = datetime.now(timezone.utc)
+    effective_ts, used_ingest = resolve_heartbeat_ts(event, ingested_at)
+    heartbeat_ts = effective_ts
+    effective_ts_iso = effective_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if used_ingest:
+        logger.info(
+            "heartbeat_ts_substituted",
+            extra={
+                "serial": serial,
+                "clock_synced": event.get("clock_synced"),
+                "deviceTs": event.get("ts"),
+                "effectiveTs": effective_ts_iso,
+            },
+        )
+        metrics.add_metric(
+            name="heartbeat_ts_substituted_count", unit=MetricUnit.Count, value=1
+        )
 
     # Battery-swap detection must read prior Shadow BEFORE we overwrite it.
     _maybe_emit_battery_swapped(serial, event)
 
-    reported = _shadow_reported(event)
+    reported = _shadow_reported(event, effective_ts_iso)
 
     try:
         _iot_data.update_thing_shadow(
@@ -604,7 +632,7 @@ def handler(event: dict, _context):
         _device_tbl.update_item(
             Key={"serialNumber": serial},
             UpdateExpression="SET lastSeen = :ls",
-            ExpressionAttributeValues={":ls": event["ts"]},
+            ExpressionAttributeValues={":ls": effective_ts_iso},
         )
     except ClientError as e:
         logger.warning(
@@ -639,7 +667,8 @@ def handler(event: dict, _context):
         "heartbeat_ok",
         extra={
             "serial": serial,
-            "ts": event["ts"],
+            "ts": effective_ts_iso,
+            "clock_synced": event.get("clock_synced"),
             "battery_pct": event.get("battery_pct"),
             "rsrp_dbm": event.get("rsrp_dbm"),
         },

@@ -694,7 +694,10 @@ npx cdk deploy GoSteady-Dev-Processing --context env=dev               # single 
 | date | S | `YYYY-MM-DD` in patient's local timezone |
 | timezone | S | IANA timezone used for `date` |
 | source | S | `"device"` |
-| ingestedAt | S | Lambda wall-clock |
+| ingestedAt | S | Lambda wall-clock (trusted receive time; reconstruction anchor) |
+| timeSource | S | `0.17.0-time`: how `sessionStart/End` were derived — `device`/`nitz`/`ntp`/`cloud_reconstructed`/`uncertain` |
+| deviceClockSynced | BOOL | `0.17.0-time`: device's `clock_synced` flag (present when firmware sends it) |
+| deviceSessionKey | S | `0.17.0-time`: `serial#boot_count#session_end_uptime_ms` — stable device-session identity for dedup of reconstructed rows (present when uptimes sent) |
 | **GSI `by-date`** | PK: patientId, SK: date | Daily queries and rollups |
 | **GSI `by-census-date`** | PK: censusId, SK: date#patientId | Unit-level reporting |
 
@@ -730,7 +733,7 @@ Cloud → device commands flow through `gs/{serialNumber}/cmd` (downlink, see be
 
 ### Universal payload conventions
 
-- **Timestamps are device-authoritative.** Firmware sources UTC from cellular network time (`AT+CCLK?` after modem attach). Cloud accepts and stores timestamps as provided; no NTP fallback or cloud-side time correction in v1. Validation only rejects unparseable ISO 8601.
+- **Timestamps are device-authoritative *when the device clock is synced*, else cloud-reconstructed** (`0.17.0-time` / coord §C47). Firmware sources UTC from the NCS `date_time` lib (NITZ via the `%XTIME` push → NTP/SNTP → app-set) and emits `clock_synced`. When `clock_synced=true` the device ISO is authoritative. When `clock_synced=false` (no NITZ **and** NTP unavailable) — or the device ISO is implausible (year ∉ [2024, 2050]) — the cloud reconstructs absolute time from its trusted receive time (`ingestedAt`) minus the device's monotonic uptime age (`publish_uptime_ms − session_*_uptime_ms`), in `_shared/device_time.py`. **Activity is never dropped for lack of time** (worst case: a flagged `timeSource="uncertain"` best-effort time anchored at ingest). Heartbeats with no valid time still register — the cloud substitutes `ingestedAt` for `ts`/`lastSeen`. This **replaces** the prior "device-authoritative, no cloud-side time correction; validation only rejects unparseable ISO" contract (the old contract let the Jun 14–16 2080 mis-dating through — coord §C47).
 - **Extra fields are gracefully accepted.** All uplink schemas tolerate additional fields beyond those listed below. Validators reject only on missing required fields or out-of-range required values. Unknown fields:
   - **Heartbeat** → persisted into Device Shadow `reported` state alongside named ones
   - **Activity** → persisted into the Activity Series row's `extras` map (DDB)
@@ -750,15 +753,22 @@ Cloud → device commands flow through `gs/{serialNumber}/cmd` (downlink, see be
 ```
 | Field | Required | Validation |
 |-------|----------|-----------|
-| `session_start` | Yes | ISO 8601, must parse |
-| `session_end` | Yes | ISO 8601, must be ≥ `session_start` |
 | `steps` | Yes | Integer, 0–100,000. **As of `0.16.0-gait` this is a de-satellited count** (the emitted impulse train after a 0.8 s refractory merge), not the raw peak count — sharpened ~30%; split cohorts on `firmware_version`. See coord §C46 / `2026-06-07-gait-speed.md`. |
 | `distance_ft` | Yes | Number, 0–50,000 |
 | `active_min` | Yes | Integer, 0–1,440 |
+| `session_start` | No¹ | ISO 8601. **Authoritative iff `clock_synced=true` + plausible**; otherwise reconstructed cloud-side (`0.17.0-time`). No longer a hard reject — see ¹. |
+| `session_end` | No¹ | ISO 8601. Same trust rule as `session_start`. |
+| `clock_synced` | No | Bool (`0.17.0-time`). `true` ⇒ device ISO authoritative; `false`/absent-with-implausible-ISO ⇒ cloud reconstructs from uptimes + `ingestedAt`. |
+| `session_start_uptime_ms` / `session_end_uptime_ms` | No | uint — monotonic `k_uptime` at session start/end; the reconstruction anchors. |
+| `publish_uptime_ms` | No | uint — `k_uptime` at publish; the age reference (`age = publish_uptime − session_uptime`). |
+| `boot_count` | No | uint — guards a reboot between record and publish (uptime delta valid only within one boot). |
+| `time_source` | No | Device-reported `nitz`/`ntp`/`unsynced`. The cloud stores a resolved `timeSource` (`device`/`nitz`/`ntp`/`cloud_reconstructed`/`uncertain`) + `deviceClockSynced` on the row for the fallback-rate dashboard. |
 | `roughness_R` | No | Float — terrain roughness metric from on-device M9 algorithm |
 | `surface_class` | No | Enum: `indoor`, `outdoor` (M9 surface classifier output) |
 | `firmware_version` | No | Semver string — useful for cohort dashboards + retrain triage |
 | `gait_speed_fts` | No | Float, 0–10 — session-average walking speed (ft/s) = `distance_ft` ÷ peak-train walking time. Omitted when on-device guards fail (too few steps / too little walking time / saturated session). `0.16.0-gait+`; stored as `gaitSpeedFts`, returned by `/patients/{id}/activity`. Spec `2026-06-07-gait-speed.md`, coord §C46. |
+
+> ¹ **Time is resolved, never rejected** (`0.17.0-time`, spec §4.3): `resolve_session_times` uses the device ISO when `clock_synced=true` + plausible, else reconstructs from the uptimes + `ingestedAt`, else (no usable uptimes — e.g. legacy unsynced firmware) stores a flagged `timeSource="uncertain"` time anchored at ingest. The hard requirements are the three numeric fields above. Idempotency `(patientId, session_end)` is exact for `clock_synced=true`; reconstructed rows additionally carry a stable `deviceSessionKey` (`serial#boot_count#session_end_uptime_ms`) for future dedup.
 
 ### Heartbeat (hourly) — written to Device Shadow
 ```json
@@ -775,17 +785,22 @@ Cloud → device commands flow through `gs/{serialNumber}/cmd` (downlink, see be
 ```
 | Field | Required | Validation |
 |-------|----------|-----------|
-| `ts` | Yes | ISO 8601, must parse |
+| `ts` | No² | ISO 8601. Used when `clock_synced=true` + plausible; otherwise the cloud substitutes `ingestedAt` for `ts`/`lastSeen`. Firmware omits `ts` entirely when unsynced (`0.17.0-time`). |
 | `battery_pct` | Yes | Float, 0.0–1.0 |
 | `rsrp_dbm` | Yes | Float, −140 to 0 |
 | `snr_db` | Yes | Float, −20 to 40 |
+| `clock_synced` | No | Bool (`0.17.0-time`) — gates `ts` trust; flows into Shadow `reported` for observability. |
+| `time_source` | No | `nitz`/`ntp`/`unsynced` — observability; into Shadow `reported`. |
 | `battery_mv` | No | Integer (diagnostic) |
 | `firmware` | No | Semver string |
 | `uptime_s` | No | Integer |
 | `reset_reason` | No | Firmware crash-forensics field; persisted to Shadow |
 | `fault_counters` | No | Object — firmware diagnostic counters; persisted to Shadow |
 | `watchdog_hits` | No | Integer — firmware watchdog trigger count |
+| `boot_count` | No | Integer — boot counter (also used for battery-swap detection) |
 | `last_cmd_id` | No | Echoes the most recent downlink command ID for ack tracking |
+
+> ² **Heartbeat `ts` is resolved, never rejected** (`0.17.0-time`, Open-Q4): `resolve_heartbeat_ts` uses the device `ts` when synced + plausible, else stamps `ingestedAt`, so device-health `lastSeen` never shows 1980/2080 and a no-time device still registers as alive. Signal + battery fields remain the hard requirements.
 
 > Heartbeat updates Device Shadow `reported` state. Threshold detection runs on shadow delta, not on every heartbeat Lambda invocation.
 

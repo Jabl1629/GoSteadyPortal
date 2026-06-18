@@ -36,6 +36,11 @@ from _shared import (
     get_metrics,
     resolve_patient,
 )
+from _shared.device_time import (
+    TIME_SOURCE_RECONSTRUCTED,
+    TIME_SOURCE_UNCERTAIN,
+    resolve_session_times,
+)
 from _shared.pause_check import days_remaining, is_currently_paused
 from aws_lambda_powertools.metrics import MetricUnit
 
@@ -61,15 +66,29 @@ MAX_ACTIVE_MIN = 1_440
 # values drop just the field, not the whole row (it's optional).
 MAX_GAIT_FTS = 10
 
-REQUIRED_FIELDS = ("session_start", "session_end", "steps", "distance_ft", "active_min")
+# Numeric fields that must be present + in range. Timestamps are resolved
+# separately by resolve_session_times and NEVER cause a reject (spec §4.3
+# never-drop): a missing/implausible session_start/_end under clock_synced=false
+# is reconstructed from the upload receive time + monotonic uptimes.
+REQUIRED_FIELDS = ("steps", "distance_ft", "active_min")
 NAMED_FIELDS = {
     *REQUIRED_FIELDS,
+    "session_start",
+    "session_end",
     "serial",
     "thingName",
     "roughness_R",
     "surface_class",
     "firmware_version",
     "gait_speed_fts",
+    # 0.17.0-time device fields — consumed by resolve_session_times; named so
+    # they don't land in the `extras` catch-all.
+    "clock_synced",
+    "session_start_uptime_ms",
+    "session_end_uptime_ms",
+    "publish_uptime_ms",
+    "boot_count",
+    "time_source",
 }
 ALLOWED_SURFACE_CLASS = {"indoor", "outdoor"}
 
@@ -143,21 +162,12 @@ def _maybe_auto_resume_pause(patient: PatientContext, steps: int, session_end_is
     metrics.add_metric(name="notifications_auto_resume_count", unit=MetricUnit.Count, value=1)
 
 
-def _parse_iso(ts: str) -> datetime:
-    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-
-
 def _validate(event: dict) -> tuple[bool, str]:
+    # Numeric fields only — timestamps are resolved (never rejected) by
+    # resolve_session_times. We still reject genuinely garbage metrics.
     for f in REQUIRED_FIELDS:
         if f not in event:
             return False, f"missing:{f}"
-    try:
-        ss = _parse_iso(event["session_start"])
-        se = _parse_iso(event["session_end"])
-    except (TypeError, ValueError) as e:
-        return False, f"bad_timestamp:{e}"
-    if se < ss:
-        return False, "session_end<session_start"
     try:
         steps = int(event["steps"])
         distance = float(event["distance_ft"])
@@ -215,11 +225,30 @@ def handler(event: dict, _context):
         metrics.add_metric(name="unmapped_serial_count", unit=MetricUnit.Count, value=1)
         return {"statusCode": 200, "body": "no active assignment; dropped"}
 
-    ss = _parse_iso(event["session_start"])
-    se = _parse_iso(event["session_end"])
-    session_start_iso = ss.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    session_end_iso = se.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    expires_at = int(se.astimezone(timezone.utc).timestamp()) + ACTIVITY_TTL_SECONDS
+    # spec §4.3: resolve the authoritative session times. `ingested_at` is our
+    # trusted receive time and the reconstruction anchor when the device clock
+    # was unsynced. Never rejects — activity is never dropped for lack of time.
+    ingested_at = datetime.now(timezone.utc)
+    ss, se, time_source = resolve_session_times(event, ingested_at)
+    session_start_iso = ss.strftime("%Y-%m-%dT%H:%M:%SZ")
+    session_end_iso = se.strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_at = int(se.timestamp()) + ACTIVITY_TTL_SECONDS
+    if time_source in (TIME_SOURCE_RECONSTRUCTED, TIME_SOURCE_UNCERTAIN):
+        logger.warning(
+            "activity_time_reconstructed",
+            extra={
+                "serial": serial,
+                "timeSource": time_source,
+                "clock_synced": event.get("clock_synced"),
+                "deviceSessionEnd": event.get("session_end"),
+                "resolvedSessionEnd": session_end_iso,
+            },
+        )
+        metrics.add_metric(
+            name=f"activity_time_{time_source}_count",
+            unit=MetricUnit.Count,
+            value=1,
+        )
 
     surface_class = event.get("surface_class")
     if surface_class is not None and surface_class not in ALLOWED_SURFACE_CLASS:
@@ -261,9 +290,22 @@ def handler(event: dict, _context):
         "date": _local_date(ss, patient.timezone),
         "timezone": patient.timezone,
         "source": "device",
-        "ingestedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ingestedAt": ingested_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "expiresAt": expires_at,
+        # 0.17.0-time: how this row's times were derived (device | nitz | ntp |
+        # cloud_reconstructed | uncertain). Drives the "how often do we fall
+        # back" dashboard breakdown.
+        "timeSource": time_source,
     }
+    if "clock_synced" in event:
+        item["deviceClockSynced"] = bool(event["clock_synced"])
+    # Stable device-session identity (serial#boot#end_uptime). Survives
+    # reconstruction (which varies sessionEnd across firmware retries), so a
+    # future dedup job can collapse any reconstructed duplicates.
+    if "boot_count" in event and "session_end_uptime_ms" in event:
+        item["deviceSessionKey"] = (
+            f"{serial}#{event.get('boot_count')}#{event.get('session_end_uptime_ms')}"
+        )
 
     if "roughness_R" in event:
         item["roughnessR"] = Decimal(str(event["roughness_R"]))
@@ -310,6 +352,7 @@ def handler(event: dict, _context):
         "distanceFt": item["distanceFt"],
         "activeMinutes": item["activeMinutes"],
         "date": item["date"],
+        "timeSource": time_source,
     }
     if "roughnessR" in item:
         audit_after["roughnessR"] = item["roughnessR"]

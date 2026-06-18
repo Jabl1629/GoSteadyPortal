@@ -1,12 +1,18 @@
 # Device Time Reliability — cross-team design spec (firmware + cloud)
 
-> **Status:** Design (this doc). **Not implemented.** Approved approach:
-> "Both" — SNTP-primary + cloud-ingest anchoring backstop + sanity gate.
-> **Repos:** `gosteady-firmware` (time acquisition + payload) · `gosteady-portal`
-> (activity-processor reconstruction + contract).
-> **Coord log:** `2026-04-17-cloud-contracts.md` §C47.
-> **Revises:** the §5 "timestamps are device-authoritative / no cloud-side time
-> correction" trust contract.
+> **Status:** **Implemented (2026-06-18).** Approach: "Both" — SNTP-primary
+> (`date_time` lib) + cloud-ingest anchoring backstop + sanity gate.
+> - **Firmware** (`gosteady-firmware` `0.17.0-time`, commit `874d4fa`): shipped +
+>   **bench-validated on `GS0000000001`** — NITZ `src=nitz`; NTP fallback proven
+>   (`DATE_TIME_MODEM=n` → `src=ntp`, **UDP/123 works on the iBasis APN, Q2=YES**);
+>   live walk uplink with the new fields + correct 2026 dating.
+> - **Cloud** (`gosteady-portal`): `_shared/device_time.py` (`resolve_session_times`
+>   / `resolve_heartbeat_ts`) + activity-processor reconstruction + heartbeat `ts`
+>   guard; 13 unit tests green.
+> **Repos:** `gosteady-firmware` · `gosteady-portal`. **Coord log:** §C47.
+> **Revises:** the ARCHITECTURE §7 "timestamps are device-authoritative / no
+> cloud-side time correction" trust contract (now updated).
+> **Follow-up:** cleanup of the ~60 legacy `2080-*` rows (§11).
 
 ---
 

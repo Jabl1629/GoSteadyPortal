@@ -8899,7 +8899,7 @@ Deferred to algo-v1.5 (need more labeled data; collection paused at 19/30): the 
 
 # §C47 — Device time reliability: SNTP + cloud-ingest anchoring (design) (2026-06-18)
 
-Entry owner: Claude (firmware+cloud session) | Trigger: a portal investigation of "missing" Jun 15–16 data on `GS0000000001` traced to **~60 walks stamped year 2080**. **Design only — not implemented.** Full spec: [`docs/specs/2026-06-18-device-time-reliability.md`](../specs/2026-06-18-device-time-reliability.md).
+Entry owner: Claude (firmware+cloud session) | Trigger: a portal investigation of "missing" Jun 15–16 data on `GS0000000001` traced to **~60 walks stamped year 2080**. **Implemented + bench-validated 2026-06-18 — see C47.4.** Full spec: [`docs/specs/2026-06-18-device-time-reliability.md`](../specs/2026-06-18-device-time-reliability.md).
 
 ## C47.1 — Incident + root cause
 
@@ -8916,6 +8916,23 @@ Principle: the monotonic clock (`k_uptime`) is reliable; absolute time = best tr
 ## C47.3 — Contract impact
 
 **Revises §5** ("timestamps device-authoritative / no cloud-side time correction"): device ISO is authoritative **iff `clock_synced`**; otherwise the cloud reconstructs from uptime + trusted receive time. New optional activity fields (C47.2 #3) — accept-all tolerates old firmware. Known residual edge: reboot between record and upload invalidates the uptime delta (`boot_count` mismatch) → cloud stores a flagged `timeSource="uncertain"` best-effort time rather than dropping. Open questions (NTP server / UDP reachability on iBasis, `date_time` refresh cadence vs battery, heartbeat-`ts`/lastSeen correction) tracked in the spec.
+
+## C47.4 — Implementation + bench results (2026-06-18)
+
+**Firmware** (`gosteady-firmware` `0.17.0-time`, commit `874d4fa`, shipped to `main`):
+- Adopted the NCS `date_time` lib (NITZ via the `%XTIME` push → NTP/SNTP → app-set). `date_time`'s modem source is the NITZ *push*, not the free-running 1980 RTC, so a no-NITZ roaming SIM structurally falls through to NTP — the real fix.
+- **Deleted** the §C11.5 `at_cmd_with_timeout` wrapper + bare AT readers: `date_time_now()` is a cached read, so the time path no longer issues a modem AT command (also removes the session_start AT-lockup hazard for time). Net app RAM **60%** (the lib + SNTP fit comfortably).
+- Sanity gate `src/gs_time.h` (`gs_time_year_is_plausible`, [2024,2050]); host suite 64/64.
+- Activity payload emits `clock_synced` + `session_start/end_uptime_ms` + `publish_uptime_ms` + `boot_count` + `time_source`; the worker resolves both session ends from uptime via the `date_time` anchor. Heartbeat stays alive when unsynced (`clock_synced=false`, `ts` omitted).
+- **Bench-validated on `GS0000000001`:** NITZ path `src=nitz`, correct date; **NTP fallback proven** — a `DATE_TIME_MODEM=n` test image got `src=ntp` + correct date, so **outbound UDP/123 works on the iBasis APN (Open Q2 = YES); firmware alone fixes the no-NITZ case** and the cloud backstop is defense-in-depth, not load-bearing. A live walk uplink carried all new fields + correct 2026 dating.
+
+**Cloud** (`gosteady-portal`):
+- `_shared/device_time.py` (pure, 13 unit tests green): `resolve_session_times` (device-authoritative when `clock_synced=true` + plausible; else uptime reconstruction `ingestedAt − age`; else flagged `"uncertain"`, never dropped) + `resolve_heartbeat_ts` (server-time substitution when unsynced/implausible).
+- `activity-processor`: numbers-only validation (timestamps resolved, never rejected); stores `timeSource` + `deviceClockSynced` + a stable `deviceSessionKey` (`serial#boot#end_uptime`); metrics `activity_time_{cloud_reconstructed,uncertain}_count`.
+- `heartbeat-processor`: `ts` optional; substitutes `ingestedAt` for `ts`/`lastSeen` when unsynced/implausible; `clock_synced`/`time_source` flow into Shadow `reported`. Metric `heartbeat_ts_substituted_count`.
+- Idempotency note: `(patientId, session_end)` stays exact for `clock_synced=true` (the always-case on a working-NTP SIM); reconstructed rows could duplicate only under `clock_synced=false` + PUBACK-loss + retry (vanishingly rare given Q2=YES) — `deviceSessionKey` enables a future dedup.
+
+**Follow-up:** cleanup of the ~60 legacy `2080-*` rows (un-recoverable to true times — spec §11).
 
 ---
 
