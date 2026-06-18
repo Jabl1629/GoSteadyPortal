@@ -21,7 +21,7 @@ class TimeRangeToggle extends StatelessWidget {
   final bool hideSixMonth;
 
   static const _labels = {
-    TimeRange.day: '24H',
+    TimeRange.day: 'Today',
     TimeRange.week: '7D',
     TimeRange.month: '30D',
     TimeRange.sixMonth: '6M',

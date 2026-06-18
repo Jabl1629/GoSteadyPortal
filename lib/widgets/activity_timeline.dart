@@ -295,34 +295,46 @@ class TrendChartCard extends StatelessWidget {
 
   List<_DataPoint> _fromDaily(List<DailyActivity> days,
       {required bool shortLabel}) {
-    return days.map((d) {
-      double val;
+    // Generate the FULL day window (7 or 30 days ending today) so empty
+    // days render as zero bars (US-18) instead of collapsing the axis to
+    // only days-with-data. Mirrors _fromHourly's 24-slot fill.
+    final count = timeRange == TimeRange.month ? 30 : 7;
+    String key(DateTime d) =>
+        '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    final byDay = <String, DailyActivity>{for (final d in days) key(d.date): d};
+
+    final now = DateTime.now();
+    final end = DateTime(now.year, now.month, now.day);
+    return List.generate(count, (i) {
+      final day = end.subtract(Duration(days: count - 1 - i));
+      final d = byDay[key(day)];
+      double val = 0;
       double? minVal;
       double? maxVal;
-      switch (metric) {
-        case ChartMetric.steps:
-          val = d.totalSteps.toDouble();
-        case ChartMetric.distance:
-          val = d.totalDistanceFt;
-        case ChartMetric.timeInMotion:
-          val = d.totalTimeInMotionMinutes.toDouble();
-        case ChartMetric.gaitSpeed:
-          val = d.avgGaitSpeedFts;
-          minVal = d.minGaitSpeedFts;
-          maxVal = d.maxGaitSpeedFts;
+      if (d != null) {
+        switch (metric) {
+          case ChartMetric.steps:
+            val = d.totalSteps.toDouble();
+          case ChartMetric.distance:
+            val = d.totalDistanceFt;
+          case ChartMetric.timeInMotion:
+            val = d.totalTimeInMotionMinutes.toDouble();
+          case ChartMetric.gaitSpeed:
+            val = d.avgGaitSpeedFts;
+            minVal = d.minGaitSpeedFts;
+            maxVal = d.maxGaitSpeedFts;
+        }
       }
-      final label = shortLabel
-          ? DateFormat('E').format(d.date)
-          : DateFormat('M/d').format(d.date);
-      final tip = DateFormat('MMM d').format(d.date);
       return _DataPoint(
-        label: label,
+        label: shortLabel
+            ? DateFormat('E').format(day)
+            : DateFormat('M/d').format(day),
         value: val,
-        tooltip: tip,
+        tooltip: DateFormat('MMM d').format(day),
         minValue: minVal,
         maxValue: maxVal,
       );
-    }).toList();
+    });
   }
 
   List<_DataPoint> _fromWeekly(List<WeeklyActivity> weeks) {
