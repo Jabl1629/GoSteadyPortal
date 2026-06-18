@@ -1,6 +1,6 @@
 # GoSteady Portal — Master Architecture & Phase Plan
 
-> **Last updated:** 2026-06-03 | **Branch:** `feature/infra-scaffold`
+> **Last updated:** 2026-06-18 | **Branch:** `feature/infra-scaffold`
 > **Repository:** [GoSteadyPortal](https://github.com/Jabl1629/GoSteadyPortal)
 
 ---
@@ -752,12 +752,13 @@ Cloud → device commands flow through `gs/{serialNumber}/cmd` (downlink, see be
 |-------|----------|-----------|
 | `session_start` | Yes | ISO 8601, must parse |
 | `session_end` | Yes | ISO 8601, must be ≥ `session_start` |
-| `steps` | Yes | Integer, 0–100,000 |
+| `steps` | Yes | Integer, 0–100,000. **As of `0.16.0-gait` this is a de-satellited count** (the emitted impulse train after a 0.8 s refractory merge), not the raw peak count — sharpened ~30%; split cohorts on `firmware_version`. See coord §C46 / `2026-06-07-gait-speed.md`. |
 | `distance_ft` | Yes | Number, 0–50,000 |
 | `active_min` | Yes | Integer, 0–1,440 |
 | `roughness_R` | No | Float — terrain roughness metric from on-device M9 algorithm |
 | `surface_class` | No | Enum: `indoor`, `outdoor` (M9 surface classifier output) |
 | `firmware_version` | No | Semver string — useful for cohort dashboards + retrain triage |
+| `gait_speed_fts` | No | Float, 0–10 — session-average walking speed (ft/s) = `distance_ft` ÷ peak-train walking time. Omitted when on-device guards fail (too few steps / too little walking time / saturated session). `0.16.0-gait+`; stored as `gaitSpeedFts`, returned by `/patients/{id}/activity`. Spec `2026-06-07-gait-speed.md`, coord §C46. |
 
 ### Heartbeat (hourly) — written to Device Shadow
 ```json
@@ -1365,7 +1366,7 @@ Phase 2B replaces the Flutter portal's mock data with live AWS-backed reads + wr
 | Subset | Status | What it ships |
 |---|---|---|
 | **2B-0** Foundation | ✅ **Deployed (dev) 2026-05-25** ([`phase-2b-0-foundation.md`](phase-2b-0-foundation.md)) | `ApiClient` + extended `AuthService` (MFA, forgot-password, full claim extraction) + `FacilityRepository` abstraction + `GoRouter` URL state + dual-build (`BUILD_MODE=demo\|live`) + smoke screen on `GET /api/v1/me`. **Plus minimum-viable hosting** — `GoSteady-Dev-Hosting` CDK stack (S3 + CloudFront + OAC + ACM + baseline WAF) live at `dev.portal.gosteady.co`. **Approach-C (2026-05-24):** evolve the existing facility demo in place — single screen tree, two thin entry points, two build artifacts. Demo continues at `facilitydemo.gosteady.co` on Netlify (subdomain migrated from `gosteady.co/facilitydemo`); dev portal at `dev.portal.gosteady.co` on S3+CF; production portal at `portal.gosteady.co` lands in Phase 3A. End-to-end smoke verified 2026-05-25 with both caregiver + MFA-required facility_admin paths |
-| **2B-FAC-R** Facility Reads | ✅ Deployed; **live-validated end-to-end 2026-06-03 (coord §C41)** ([`phase-2b-fac-r-facility-reads.md`](phase-2b-fac-r-facility-reads.md)) | Wires `LiveFacilityRepository` to 2A-RD endpoints — Census, Patient Detail, Device Detail, Notification badges (using real 1C-slim alertType names). Census + patient detail confirmed rendering real data on the deployed site. **Polling cadence 60s/30s verified working 2026-06-03** (census row + patient detail both auto-updated 0→42 steps with no reload — coord §C41.4). 6M tab + gait UI suppressed in V1. Demo build continues to work unchanged via approach C |
+| **2B-FAC-R** Facility Reads | ✅ Deployed; **live-validated end-to-end 2026-06-03 (coord §C41)** ([`phase-2b-fac-r-facility-reads.md`](phase-2b-fac-r-facility-reads.md)) | Wires `LiveFacilityRepository` to 2A-RD endpoints — Census, Patient Detail, Device Detail, Notification badges (using real 1C-slim alertType names). Census + patient detail confirmed rendering real data on the deployed site. **Polling cadence 60s/30s verified working 2026-06-03** (census row + patient detail both auto-updated 0→42 steps with no reload — coord §C41.4). 6M tab suppressed in V1; **gait UI now live as of firmware `0.16.0-gait` + 2A-RD `gaitSpeedFts` (V1.1, coord §C46 / `2026-06-07-gait-speed.md`)**. Demo build continues to work unchanged via approach C |
 | **2B-FAC-W** Facility Writes | ✅ Deployed; **Add-Resident + physical-device provision live-validated through the real UI 2026-06-03 (coord §C41, FAC-W T3)** | Acknowledge notification (2A-AA) + Replace/Discontinue Device (2A-DL) + Add/Edit Resident, Discharge, Pause Notifications, Care Note (2A-UM-P). **3 live-mode bugs fixed during validation**: Unit-dropdown value-equality (Flutter); `patient-mgmt` `status_patientId` missing on create (residents invisible to roster) + not updated on discharge. **2026-06-04 (coord §C42):** "Discontinue Device" removed + "Discharge Resident" → **"End Monitoring"** (no reason, just confirm + optional notes) — consolidated the overlapping device/resident-end affordances (no EMR planned); discharge-cascade wipe gap fixed so the cap actually recycles. Full single-cap lifecycle (provision→activate→walk→End Monitoring→wipe→recycle→re-provision→re-activate→walk) validated live. Remaining FAC-W acceptance rows (ack/edit/pause/care-note through the UI) still to be driven |
 | **2B-D2C** Household Path | 🔲 Planned — **superseded by the topic-named [`d2c.md`](d2c.md) umbrella + 5-phase plan** (walker-claim → SMS → deactivate/reset → new-user reuse → caregivers). D2C now has its own dedicated Cognito pool + dashboard (`lib/d2c/`, mockups deployed), not a refit of the facility `LiveFacilityRepository`. Phase 1 detail: [`d2c-phase1-walker-activation.md`](d2c-phase1-walker-activation.md). Decisions: [`d2c-mockup-followups.md`](d2c-mockup-followups.md). | New D2C account model (Member + Admin flag + Walker-user property + Care Circle); walker-user-first delivery proving the full stack on real hardware before adding caregivers; reuses deployed 2A-DL activation + 1A/1B ingestion + 2A-RD reads + wipe-ack recycle |
 | **2B-INT** Internal-tier UI | 🔲 Planned (low priority) | Role-conditional UI for `internal_*` roles inside the unified portal (cross-tenant search, audit-reader nav). Gated on 2A-INT |
