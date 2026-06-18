@@ -8894,3 +8894,29 @@ Deferred to algo-v1.5 (need more labeled data; collection paused at 19/30): the 
 ---
 
 *Entry owner: Claude (firmware+cloud session, 2026-06-07). Gait-speed feature design locked spec-first; one new optional wire field (`gait_speed_fts`, ft/s). Folds in two measured algo fixes (decoupled merge-0.8 step counter: 47%→16% step MAPE, slow 78%→7%, zero distance cost; peak-train walking-time denominator removing the σ-gate exit-hold bias). Nothing implemented yet — see `docs/specs/2026-06-07-gait-speed.md` for the full design + file-level checklist.*
+
+---
+
+# §C47 — Device time reliability: SNTP + cloud-ingest anchoring (design) (2026-06-18)
+
+Entry owner: Claude (firmware+cloud session) | Trigger: a portal investigation of "missing" Jun 15–16 data on `GS0000000001` traced to **~60 walks stamped year 2080**. **Design only — not implemented.** Full spec: [`docs/specs/2026-06-18-device-time-reliability.md`](../specs/2026-06-18-device-time-reliability.md).
+
+## C47.1 — Incident + root cause
+
+The device was online all of Jun 14–16 (≈72 heartbeat events/day; `activity_ok` in real time per server `ingestedAt`) but its own timestamps read `2080-01-05…09`, so the walks fell outside the portal window. **Data was never lost — it was mis-dated.** Root cause: the firmware's only absolute-time source is carrier **NITZ** (`AT+CCLK?`); the iBasis **roaming** eSIM's visited network didn't broadcast NITZ Jun 14–16, so the modem RTC stayed at its 1980 default (`"80/01/06"`), which the parser's `n<7` check accepts as 7 valid fields → `snprintf("20%02d…")` → 2080. The FMEA-1.1 retro-stamp can't help (same `AT+CCLK?` source). No independent anchor.
+
+## C47.2 — Approach: "Both" (3 layers)
+
+Principle: the monotonic clock (`k_uptime`) is reliable; absolute time = best trusted anchor + uptime-delta, anchors **NITZ → NTP → cloud-ingest**.
+
+1. **Sanity gate** — reject `AT+CCLK?` year ∉ [2024,2050]; never emit 2080.
+2. **SNTP via Nordic `date_time` lib (primary)** — `CONFIG_DATE_TIME` sources NITZ→NTP→app-set; carrier-independent time over the existing IP link; fixes the device's own clock (heartbeat `ts`, logs, TLS) too. The standard wearable/cellular-IoT pattern.
+3. **Cloud-ingest anchoring (backstop, never-drop guarantee)** — activity payload gains `clock_synced`, `session_start/end_uptime_ms`, `publish_uptime_ms`, `boot_count`; when the device flags `clock_synced=false`, the cloud reconstructs `session_time = ingestedAt − (publish_uptime − session_uptime)`. Rides the proven MQTT path; would have dated Jun 14–16 correctly.
+
+## C47.3 — Contract impact
+
+**Revises §5** ("timestamps device-authoritative / no cloud-side time correction"): device ISO is authoritative **iff `clock_synced`**; otherwise the cloud reconstructs from uptime + trusted receive time. New optional activity fields (C47.2 #3) — accept-all tolerates old firmware. Known residual edge: reboot between record and upload invalidates the uptime delta (`boot_count` mismatch) → cloud stores a flagged `timeSource="uncertain"` best-effort time rather than dropping. Open questions (NTP server / UDP reachability on iBasis, `date_time` refresh cadence vs battery, heartbeat-`ts`/lastSeen correction) tracked in the spec.
+
+---
+
+*Entry owner: Claude (firmware+cloud session, 2026-06-18). Time-reliability design (SNTP-primary + cloud-ingest anchoring + sanity gate) in response to the Jun 14–16 2080-timestamp incident; not implemented. Full design + checklist + edge cases: `docs/specs/2026-06-18-device-time-reliability.md`.*
