@@ -42,28 +42,36 @@ class SessionAdapter {
     }).toList(growable: false);
   }
 
-  /// Aggregate ALL sessions in the response into a single
-  /// [DailyActivity] for "today." The server already filtered to the
-  /// 24h window — we trust that scoping and sum every session.
+  /// Build the single [DailyActivity] for "today."
   ///
-  /// Sessions can span two UTC date buckets (e.g., evening in Mountain
-  /// Time = early morning UTC the next day). Picking just one date
-  /// would lose the other half. Caller wants the total — give them
-  /// the total.
+  /// "Today" is the CALENDAR day — the same `date` field that
+  /// [toDailyList] groups the 7D/30D views on — NOT the rolling 24h
+  /// window the API returns. `range=24h` spans two calendar days (last
+  /// night + this morning); summing all of it made evening sessions from
+  /// yesterday show on today's 0–23h clock (a 9pm bar at 10am) and
+  /// inflated the Today's-Activity headline to ~24h of data. So we filter
+  /// to the sessions whose `date` matches today before bucketing — which
+  /// makes the headline + 24h chart consistent with the 7D "today" bar.
   ///
-  /// Hour buckets use the LOCAL hour-of-day of `sessionStart` (after
-  /// `.toLocal()`). The local-tz "today" is approximate — until the
-  /// cloud-side activity-processor emits sessions with facility-local
-  /// timestamps, this is the closest the client can get.
+  /// `date` is facility-local (server-computed); `todayStr` is the
+  /// viewer's local date. They align when the viewer is in the facility
+  /// timezone (the common case); a cross-timezone viewer is a deeper fix
+  /// that needs the facility tz threaded through (tracked separately).
   static DailyActivity toToday(
     List<ActivitySession> sessions, {
     DateTime? referenceDate,
   }) {
     final ref = (referenceDate ?? DateTime.now()).toLocal();
-    if (sessions.isEmpty) {
+    final todayStr = _formatDate(ref);
+    final todaySessions = sessions
+        .where((s) =>
+            (s.date.isNotEmpty ? s.date : _formatDate(s.sessionStart.toLocal())) ==
+            todayStr)
+        .toList(growable: false);
+    if (todaySessions.isEmpty) {
       return DailyActivity(date: ref, hours: const []);
     }
-    final hours = _bucketByLocalHour(sessions, ref);
+    final hours = _bucketByLocalHour(todaySessions, ref);
     return DailyActivity(date: ref, hours: hours);
   }
 

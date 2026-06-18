@@ -71,6 +71,22 @@ void main() {
         reason: 'hideGait gates on last30.any(avg>0)');
   });
 
+  test('toToday is the calendar day, not the rolling 24h window', () {
+    // The range=24h fetch includes last night; those must NOT show as today.
+    final yesterday9pm =
+        DateTime(today.year, today.month, today.day, 21, 0)
+            .subtract(const Duration(days: 1));
+    final sessions = [
+      walk(noon.subtract(const Duration(minutes: 5)), 18, 17.45, 1, 0.77),
+      walk(yesterday9pm, 30, 40.0, 2, 0.90), // yesterday 9pm — must drop
+    ];
+    final d = SessionAdapter.toToday(sessions, referenceDate: noon);
+    expect(d.totalSteps, 18,
+        reason: "yesterday's evening session must not count as today");
+    expect(d.hours[21].steps, 0,
+        reason: 'no 9pm bar on the today clock when it is midday');
+  });
+
   test('short-walk-only day still averages non-zero (floor weight)', () {
     final sessions = [
       walk(noon.subtract(const Duration(minutes: 5)), 7, 7.0, 0, 0.84),
