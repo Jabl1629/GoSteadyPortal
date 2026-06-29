@@ -20,14 +20,20 @@ import 'screens/d2c_dashboard_screen.dart';
 // ─────────────────────────────────────────────────────────────────────
 
 class D2CDashboardPreview extends StatefulWidget {
-  const D2CDashboardPreview({super.key});
+  const D2CDashboardPreview({super.key, this.startAsWalkerUser = false});
+
+  /// Which copy variant the dashboard opens in. The in-app person-icon
+  /// toggle still flips between the two regardless. Defaults to the
+  /// caregiver (Admin) view for the wireframe hub; the user demo
+  /// (`main_userdemo.dart`) opens in the walker-user view.
+  final bool startAsWalkerUser;
 
   @override
   State<D2CDashboardPreview> createState() => _D2CDashboardPreviewState();
 }
 
 class _D2CDashboardPreviewState extends State<D2CDashboardPreview> {
-  bool _asWalkerUser = false;
+  late bool _asWalkerUser = widget.startAsWalkerUser;
 
   @override
   Widget build(BuildContext context) {

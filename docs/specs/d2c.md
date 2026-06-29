@@ -14,6 +14,8 @@
 > (others written as each phase is approached)
 > **Mockups:** navigable hub at
 > `https://jabl1629.github.io/GoSteadyPortal/#/d2c/preview`
+> **Public demo:** dashboard-first mock app at https://gosteady.co/userdemo/
+> ([d2c-userdemo.md](d2c-userdemo.md) — consumer counterpart of the facility demo)
 > **Decisions log:** [d2c-mockup-followups.md](d2c-mockup-followups.md)
 
 ---
