@@ -1764,6 +1764,7 @@ Surfaced by the first physical-device activation through the facility portal on 
 | 2C | Notifications | — | 🔲 Planned |
 | 3A | Portal Hosting | [`phase-3a-portal-hosting.md`](phase-3a-portal-hosting.md) | 🟡 Sketch drafted 2026-05-23 — locks in same-origin reverse-proxy + CSP shape for 2B impl. Full depth when 2B-FAC-R approaches prod |
 | 3B | CI/CD Pipeline | — | 🔲 Planned |
+| DT-0 | Device-Type Scaffold (cloud) | [`phase-dt0-device-type-scaffold.md`](phase-dt0-device-type-scaffold.md) | 🔲 Spec drafted 2026-07-01 — first phase of the multi-device-type plan ([`2026-07-01-device-types.md`](2026-07-01-device-types.md) §8); all backward-compatible; DT-1…DT-4 follow per memo phasing |
 | 5A | Device Onboarding | — | ⬜ Future |
 | 5B | End-to-End Validation | — | ⬜ Future |
 
