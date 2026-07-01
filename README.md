@@ -9,6 +9,14 @@ Caregiver monitoring dashboard for the GoSteady smart walker cap. Built in Flutt
 > `facilitydemo/`). Mock auth, static seeded data, fully responsive (works on
 > iPhone/iPad). See [`docs/specs/facility-demo.md`](docs/specs/facility-demo.md)
 > for the spec and [`tools/deploy-demo.sh`](tools/deploy-demo.sh) to redeploy.
+>
+> 🟢 **Live D2C user demo:** [gosteady.co/userdemo](https://gosteady.co/userdemo/)
+>
+> The consumer / household counterpart — a phone-first, dashboard-first mock app
+> (Activity / Care Team / Account) behind a one-click mock sign-in. Served the
+> same way (Netlify subdirectory `userdemo/` in `GoSteadyWeb`). Entry point
+> `lib/d2c/main_userdemo.dart`; see [`docs/specs/d2c-userdemo.md`](docs/specs/d2c-userdemo.md)
+> for the spec and [`tools/deploy-d2c-demo.sh`](tools/deploy-d2c-demo.sh) to redeploy.
 
 ## V1 Scope
 

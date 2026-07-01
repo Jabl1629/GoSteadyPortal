@@ -550,4 +550,5 @@ eventual Phase 3A production URL `portal.gosteady.co`).
 ---
 
 *See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full system architecture and the
-hierarchy / multi-tenancy model this demo simplifies.*
+hierarchy / multi-tenancy model this demo simplifies. For the consumer / household
+counterpart, see [`d2c-userdemo.md`](d2c-userdemo.md) (live at `gosteady.co/userdemo/`).*
