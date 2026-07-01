@@ -491,6 +491,55 @@ def _try_wipe_ack(serial: str, last_cmd_id: str, heartbeat_ts: datetime,
     return True
 
 
+def _check_device_type(serial: str, event: dict) -> None:
+    """
+    Phase DT-0 (memo Q7 / spec L8): firmware self-reports `device_type` in
+    the heartbeat; cross-check it against the registry-authoritative
+    Device Registry value. Mismatch → warn log + `device_type_mismatch_count`
+    EMF metric (alarmed in Observability) — NEVER reject; the registry wins.
+    Catches wrong-firmware-flashed-on-this-board at the first heartbeat.
+
+    Cost discipline: only runs when the field is present (pre-DT-1 firmware
+    never sends it → zero overhead), and the GetItem projects a single
+    attribute. Best-effort: any read failure is a debug log, not an error.
+    """
+    reported_type = event.get("device_type")
+    if not isinstance(reported_type, str) or not reported_type:
+        return
+
+    try:
+        resp = _device_tbl.get_item(
+            Key={"serialNumber": serial},
+            ProjectionExpression="deviceType",
+        )
+        item = resp.get("Item")
+    except ClientError as e:
+        logger.debug(
+            "device_type_check_read_failed",
+            extra={"serial": serial, "error": str(e)},
+        )
+        return
+
+    if item is None:
+        # Unregistered serial — other paths own that signal; nothing to
+        # compare against.
+        return
+
+    registry_type = item.get("deviceType") or "walker_cap"  # D9 legacy default
+    if reported_type != registry_type:
+        logger.warning(
+            "device_type_mismatch",
+            extra={
+                "serial": serial,
+                "reportedType": reported_type,
+                "registryType": registry_type,
+            },
+        )
+        metrics.add_metric(
+            name="device_type_mismatch_count", unit=MetricUnit.Count, value=1
+        )
+
+
 def _maybe_emit_battery_swapped(serial: str, event: dict) -> None:
     """
     DL16 / portal memo D7: emit `device.battery_swapped` audit when a
@@ -605,6 +654,11 @@ def handler(event: dict, _context):
 
     # Battery-swap detection must read prior Shadow BEFORE we overwrite it.
     _maybe_emit_battery_swapped(serial, event)
+
+    # DT-0: registry cross-check of the firmware's self-reported device_type
+    # (no-op when the field is absent — pre-DT-1 firmware). The field itself
+    # still flows into Shadow.reported below via the D16 accept-all build.
+    _check_device_type(serial, event)
 
     reported = _shadow_reported(event, effective_ts_iso)
 

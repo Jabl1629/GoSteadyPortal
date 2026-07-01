@@ -2,10 +2,10 @@
 
 ## Overview
 - **Phase**: DT-0 (first phase of the multi-device-type plan — [`2026-07-01-device-types.md`](2026-07-01-device-types.md))
-- **Status**: Planned (spec drafted 2026-07-01)
+- **Status**: ✅ **Deployed (dev) 2026-07-01** — 4 stacks (Ingestion/Processing/Api/Observability); smoke **15/15 PASS** (`infra/scripts/smoke-dt0.py`); registry backfill done (6 records → `walker_cap`); walker-cap regression green incl. physical-cap heartbeat
 - **Branch**: feature/infra-scaffold
-- **Date Started**: —
-- **Date Completed**: —
+- **Date Started**: 2026-07-01
+- **Date Completed**: 2026-07-01
 
 Makes `deviceType` a first-class concept across the cloud so the rollator
 accessory platform (and any future device type) can ride the existing
@@ -138,8 +138,11 @@ tolerated by accept-all D16; lands in Shadow `reported` as today.
 | `infra/lambda/device-api/handler.py` | Modified | bulk-create validation + write of `deviceType`/`hardwareVariant`; provision copies `deviceType` from the already-fetched registry item onto the assignment row; GET response fields; `device.created` audit payload |
 | `infra/lambda/patient-mgmt/handler.py` | Modified | `_provision_inline`: same one-line assignment-row snapshot |
 | `infra/lambda/d2c-claim/handler.py` | Modified | `_provision_inline`: same one-line assignment-row snapshot |
+| `infra/lambda/patient-api/handler.py` | Modified | `deviceType` added to `_activity_view` + `_alert_view` projections (A4 resolution — rows ARE projected) |
 | `infra/lib/stacks/ingestion-stack.ts` | Modified | Second `CfnThingType` (`RollatorPlatformType`) |
 | `infra/lib/constructs/alarms/handler-alarms.ts` | Modified | `device-type-mismatch` alarm |
+| `infra/lib/stacks/processing-stack.ts` | Modified | **D7 IAM fix:** activity-processor Patients grant Read → ReadWrite (pre-existing 2A-UM-P auto-resume gap found by T12) |
+| `infra/scripts/smoke-dt0.py` | New | Reusable 15-check smoke runner (T1–T13 subset; Cognito test users + Option-A synthetic internal_admin invokes; self-cleaning with pre-clean) |
 | `docs/specs/ARCHITECTURE.md` | Modified | §6 table attrs (Registry `deviceType`/`hardwareVariant`; Assignments + Activity + Alerts `deviceType`); §7 restructured → §7.0 Core Device Contract v1 + §7.1 walker_cap + §7.2 rollator_platform stub; §14 new DT requirement rows; §17 index |
 | `docs/firmware-coordination/2026-04-17-cloud-contracts.md` | Modified (append) | New `[rollator]` entry: Core Device Contract v1 announcement, serial-block allocation, heartbeat `device_type` field, bench-v0 activity contract |
 
@@ -156,20 +159,20 @@ tolerated by accept-all D16; lands in Shadow `reported` as today.
 
 | # | Scenario | Method | Expected Result | Status |
 |---|----------|--------|-----------------|--------|
-| T1 | Walker activity regression (payload from legacy assignment with no `deviceType`) | Synthetic MQTT publish | Row identical to today **plus** `deviceType: walker_cap`; audit unchanged | Pending |
-| T2 | Rollator activity happy path (`active_min` only, provisional fields) | Synthetic publish from `GS9999999980` | Accepted; row has `deviceType: rollator_platform`, `activeMinutes`, **no** `steps`/`distanceFt` attrs; provisional fields in `extras` | Pending |
-| T3 | Rollator activity missing `active_min` | Synthetic publish | `activity_reject` with `reason=missing:active_min`, metadata `deviceType=rollator_platform` | Pending |
-| T4 | Walker activity missing `steps` | Synthetic publish | Still rejects (per-type required set enforced; no regression to lax) | Pending |
-| T5 | Rollator device alert (`tipover`) | Synthetic publish on `gs/+/alert` | Rejected `bad_alert_type` (empty rollator enum) | Pending |
-| T6 | Heartbeat `device_type` mismatch (walker registry record, `device_type: rollator_platform` in payload) | Synthetic publish | Shadow still updated; warn log + `device_type_mismatch_count=1`; alarm fires in dev | Pending |
-| T7 | Heartbeat `device_type` match / absent | Synthetic publish | No metric; no behavior change | Pending |
-| T8 | Bulk-create with `deviceType: rollator_platform` + `hardwareVariant: cupholder_v1`; and with an invalid type | API call | 200 + record + audit carries both; invalid → 400 `INVALID_DEVICE_TYPE` | Pending |
-| T9 | Provision rollator registry record to test patient | API call | Assignment row carries `deviceType: rollator_platform`; `activate` cmd published (Core Contract untouched) | Pending |
-| T10 | D2C synthetic claim regression | Existing d2c e2e script | Claim succeeds; assignment row carries `deviceType: walker_cap` | Pending |
-| T11 | `merge_thresholds` unit: per-type defaults + patient-override merge, unknown type fallback | pytest | Walker/rollator identical values; overrides still win; unknown → walker defaults + warning | Pending |
-| T12 | Auto-resume fires on rollator activity (`activeMinutes > 0`, patient paused) | Synthetic publish | `notificationsPaused` removed + `patient.notifications.resume_auto` audit | Pending |
-| T13 | Registry CLI backfill idempotency | CLI | `attribute_not_exists(deviceType)` condition — second run is a no-op | Pending |
-| T14 | Physical-cap smoke (`GS0000000001` heartbeat + walk) | Live device | End-to-end unchanged; new row carries `deviceType: walker_cap` | Pending |
+| T1 | Walker activity regression (payload from legacy assignment with no `deviceType`) | Synthetic MQTT publish | Row identical to today **plus** `deviceType: walker_cap`; audit unchanged | ✅ Pass 2026-07-01 |
+| T2 | Rollator activity happy path (`active_min` only, provisional fields) | Synthetic publish from `GS9999999980` | Accepted; row has `deviceType: rollator_platform`, `activeMinutes`, **no** `steps`/`distanceFt` attrs; provisional fields in `extras` | ✅ Pass (`push_time_s` landed in `extras`) |
+| T3 | Rollator activity missing `active_min` | Synthetic publish | `activity_reject` with `reason=missing:active_min`, metadata `deviceType=rollator_platform` | ✅ Pass |
+| T4 | Walker activity missing `steps` | Synthetic publish | Still rejects (per-type required set enforced; no regression to lax) | ✅ Pass |
+| T5 | Rollator device alert (`tipover`) | Synthetic publish on `gs/+/alert` | Rejected `bad_alert_type` (empty rollator enum) | ✅ Pass |
+| T6 | Heartbeat `device_type` mismatch (walker registry record, `device_type: rollator_platform` in payload) | Synthetic publish | Shadow still updated; warn log + `device_type_mismatch_count=1`; alarm fires in dev | ✅ Pass — **alarm confirmed ALARM + SNS action executed** |
+| T7 | Heartbeat `device_type` match / absent | Synthetic publish | No metric; no behavior change | ✅ Pass |
+| T8 | Bulk-create with `deviceType: rollator_platform` + `hardwareVariant: cupholder_v1`; and with an invalid type | Synthetic Lambda invoke (internal_admin claims — no seeded internal user; rd-facadmin is MFA-challenged under USER_PASSWORD_AUTH) | 200 + record + audit carries both; invalid → 400 `INVALID_DEVICE_TYPE` | ✅ Pass |
+| T9 | Provision rollator registry record to test patient | Real API (rd-caregiver token) | Assignment row carries `deviceType: rollator_platform`; `activate` cmd published (Core Contract untouched) | ✅ Pass (both serials; + GET device returns type/variant) |
+| T10 | D2C synthetic claim regression | Existing d2c e2e script | Claim succeeds; assignment row carries `deviceType: walker_cap` | ⏸ Deferred — `d2c-claim` + `patient-mgmt` inline-provision snapshots are line-identical to device-api's (T9-validated) and compile-tested; exercise at next d2c / patient-create smoke |
+| T11 | `merge_thresholds` unit: per-type defaults + patient-override merge, unknown type fallback | unittest | Walker/rollator identical values; overrides still win; unknown → walker defaults | ✅ Pass (23 new tests; 296 total across 5 suites) |
+| T12 | Auto-resume fires on rollator activity (`activeMinutes > 0`, patient paused) | Synthetic publish | `notificationsPaused` removed + `patient.notifications.resume_auto` audit | ✅ Pass — **after fixing a pre-existing IAM gap this test surfaced** (see D7) |
+| T13 | Registry CLI backfill idempotency | boto3 (in smoke runner) | `attribute_not_exists(deviceType)` condition — second run is a no-op | ✅ Pass (run 1: 6 applied; run 2: 0 applied / all skipped) |
+| T14 | Physical-cap smoke (`GS0000000001` heartbeat + walk) | Live device | End-to-end unchanged; new row carries `deviceType: walker_cap` | 🟡 Heartbeat processed clean post-window (0 errors); synthetic heartbeat path fully validated post-deploy (T6/T7). Next real walk confirms the activity row shape — watch item, non-blocking |
 
 ### Verification Commands
 ```bash
@@ -229,12 +232,15 @@ additive resources (ThingType, alarm). Any `[-]` is a red flag (§18.7).
 | D4 | Auto-resume re-keyed on `activeMinutes` (env `AUTO_RESUME_MIN_ACTIVE_MIN`, default 0); `AUTO_RESUME_MIN_STEPS` removed | Keep steps-keyed with rollator special-case | `steps` is absent from rollator rows **only during the DT-1→DT-2 bench window** (the step/distance/gait algorithms arrive with the DT-2 arc; parity — steps + distance + gait — is required by launch per D10). But today's handler references `item["steps"]` unconditionally (auto-resume, audit block, log, response) → KeyError on a bench rollator row, so the type-safe build path is mechanically required; and `activeMinutes` is the declared universal metric (memo Q8/Q15) with identical default-0 semantics ("any persisted activity clears the pause"). The old env var was never set anywhere |
 | D5 | `activity_reject` type triage via EMF **metadata**, not a new dimension | `deviceType` dimension | A new dimension set would fork the metric identity and silently detach the existing 1.6 `activity-reject` alarm (A3) |
 | D6 | No `by-device-type` GSI | GSI on Registry | No query need at ≤dozens fleet; scan/filter suffices for inventory-by-type; add GSI on first real access pattern |
+| D7 | **(Found during T12)** Fixed pre-existing IAM gap: activity-processor lacked `dynamodb:UpdateItem` on Patients, so the 2A-UM-P auto-resume path (2026-05-24) had been silently dead since it shipped — the best-effort catch swallowed `AccessDeniedException` on every attempt. `patientsTable.grantReadData` → `grantReadWriteData` in processing-stack.ts | Leave as-is (auto-resume stays dead) | The feature is documented + user-visible (US-31); the smoke suite proved the code path works once granted. Not a DT-0 regression — a DT-0 catch |
 
 ## Open Questions
-- [ ] Exact registry-record seed set for the backfill loop (confirm whether synthetic fixtures beyond the three physical units carry Device Registry rows in dev)
-- [ ] A4 verification: does `patient-api` project activity fields or return rows as stored? (determines a one-line projection addition)
+- [x] ~~Exact registry-record seed set for the backfill loop~~ **Resolved at deploy:** 6 pre-DT-0 records existed (`GS0000000001/2/3`, `GS9999999998/99`, `GS0000000099` d2c-smoke) — all backfilled `walker_cap` via the conditional loop in `smoke-dt0.py` (idempotency verified, T13)
+- [x] ~~A4 verification: does `patient-api` project activity fields?~~ **Resolved:** yes — `_activity_view` / `_alert_view` project explicitly; `deviceType` added to both (null on pre-DT-0 rows = walker_cap per D9)
+- [ ] Residual: exercise the `d2c-claim` + `patient-mgmt` inline-provision `deviceType` snapshots at runtime (line-identical to the T9-validated device-api write; fold into the next d2c or patient-create smoke)
 
 ## Changelog
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-07-01 | scoping session (Jace + Claude) | Initial spec, drafted from memo [`2026-07-01-device-types.md`](2026-07-01-device-types.md) D1–D11 |
+| 2026-07-01 | implementation session | **Deployed (dev):** 4 stacks, all-[~]+2-[+] diff as predicted; 296 unit tests green; smoke 15/15 (`infra/scripts/smoke-dt0.py`, reusable). Adds: `_shared/device_types/`, per-type dispatch in activity/alert handlers, type-keyed thresholds, heartbeat cross-check + alarm (fired + routed on T6), 3 provision-writer snapshots, bulk-create validation, `_device_view`/`patient-api` projections, second Thing Type, registry backfill. **D7:** fixed pre-existing activity-processor Patients-write IAM gap found by T12 |

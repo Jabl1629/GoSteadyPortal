@@ -42,6 +42,8 @@ AUDIT_DEVICE_BATTERY_SWAPPED = "device.battery_swapped"  # Mid-deployment cold-b
 # Connection-coordinator additions (2026-05-18, coord §C23 — addresses §C22 Finding 2 + Finding 7):
 AUDIT_DEVICE_CMD_REPUBLISHED = "device.cmd_republished"  # Coordinator Lambda re-published a queued cmd on firmware connect
 AUDIT_DEVICE_CMD_SWEPT_STALE = "device.cmd_swept_stale"  # Coordinator Lambda removed a stale outstandingXxxCmds entry (>24h old)
+# Phase DT-0 (2026-07-01, docs/specs/phase-dt0-device-type-scaffold.md):
+AUDIT_DEVICE_TYPE_CHANGED = "device.type_changed"  # internal_admin re-typed a registry record (dev: CLI runbook; endpoint deferred to first-need)
 
 # ── Patient / activity / alert (Phase 1B-rev + Phase 2A) ──────────────
 AUDIT_PATIENT_ACTIVITY_CREATE = "patient.activity.create"
@@ -122,6 +124,7 @@ KNOWN_AUDIT_EVENTS = frozenset(
         AUDIT_DEVICE_BATTERY_SWAPPED,
         AUDIT_DEVICE_CMD_REPUBLISHED,
         AUDIT_DEVICE_CMD_SWEPT_STALE,
+        AUDIT_DEVICE_TYPE_CHANGED,
         AUDIT_PATIENT_ACTIVITY_CREATE,
         AUDIT_PATIENT_ACTIVITY_READ,
         AUDIT_PATIENT_DETAIL_READ,

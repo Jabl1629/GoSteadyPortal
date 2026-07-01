@@ -76,6 +76,7 @@ from _shared.audit_catalog import (
     AUDIT_PATIENT_RESUMED,
     AUDIT_PATIENT_UPDATE,
 )
+from _shared.device_types import DEFAULT_TYPE as DEFAULT_DEVICE_TYPE
 from _shared.observability import emit_audit, get_logger
 from _shared.pause_check import compute_until_epoch, days_remaining, is_currently_paused
 
@@ -561,6 +562,9 @@ def _provision_inline(
                 "clientId": target_client_id,
                 "facilityId": target_facility_id,
                 "censusId": target_census_id,
+                # DT-0 D1: type snapshot from the registry item (caller
+                # fetched it for the state check); absent = walker_cap.
+                "deviceType": device.get("deviceType") or DEFAULT_DEVICE_TYPE,
                 "validFrom": now_iso,
                 "assignedBy": claims["userId"],
             },

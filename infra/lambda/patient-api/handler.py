@@ -178,6 +178,9 @@ def _activity_view(row: dict[str, Any]) -> dict[str, Any]:
         "distanceFt": row.get("distanceFt"),
         "activeMinutes": row.get("activeMinutes"),
         "deviceSerial": row.get("deviceSerial"),
+        # DT-0: null on pre-DT-0 rows (readers treat null as walker_cap per
+        # D9); the DT-4 D2C dashboard keys per-type rendering on this.
+        "deviceType": row.get("deviceType"),
         "roughnessR": row.get("roughnessR"),
         "surfaceClass": row.get("surfaceClass"),
         "firmwareVersion": row.get("firmwareVersion"),
@@ -197,6 +200,7 @@ def _alert_view(row: dict[str, Any]) -> dict[str, Any]:
         "acknowledgedBy": row.get("acknowledgedBy"),
         "data": row.get("data"),
         "deviceSerial": row.get("deviceSerial"),
+        "deviceType": row.get("deviceType"),  # DT-0; null on pre-DT-0 rows
     }
 
 

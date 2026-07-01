@@ -8937,3 +8937,98 @@ Principle: the monotonic clock (`k_uptime`) is reliable; absolute time = best tr
 ---
 
 *Entry owner: Claude (firmware+cloud session, 2026-06-18). Time-reliability design (SNTP-primary + cloud-ingest anchoring + sanity gate) in response to the Jun 14–16 2080-timestamp incident; not implemented. Full design + checklist + edge cases: `docs/specs/2026-06-18-device-time-reliability.md`.*
+
+---
+
+# §C48 — [rollator] Phase DT-0 device-type scaffold deployed; Core Device Contract v1 announced (2026-07-01)
+
+## C48.1 — Context
+
+GoSteady is adding a **second device type**: a rollator accessory-platform board
+(first SKU: cupholder), same Thingy:91 X / nRF9151, different firmware +
+outputs, **D2C-first go-to-market**. Full scoping (Q1–Q15 resolved with product
+owner, decisions D1–D11) in `docs/specs/2026-07-01-device-types.md`; cloud
+implementation spec `docs/specs/phase-dt0-device-type-scaffold.md`. Roadmap:
+DT-0 (this entry, cloud scaffold) → DT-1 (firmware product split + capture-rig
+reuse on a rollator-mounted dev board) → DT-2 (data collection + algo arc to
+**walker-cap metric parity incl. gait**) → DT-3 (hardening) → DT-4 (D2C launch
+readiness; Twilio approval is the external gate).
+
+## C48.2 — What landed (cloud, deployed to dev 2026-07-01)
+
+- `deviceType` (`walker_cap` | `rollator_platform`) end-to-end: Device Registry
+  (registry-authoritative; optional `hardwareVariant` e.g. `cupholder_v1`) →
+  snapshotted onto DeviceAssignments at provision (all 3 writers: device-api,
+  patient-mgmt, d2c-claim) → denormalized onto every Activity/Alert row →
+  patient-api projections. Absent anywhere = `walker_cap` (legacy default; 6
+  pre-DT-0 registry records backfilled).
+- Per-type ingest dispatch (`_shared/device_types/`): activity metric
+  validation + named-column promotion + alert enum are per-type now; the
+  envelope, time resolution (§C47), lifecycle, and heartbeat stay Core.
+  **Walker-cap behavior byte-identical** (unit + synthetic + physical-cap
+  regression green).
+- Second IoT Thing Type `GoSteadyRollatorPlatform-dev` (fleet-provisioning
+  template stays cap-pinned until Phase 5A).
+- Threshold defaults keyed by type (rollator inherits walker values until
+  DT-3 pins real cupholder battery numbers).
+- New Observability alarm `gosteady-dev-heartbeat-processor-device-type-mismatch`
+  (31 Observability alarms total) — fired + routed to the ops topic during
+  smoke validation.
+- Validation: **smoke 15/15 PASS** (`infra/scripts/smoke-dt0.py`, reusable;
+  Cognito rd-test users + Option-A synthetic internal_admin invokes) + 296
+  unit tests across 5 suites.
+
+## C48.3 — Firmware-facing contract deltas
+
+1. **NEW optional heartbeat field `device_type` (string).** Send the product
+   type (`walker_cap` / `rollator_platform`); cloud cross-checks it against
+   the registry and alarms on mismatch — **never rejects** (registry wins).
+   Catches wrong-product-firmware-flashed at the first heartbeat. Cap
+   firmware: add opportunistically, zero urgency (absent = no-op).
+2. **Serial allocation blocks** (registry stays authoritative; blocks are
+   convenience): rollator dev/bench `GS9999999980–89`; rollator production
+   `GS0001000000–GS0001999999`; caps continue from `GS0000000001`.
+   ⚠️ `GS9999999980` (rollator) + `GS9999999991` (walker) now exist as
+   DT-0 smoke fixtures — don't reuse for real units.
+3. **Rollator bench-v0 activity contract:** Core envelope (serial, session
+   identity + §C47 time fields, `firmware_version`) + `active_min` required;
+   everything else optional → lands in the row's `extras` map. Required set
+   converges to walker parity (`steps`, `distance_ft`, `active_min` +
+   optional `gait_speed_fts`) at DT-2 exit — never block a bench uplink on
+   an unproven metric.
+4. **Core Device Contract v1** is now written down (ARCHITECTURE §7.0): the
+   rollator firmware must implement the existing activate/wipe cmd protocol,
+   `last_cmd_id` echo, Shadow `desired.activated_at` re-check, heartbeat
+   schema, and §C47 time fields **verbatim** — that buys the entire deployed
+   lifecycle machinery (2A-DL, wipe-ack recycle, §C24 coordinator, portal
+   provisioning) with zero cloud change. Suggested firmware shape per memo
+   Q5: Kconfig product gate + `prj_rollator*.conf` in the same app; version
+   line `rol-0.1.0-…`.
+5. **No rollator device-originated alerts in v1** (memo Q11) — the enum is
+   empty; candidates (`rollaway`, brake-state) at DT-4 launch planning.
+
+## C48.4 — Finding: pre-existing IAM gap (not a DT-0 regression)
+
+Smoke T12 surfaced that **activity-processor never had `dynamodb:UpdateItem`
+on Patients**, so the 2A-UM-P auto-resume path (REMOVE `notificationsPaused`
+on fresh activity, shipped 2026-05-24) had been silently dead since it
+shipped — the best-effort catch swallowed `AccessDeniedException` on every
+attempt. Fixed (`grantReadData` → `grantReadWriteData` in
+processing-stack.ts) + deployed + re-validated (T12 green). Related DT-0
+change: auto-resume is now keyed on `activeMinutes` (the universal cross-type
+metric) instead of `steps` — env knob renamed `AUTO_RESUME_MIN_ACTIVE_MIN`
+(default 0, semantics unchanged).
+
+## C48.5 — State after this entry
+
+- Cloud: DT-0 complete in dev; walker fleet unaffected (`GS0000000001` still
+  `active_monitoring` for Rosa, heartbeats clean on the new code).
+- Firmware queue (DT-1, when rollator work starts): product split (memo Q5),
+  Core Contract conformance, capture tooling verified on a rollator-mounted
+  board (capture.html / control.py / pull_sessions.py carry over per Q14),
+  rollator capture-protocol doc + annotation spreadsheet, bench unit from
+  the `GS9999999980–89` block (skip …80) per the bring-up playbook against
+  the new Thing Type.
+- Watch items: `GS0000000001`'s next real walk confirms activity-row shape on
+  the new dispatch path (synthetic walker regression already green); the
+  deferred T10 (d2c-claim runtime snapshot) folds into the next d2c smoke.

@@ -16,6 +16,15 @@ Phase 1B revision changes (vs deployed Phase 1B original):
     per D14 / D16.
   - Powertools structured logging + metrics + audit emission per L13/L16.
   - ARM64 runtime per G7.
+
+Phase DT-0 (2026-07-01, phase-dt0-device-type-scaffold.md):
+  - Per-type metric validation + named-column promotion dispatched via
+    _shared/device_types on the assignment row's deviceType snapshot
+    (resolution now runs BEFORE metric validation — spec D2; the registry,
+    not the payload, picks the contract).
+  - `deviceType` denormalized onto every Activity row.
+  - Auto-resume re-keyed on activeMinutes (the universal metric — spec D4;
+    `steps` doesn't exist on rollator bench-v0 rows).
 """
 
 from __future__ import annotations
@@ -31,6 +40,7 @@ from botocore.exceptions import ClientError
 
 from _shared import (
     PatientContext,
+    device_types,
     emit_audit,
     get_logger,
     get_metrics,
@@ -50,37 +60,32 @@ ACTIVITY_TABLE = os.environ["ACTIVITY_TABLE"]
 PATIENTS_TABLE = os.environ.get("PATIENTS_TABLE", "gosteady-dev-patients")
 # Activity threshold for auto-resume; spec A6: default 0 (any activity
 # clears the pause — "the reason for pausing is gone"). Tunable via env
-# if false-positives become a complaint.
-AUTO_RESUME_MIN_STEPS = int(os.environ.get("AUTO_RESUME_MIN_STEPS", "0"))
+# if false-positives become a complaint. DT-0 spec D4: keyed on
+# activeMinutes (the universal cross-type metric) — `steps` doesn't exist
+# on rollator bench-v0 rows. Default-0 semantics identical to the old
+# AUTO_RESUME_MIN_STEPS (which was never set anywhere).
+AUTO_RESUME_MIN_ACTIVE_MIN = int(os.environ.get("AUTO_RESUME_MIN_ACTIVE_MIN", "0"))
 
 # 13 months = 13 × 30 × 86400 seconds ≈ retention horizon (L5 / 0B-rev D2).
 ACTIVITY_TTL_SECONDS = 13 * 30 * 86_400
 
-# Validation bounds — the goal is to reject obvious garbage, not second-
-# guess on-device sensor fusion.
-MAX_STEPS = 100_000
-MAX_DISTANCE_FT = 50_000
-MAX_ACTIVE_MIN = 1_440
-# Gait speed (ft/s), 0.16.0-gait+. ~6 ft/s is brisk community ambulation;
-# walker users are far slower. Cap generously at 10 (running) — out-of-range
-# values drop just the field, not the whole row (it's optional).
-MAX_GAIT_FTS = 10
-
-# Numeric fields that must be present + in range. Timestamps are resolved
-# separately by resolve_session_times and NEVER cause a reject (spec §4.3
-# never-drop): a missing/implausible session_start/_end under clock_synced=false
-# is reconstructed from the upload receive time + monotonic uptimes.
-REQUIRED_FIELDS = ("steps", "distance_ft", "active_min")
-NAMED_FIELDS = {
-    *REQUIRED_FIELDS,
+# Per-type validation bounds + metric promotion live in _shared/device_types
+# (Phase DT-0), dispatched on the assignment row's deviceType snapshot.
+# Timestamps are resolved separately by resolve_session_times and NEVER cause
+# a reject (spec §4.3 never-drop): a missing/implausible session_start/_end
+# under clock_synced=false is reconstructed from the upload receive time +
+# monotonic uptimes.
+#
+# The universal envelope fields below are device-agnostic; the effective
+# extras-exclusion set at runtime is UNIVERSAL_NAMED_FIELDS ∪ the resolved
+# type module's ACTIVITY_NAMED_FIELDS (walker's union reproduces the
+# pre-DT-0 NAMED_FIELDS exactly).
+UNIVERSAL_NAMED_FIELDS = {
     "session_start",
     "session_end",
     "serial",
     "thingName",
-    "roughness_R",
-    "surface_class",
     "firmware_version",
-    "gait_speed_fts",
     # 0.17.0-time device fields — consumed by resolve_session_times; named so
     # they don't land in the `extras` catch-all.
     "clock_synced",
@@ -89,8 +94,11 @@ NAMED_FIELDS = {
     "publish_uptime_ms",
     "boot_count",
     "time_source",
+    # DT-0 Q7: firmware self-reports its type in the heartbeat; if it ever
+    # appears on activity payloads too, keep it out of extras (registry is
+    # authoritative — the payload value is never stored).
+    "device_type",
 }
-ALLOWED_SURFACE_CLASS = {"indoor", "outdoor"}
 
 logger = get_logger()
 metrics = get_metrics()
@@ -100,12 +108,18 @@ _activity_tbl = _ddb.Table(ACTIVITY_TABLE)
 _patients_tbl = _ddb.Table(PATIENTS_TABLE)
 
 
-def _maybe_auto_resume_pause(patient: PatientContext, steps: int, session_end_iso: str) -> None:
+def _maybe_auto_resume_pause(
+    patient: PatientContext, active_minutes: int, session_end_iso: str
+) -> None:
     """
     Phase 2A-UM-P L10 — auto-resume notification pause when fresh activity
     arrives. Per user-needs US-31: "auto-resumes early if activity data
     starts streaming again before the timer expires (the reason for
     pausing is gone)."
+
+    DT-0 spec D4: keyed on activeMinutes — the universal cross-type metric,
+    present on every persisted row for every device type. Default threshold
+    0 keeps the "any persisted activity clears the pause" semantic.
 
     Best-effort: failures are logged but don't break the activity write.
     Conditional `attribute_exists` on REMOVE handles the race where a
@@ -114,7 +128,7 @@ def _maybe_auto_resume_pause(patient: PatientContext, steps: int, session_end_is
     """
     if not is_currently_paused({"notificationsPaused": patient.notificationsPaused}):
         return
-    if steps < AUTO_RESUME_MIN_STEPS:
+    if active_minutes < AUTO_RESUME_MIN_ACTIVE_MIN:
         return  # below noise threshold — don't auto-resume
 
     pause = patient.notificationsPaused or {}
@@ -154,33 +168,15 @@ def _maybe_auto_resume_pause(patient: PatientContext, steps: int, session_end_is
         before={"notificationsPaused": pause},
         after={"notificationsPaused": None},
         extra={
-            "triggeringActivity": {"sessionEnd": session_end_iso, "steps": steps},
+            "triggeringActivity": {
+                "sessionEnd": session_end_iso,
+                "activeMinutes": active_minutes,
+            },
             "pauseHadDaysRemaining": days_left_before,
             "pauseReason": pause.get("reason"),
         },
     )
     metrics.add_metric(name="notifications_auto_resume_count", unit=MetricUnit.Count, value=1)
-
-
-def _validate(event: dict) -> tuple[bool, str]:
-    # Numeric fields only — timestamps are resolved (never rejected) by
-    # resolve_session_times. We still reject genuinely garbage metrics.
-    for f in REQUIRED_FIELDS:
-        if f not in event:
-            return False, f"missing:{f}"
-    try:
-        steps = int(event["steps"])
-        distance = float(event["distance_ft"])
-        active = int(event["active_min"])
-    except (TypeError, ValueError) as e:
-        return False, f"bad_number:{e}"
-    if not 0 <= steps <= MAX_STEPS:
-        return False, f"steps_out_of_range:{steps}"
-    if not 0 <= distance <= MAX_DISTANCE_FT:
-        return False, f"distance_out_of_range:{distance}"
-    if not 0 <= active <= MAX_ACTIVE_MIN:
-        return False, f"active_out_of_range:{active}"
-    return True, "ok"
 
 
 def _local_date(session_start: datetime, tz_name: str) -> str:
@@ -201,8 +197,8 @@ def _to_decimal(value: Any) -> Any:
     return value
 
 
-def _build_extras(event: dict) -> dict[str, Any]:
-    return {k: _to_decimal(v) for k, v in event.items() if k not in NAMED_FIELDS}
+def _build_extras(event: dict, named_fields: frozenset[str] | set[str]) -> dict[str, Any]:
+    return {k: _to_decimal(v) for k, v in event.items() if k not in named_fields}
 
 
 @logger.inject_lambda_context(log_event=False, correlation_id_path="thingName")
@@ -210,12 +206,11 @@ def _build_extras(event: dict) -> dict[str, Any]:
 def handler(event: dict, _context):
     serial = event.get("serial") or event.get("thingName") or "UNKNOWN"
 
-    ok, reason = _validate(event)
-    if not ok:
-        logger.warning("activity_reject", extra={"serial": serial, "reason": reason})
-        metrics.add_metric(name="activity_reject_count", unit=MetricUnit.Count, value=1)
-        return {"statusCode": 400, "body": f"invalid payload: {reason}"}
-
+    # DT-0 spec D2: resolve the patient FIRST — the metric-validation contract
+    # is keyed by the assignment row's deviceType snapshot (the registry, not
+    # the payload, picks the contract). Ordering consequence: garbage metrics
+    # from unmapped serials now short-circuit at `unmapped_serial` instead of
+    # `activity_reject` — both are warn+metric+alarmed paths.
     patient: PatientContext | None = resolve_patient(serial)
     if patient is None:
         logger.warning(
@@ -224,6 +219,28 @@ def handler(event: dict, _context):
         )
         metrics.add_metric(name="unmapped_serial_count", unit=MetricUnit.Count, value=1)
         return {"statusCode": 200, "body": "no active assignment; dropped"}
+
+    if not device_types.is_known(patient.deviceType):
+        # A typo'd registry/assignment value bulk-create validation should
+        # have prevented. Fall back to the walker contract (D9) but surface it.
+        logger.warning(
+            "unknown_device_type",
+            extra={"serial": serial, "deviceType": patient.deviceType},
+        )
+        metrics.add_metric(name="unknown_device_type_count", unit=MetricUnit.Count, value=1)
+    dtype = device_types.resolve(patient.deviceType)
+
+    ok, reason = dtype.validate_activity_metrics(event)
+    if not ok:
+        logger.warning(
+            "activity_reject",
+            extra={"serial": serial, "reason": reason, "deviceType": dtype.TYPE},
+        )
+        metrics.add_metric(name="activity_reject_count", unit=MetricUnit.Count, value=1)
+        # Metadata, NOT a dimension — a new dimension set would fork the metric
+        # identity and detach the Phase 1.6 activity-reject alarm (spec D5).
+        metrics.add_metadata(key="deviceType", value=dtype.TYPE)
+        return {"statusCode": 400, "body": f"invalid payload: {reason}"}
 
     # spec §4.3: resolve the authoritative session times. `ingested_at` is our
     # trusted receive time and the reconstruction anchor when the device clock
@@ -250,43 +267,30 @@ def handler(event: dict, _context):
             value=1,
         )
 
-    surface_class = event.get("surface_class")
-    if surface_class is not None and surface_class not in ALLOWED_SURFACE_CLASS:
+    # Per-type named-column promotion (DT-0). Optional analytic fields are
+    # dropped (never fail the row) when unparseable / out of range — the
+    # type module reports those drops as warning dicts and this handler logs
+    # them (preserves the pre-DT-0 unknown_surface_class / gait_out_of_range
+    # log lines for the walker).
+    metric_attrs, metric_warnings = dtype.build_metric_attrs(event)
+    for w in metric_warnings:
         logger.warning(
-            "unknown_surface_class",
-            extra={"serial": serial, "surface_class": surface_class},
+            w["warning"],
+            extra={"serial": serial, **{k: v for k, v in w.items() if k != "warning"}},
         )
-        surface_class = None
-
-    # Gait speed (ft/s) — optional (0.16.0-gait+). Firmware omits it when its
-    # on-device guards fail. Drop just the field if unparseable / out of range;
-    # never reject the whole row over an optional analytic field.
-    gait_fts = event.get("gait_speed_fts")
-    if gait_fts is not None:
-        try:
-            gait_fts = float(gait_fts)
-        except (TypeError, ValueError):
-            gait_fts = None
-        else:
-            if not 0.0 <= gait_fts <= MAX_GAIT_FTS:
-                logger.warning(
-                    "gait_out_of_range",
-                    extra={"serial": serial, "gait_speed_fts": gait_fts},
-                )
-                gait_fts = None
 
     item: dict[str, Any] = {
         "patientId": patient.patientId,
         "timestamp": session_end_iso,
         "deviceSerial": serial,
+        # DT-0: type snapshot on every row (resolved contract type — matches
+        # what validation actually enforced).
+        "deviceType": dtype.TYPE,
         "clientId": patient.clientId,
         "facilityId": patient.facilityId,
         "censusId": patient.censusId,
         "sessionStart": session_start_iso,
         "sessionEnd": session_end_iso,
-        "steps": int(event["steps"]),
-        "distanceFt": Decimal(str(event["distance_ft"])),
-        "activeMinutes": int(event["active_min"]),
         "date": _local_date(ss, patient.timezone),
         "timezone": patient.timezone,
         "source": "device",
@@ -297,6 +301,7 @@ def handler(event: dict, _context):
         # back" dashboard breakdown.
         "timeSource": time_source,
     }
+    item.update(metric_attrs)
     if "clock_synced" in event:
         item["deviceClockSynced"] = bool(event["clock_synced"])
     # Stable device-session identity (serial#boot#end_uptime). Survives
@@ -307,16 +312,10 @@ def handler(event: dict, _context):
             f"{serial}#{event.get('boot_count')}#{event.get('session_end_uptime_ms')}"
         )
 
-    if "roughness_R" in event:
-        item["roughnessR"] = Decimal(str(event["roughness_R"]))
-    if surface_class is not None:
-        item["surfaceClass"] = surface_class
     if "firmware_version" in event:
         item["firmwareVersion"] = str(event["firmware_version"])
-    if gait_fts is not None:
-        item["gaitSpeedFts"] = Decimal(str(gait_fts))
 
-    extras = _build_extras(event)
+    extras = _build_extras(event, UNIVERSAL_NAMED_FIELDS | dtype.ACTIVITY_NAMED_FIELDS)
     if extras:
         item["extras"] = extras
 
@@ -348,12 +347,17 @@ def handler(event: dict, _context):
     # the firmware actually supplied them; cloud-side accept-all contract D16.
     audit_after: dict = {
         "sessionEnd": session_end_iso,
-        "steps": item["steps"],
-        "distanceFt": item["distanceFt"],
         "activeMinutes": item["activeMinutes"],
         "date": item["date"],
         "timeSource": time_source,
+        "deviceType": item["deviceType"],
     }
+    # Per-type metrics — present for walker_cap always; absent on rollator
+    # bench-v0 rows until the DT-2 parity set lands.
+    if "steps" in item:
+        audit_after["steps"] = item["steps"]
+    if "distanceFt" in item:
+        audit_after["distanceFt"] = item["distanceFt"]
     if "roughnessR" in item:
         audit_after["roughnessR"] = item["roughnessR"]
     if "surfaceClass" in item:
@@ -379,7 +383,9 @@ def handler(event: dict, _context):
     # Runs AFTER the activity PutItem succeeds (so we only auto-resume
     # on real persisted activity, not on validation-rejected payloads).
     # Best-effort; failures logged but don't fail the activity write.
-    _maybe_auto_resume_pause(patient, item["steps"], session_end_iso)
+    # DT-0 D4: activeMinutes is guaranteed present for every type
+    # (universal required metric).
+    _maybe_auto_resume_pause(patient, item["activeMinutes"], session_end_iso)
 
     logger.info(
         "activity_ok",
@@ -387,10 +393,15 @@ def handler(event: dict, _context):
             "serial": serial,
             "patientId": patient.patientId,
             "sessionEnd": session_end_iso,
-            "steps": item["steps"],
+            "deviceType": item["deviceType"],
+            "activeMinutes": item["activeMinutes"],
+            "steps": item.get("steps"),
         },
     )
     return {
         "statusCode": 200,
-        "body": f"activity recorded for patient={patient.patientId} steps={item['steps']}",
+        "body": (
+            f"activity recorded for patient={patient.patientId} "
+            f"activeMin={item['activeMinutes']}"
+        ),
     }

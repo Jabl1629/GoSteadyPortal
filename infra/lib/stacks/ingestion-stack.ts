@@ -53,11 +53,27 @@ export class IngestionStack extends cdk.Stack {
     const account = cdk.Stack.of(this).account;
     const region = cdk.Stack.of(this).region;
 
-    // ── Thing Type ───────────────────────────────────────────────
+    // ── Thing Types ──────────────────────────────────────────────
+    // One Thing Type per device type (DT-0 memo D7): the AWS-level cohort
+    // for Phase 5A OTA Jobs targeting + fleet segmentation. Same per-thing
+    // policy template applies to both — topics are type-agnostic (D3).
     new iot.CfnThingType(this, 'WalkerCapType', {
       thingTypeName: `GoSteadyWalkerCap-${p}`,
       thingTypeProperties: {
         thingTypeDescription: 'GoSteady smart walker cap device',
+        searchableAttributes: ['serialNumber', 'firmwareVersion'],
+      },
+    });
+
+    // Phase DT-0 (phase-dt0-device-type-scaffold.md): rollator accessory-
+    // platform device (first SKU: cupholder). Same board (Thingy:91 X /
+    // nRF9151), different firmware + outputs. Bench things are created
+    // manually per the bring-up playbook; the fleet-provisioning template
+    // below stays cap-pinned until Phase 5A parametrizes it.
+    new iot.CfnThingType(this, 'RollatorPlatformType', {
+      thingTypeName: `GoSteadyRollatorPlatform-${p}`,
+      thingTypeProperties: {
+        thingTypeDescription: 'GoSteady rollator accessory-platform device',
         searchableAttributes: ['serialNumber', 'firmwareVersion'],
       },
     });

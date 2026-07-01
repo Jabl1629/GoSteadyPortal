@@ -47,6 +47,7 @@ from _shared.audit_catalog import (
     AUDIT_DEVICE_CLAIMED,
     AUDIT_DEVICE_PROVISION_ROLLBACK,
 )
+from _shared.device_types import DEFAULT_TYPE as DEFAULT_DEVICE_TYPE
 from _shared.observability import emit_audit, get_logger
 
 logger = get_logger()
@@ -301,6 +302,9 @@ def _provision_inline(
             "clientId": client_id,
             "facilityId": facility_id,
             "censusId": census_id,
+            # DT-0 D1: type snapshot from the registry item (caller fetched
+            # it for the claim-state check); absent = walker_cap.
+            "deviceType": device.get("deviceType") or DEFAULT_DEVICE_TYPE,
             "validFrom": now_iso,
             "assignedBy": actor["userId"],
         })

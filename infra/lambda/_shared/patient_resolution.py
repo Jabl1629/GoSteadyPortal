@@ -39,6 +39,11 @@ class PatientContext:
     censusId: str
     timezone: str
     deviceSerial: str
+    # Phase DT-0: device type snapshotted onto the assignment row at provision
+    # (memo 2026-07-01-device-types.md D1). Absent on pre-DT-0 assignments →
+    # walker_cap (D9 legacy default — every pre-DT-0 assignment IS a walker
+    # cap by construction; no registry fallback read needed at ingest).
+    deviceType: str = "walker_cap"
     # Phase 2A-AA: per-patient threshold overrides (None when no overrides set).
     # Threshold Detector merges over defaults from _shared/thresholds.py.
     # Other consumers (activity-processor, alert-handler) ignore this field.
@@ -102,6 +107,7 @@ def resolve_patient(serial: str) -> PatientContext | None:
         censusId=str(patient.get("censusId") or assignment.get("censusId") or ""),
         timezone=str(patient.get("timezone") or "UTC"),
         deviceSerial=serial,
+        deviceType=str(assignment.get("deviceType") or "walker_cap"),
         thresholds=thresholds,
         notificationsPaused=pause,
     )

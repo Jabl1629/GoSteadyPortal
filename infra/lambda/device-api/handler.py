@@ -57,6 +57,7 @@ from _shared.audit_catalog import (
     AUDIT_DEVICE_ACTIVATION_SENT,
     AUDIT_DEVICE_WIPE_REQUESTED,
 )
+from _shared.device_types import DEFAULT_TYPE, KNOWN_DEVICE_TYPES
 from _shared.observability import emit_audit, get_logger
 
 from state_machine import (
@@ -447,6 +448,10 @@ def _action_provision(
                 "clientId": target_client_id,
                 "facilityId": target_facility_id,
                 "censusId": target_census_id,
+                # DT-0 D1: type snapshot, frozen for the life of the
+                # assignment. Sourced from the registry item already fetched
+                # for the state check; absent (pre-DT-0 record) = walker_cap.
+                "deviceType": device.get("deviceType") or DEFAULT_TYPE,
                 "validFrom": now_iso,
                 "assignedBy": claims["userId"],
             },
@@ -962,26 +967,60 @@ def _action_admin_create(event: dict[str, Any], claims: dict[str, Any]) -> dict[
     for dev in devices_in:
         serial = dev.get("serialNumber")
         _validate_serial(serial)
+
+        # DT-0 L3: deviceType set at record creation (registry-authoritative).
+        # Default walker_cap; unknown values are a whole-request 400 so a
+        # typo'd type never lands in the registry.
+        device_type = dev.get("deviceType") or DEFAULT_TYPE
+        if device_type not in KNOWN_DEVICE_TYPES:
+            raise ApiError(
+                code="INVALID_DEVICE_TYPE",
+                message=f"deviceType must be one of {sorted(KNOWN_DEVICE_TYPES)}",
+                status=400,
+                details={"serialNumber": serial, "deviceType": device_type},
+            )
+        hardware_variant = dev.get("hardwareVariant")
+        if hardware_variant is not None and (
+            not isinstance(hardware_variant, str) or len(hardware_variant) > 64
+        ):
+            raise ApiError(
+                code="INVALID_REQUEST",
+                message="hardwareVariant must be a string of at most 64 chars",
+                status=400,
+                details={"serialNumber": serial},
+            )
+
+        item: dict[str, Any] = {
+            "serialNumber": serial,
+            "status": STATE_READY,
+            "deviceType": device_type,
+            "createdAt": now_iso,
+            "createdBy": claims["userId"],
+            "certFingerprint": dev.get("certFingerprint", ""),
+            "outstandingActivationCmds": {},
+        }
+        if hardware_variant:
+            item["hardwareVariant"] = hardware_variant
+
         try:
             _devices.put_item(
-                Item={
-                    "serialNumber": serial,
-                    "status": STATE_READY,
-                    "createdAt": now_iso,
-                    "createdBy": claims["userId"],
-                    "certFingerprint": dev.get("certFingerprint", ""),
-                    "outstandingActivationCmds": {},
-                },
+                Item=item,
                 ConditionExpression="attribute_not_exists(serialNumber)",
             )
             created.append(serial)
             actor = {"userId": claims["userId"], "role": claims["role"], "clientId": claims["clientId"]}
+            audit_extra: dict[str, Any] = {
+                "certFingerprint": dev.get("certFingerprint", ""),
+                "deviceType": device_type,
+            }
+            if hardware_variant:
+                audit_extra["hardwareVariant"] = hardware_variant
             emit_audit(
                 event=AUDIT_DEVICE_CREATED,
                 actor=actor,
                 subject={"serialNumber": serial},
                 action="create",
-                extra={"certFingerprint": dev.get("certFingerprint", "")},
+                extra=audit_extra,
             )
         except ClientError as exc:
             if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
@@ -1001,8 +1040,12 @@ def _device_view(item: dict[str, Any]) -> dict[str, Any]:
         "serialNumber", "status", "owningClientId", "owningFacilityId",
         "decommissionReason", "decommissionedAt", "decommissionedBy",
         "firmwareVersion", "activated_at", "firstHeartbeatAt", "lastTransitionAt",
+        "deviceType", "hardwareVariant",
     )
-    return {k: v for k, v in item.items() if k in keep}
+    view = {k: v for k, v in item.items() if k in keep}
+    # DT-0 D9: legacy records predate the attribute — read as walker_cap.
+    view.setdefault("deviceType", DEFAULT_TYPE)
+    return view
 
 
 # ── Route dispatcher ───────────────────────────────────────────────────

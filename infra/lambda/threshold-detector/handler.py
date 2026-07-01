@@ -340,7 +340,7 @@ def _auto_ack_cleared_thresholds(
     Per-patient threshold overrides honored (same merge logic as
     `determine_threshold_alerts`).
     """
-    t = merge_thresholds(patient.thresholds)
+    t = merge_thresholds(patient.thresholds, device_type=patient.deviceType)
     active: set[str] = set()
     if battery_pct is not None:
         if battery_pct < t["batteryCritical"]:
@@ -455,8 +455,13 @@ def handler(event: dict, _context):
         _maybe_emit_paused_suppressed_audit(serial, patient)
         return {"statusCode": 200, "body": "patient notifications paused; suppressed"}
 
+    # DT-0: per-type defaults under the per-patient overrides (merge order:
+    # type defaults ← patient overrides). Rollator inherits walker values
+    # until DT-3 pins real cupholder battery numbers.
     breaches = determine_threshold_alerts(
-        battery_pct, rsrp_dbm, overrides=patient.thresholds,
+        battery_pct, rsrp_dbm,
+        overrides=patient.thresholds,
+        device_type=patient.deviceType,
     )
 
     # Recurrence policy (2026-05-26-alert-recurrence-policy.md L4):

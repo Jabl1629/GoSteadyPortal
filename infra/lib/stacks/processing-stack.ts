@@ -129,7 +129,12 @@ export class ProcessingStack extends cdk.Stack {
 
     activityTable.grantWriteData(this.activityProcessor);
     deviceAssignmentsTable.grantReadData(this.activityProcessor);
-    patientsTable.grantReadData(this.activityProcessor);
+    // ReadWrite on Patients: 2A-UM-P L10 auto-resume REMOVEs
+    // notificationsPaused on fresh activity. The write grant was missed
+    // when that handler code landed (2026-05-24) — the best-effort catch
+    // swallowed AccessDeniedException ever since; surfaced by the DT-0
+    // smoke suite (T12) on 2026-07-01. Read side unchanged (resolution).
+    patientsTable.grantReadWriteData(this.activityProcessor);
     identityKey.grantDecrypt(this.activityProcessor);
     identityKey.grant(this.activityProcessor, 'kms:GenerateDataKey');
 

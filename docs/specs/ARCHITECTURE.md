@@ -649,6 +649,8 @@ npx cdk deploy GoSteady-Dev-Processing --context env=dev               # single 
 | Attribute | Type | Notes |
 |-----------|------|-------|
 | **serialNumber** (PK) | S | `GS` + 10 digits |
+| deviceType | S | **DT-0:** `walker_cap` \| `rollator_platform` — registry-authoritative product type ([`2026-07-01-device-types.md`](2026-07-01-device-types.md) D1/Q1). Absent on pre-DT-0 records reads as `walker_cap` (D9). Set at record creation (bulk-create validates); re-type is internal_admin-only via CLI runbook (audited `device.type_changed`), allowed only in `ready_to_provision`/`decommissioned` (Q4) |
+| hardwareVariant | S | Optional — accessory SKU within a platform (e.g. `cupholder_v1`); DT-0/Q1 |
 | owningClientId | S | Inventory owner (the client who bought / leases the device) |
 | owningFacilityId | S | Optional — facility-level inventory tracking |
 | status | S | `provisioned` \| `assigned` \| `unassigned` \| `decommissioned` \| `lost` |
@@ -669,6 +671,7 @@ npx cdk deploy GoSteady-Dev-Processing --context env=dev               # single 
 | clientId | S | Snapshot at assignment time |
 | facilityId | S | Snapshot at assignment time |
 | censusId | S | Snapshot at assignment time |
+| deviceType | S | **DT-0 D1:** type snapshot at provision (copied from the registry item); frozen for the assignment's life. Ingest handlers read it via patient resolution with **zero extra reads**. Absent on pre-DT-0 rows = `walker_cap` |
 | validFrom | S | Same as SK |
 | validUntil | S | Nullable; null = currently active assignment |
 | assignedBy | S | userId of admin who made the assignment |
@@ -683,6 +686,7 @@ npx cdk deploy GoSteady-Dev-Processing --context env=dev               # single 
 | **patientId** (PK) | S | Was `serialNumber`; now patient-centric |
 | **timestamp** (SK) | S | `session_end` in UTC ISO 8601 |
 | deviceSerial | S | Device that produced the session |
+| deviceType | S | **DT-0:** resolved product type at write time (`walker_cap` \| `rollator_platform`). Absent on pre-DT-0 rows = `walker_cap`. Per-type metrics: `steps`/`distanceFt` are walker-required (rollator reaches parity at DT-2 exit); `activeMinutes` is the universal cross-type metric; rollator provisional metrics live in `extras` during bench |
 | clientId | S | Snapshot at write time — history follows patient |
 | facilityId | S | Snapshot at write time |
 | censusId | S | Snapshot at write time |
@@ -708,6 +712,7 @@ npx cdk deploy GoSteady-Dev-Processing --context env=dev               # single 
 | **patientId** (PK) | S | Patient-centric |
 | **timestamp** (SK) | S | Compound: `{eventTs}#{alertType}` |
 | deviceSerial | S | Device that produced or triggered the alert |
+| deviceType | S | **DT-0:** resolved product type at write time; absent on pre-DT-0 rows = `walker_cap`. Device-alert enum is per-type (walker: `tipover`/`fall`/`impact`; rollator v1: none) |
 | clientId | S | Snapshot at write time |
 | facilityId | S | Snapshot at write time |
 | censusId | S | Snapshot at write time |
@@ -740,7 +745,28 @@ Cloud → device commands flow through `gs/{serialNumber}/cmd` (downlink, see be
   - **Alert** → persisted into the Alert History row's `data` map
   - This lets firmware add diagnostic fields (`reset_reason`, `fault_counters`, `watchdog_hits`) without contract churn.
 
+### §7.0 Core Device Contract v1 vs per-type product contracts (DT-0)
+
+As of Phase DT-0 ([`2026-07-01-device-types.md`](2026-07-01-device-types.md) §3 + [`phase-dt0-device-type-scaffold.md`](phase-dt0-device-type-scaffold.md)), this section splits in two:
+
+- **Core Device Contract v1 — device-type-blind. Every GoSteady device type implements it verbatim** (DT-I4): topics + per-thing policy, the heartbeat schema, the downlink `cmd` protocol (`activate`/`wipe` + `last_cmd_id` echo + 24 h ack window), Shadow `desired.activated_at` re-check on wake, the §C47 time fields + cloud-side resolution, the 5-state lifecycle + wipe-ack auto-recycle, MQTT 3.1.1 / `CLEAN_SESSION=n` / TLS 1.2, and the activity **envelope** (serial, session identity + uptime fields, `firmware_version`, idempotency).
+- **Per-type product contracts — dispatched at ingest via `_shared/device_types/` on the assignment row's `deviceType` snapshot:** the activity *metric* block, the device-alert enum, and threshold defaults.
+
+| | `walker_cap` | `rollator_platform` |
+|---|---|---|
+| Required activity metrics | `steps`, `distance_ft`, `active_min` | Bench v0: `active_min` only → **walker parity at DT-2 exit** (memo D10) |
+| Optional activity metrics | `roughness_R`, `surface_class`, `gait_speed_fts` | `gait_speed_fts` at parity; provisional fields flow to `extras` (D16) |
+| Device-alert enum | `tipover`, `fall`, `impact` (unused in v1) | None in v1 (memo Q11) |
+| Threshold defaults | ARCH §8 values | Inherits walker values until DT-3 (memo Q3) |
+
+New heartbeat optional field `device_type` (string): firmware self-reports its product type; heartbeat-processor cross-checks it against the registry-authoritative Device Registry value — mismatch → warn log + `device_type_mismatch_count` metric + alarm, **never rejected** (registry wins; memo Q7).
+
 ### Activity (session-end event)
+
+> **Per-type note (DT-0):** the field table below documents the **`walker_cap`**
+> metric contract. The `rollator_platform` bench-v0 contract requires only
+> `active_min` (see §7.0 above); the envelope + time fields are Core and
+> identical for every type.
 ```json
 {
   "serial": "GS0000001234",
@@ -799,6 +825,7 @@ Cloud → device commands flow through `gs/{serialNumber}/cmd` (downlink, see be
 | `watchdog_hits` | No | Integer — firmware watchdog trigger count |
 | `boot_count` | No | Integer — boot counter (also used for battery-swap detection) |
 | `last_cmd_id` | No | Echoes the most recent downlink command ID for ack tracking |
+| `device_type` | No | String — firmware self-reported product type (DT-0 / memo Q7). Cross-checked vs Device Registry `deviceType`; mismatch → log + metric + alarm, never rejected. Flows into Shadow `reported` like any extra |
 
 > ² **Heartbeat `ts` is resolved, never rejected** (`0.17.0-time`, Open-Q4): `resolve_heartbeat_ts` uses the device `ts` when synced + plausible, else stamps `ingestedAt`, so device-health `lastSeen` never shows 1980/2080 and a no-time device still registers as alive. Signal + battery fields remain the hard requirements.
 
@@ -821,7 +848,7 @@ Cloud → device commands flow through `gs/{serialNumber}/cmd` (downlink, see be
 | Field | Required | Validation |
 |-------|----------|-----------|
 | `ts` | Yes | ISO 8601, must parse |
-| `alert_type` | Yes | Enum: `tipover`, `fall`, `impact` |
+| `alert_type` | Yes | **Per-type enum (DT-0):** `walker_cap` = `tipover`, `fall`, `impact`; `rollator_platform` v1 = none (any rollator device alert rejects `bad_alert_type`). Checked after patient resolution |
 | `severity` | Yes | Enum: `critical`, `warning`, `info` |
 | `data` | No | Arbitrary map, floats auto-converted to DDB Decimal |
 
@@ -1581,6 +1608,18 @@ Path to portal-renders-real-data:
 | DL15 | End-assignment fires a `wipe` downlink cmd on `gs/{serial}/cmd` immediately. Firmware acks via Shadow `reported.wipe_complete = <wipe_id>` + heartbeat `last_cmd_id = <wipe_id>`. Cloud auto-transitions `discontinued → ready_to_provision` on ack, gated by `battery_pct ≥ 0.10` sanity floor in the acking heartbeat. Cmd-still-in-`outstandingWipeCmds`-map is the idempotency invariant (mirrors `outstandingActivationCmds` per DL12). 24h ack window. Shadow `desired.wipe_requested` is non-null iff a wipe is outstanding (mirrors DL14 invariant). Firmware refuses to wipe below 0.10 battery and retries on next wake. | [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md) D1–D6 |
 | DL16 | `device.battery_swapped` audit event fires on mid-deployment cold boot detected via `boot_count` increment + `reset_reason=POWER_ON` while status ∈ {`provisioned`, `active_monitoring`}. Low-severity forensics; no state change. | [`2026-05-17-aa-battery-recycle.md`](2026-05-17-aa-battery-recycle.md) D7 |
 
+### Device Types (Phase DT-0)
+| # | Requirement | Source |
+|---|-------------|--------|
+| DT1 | `deviceType` is registry-authoritative: set at record creation, snapshotted onto the DeviceAssignment row at provision, denormalized onto every telemetry row. Absent anywhere = `walker_cap` (legacy default; no telemetry backfill) | [`2026-07-01-device-types.md`](2026-07-01-device-types.md) D1/D9 |
+| DT2 | Enum: `walker_cap`, `rollator_platform`; accessory SKU in optional `hardwareVariant` (e.g. `cupholder_v1`). A new type exists only when board+firmware+outputs change | Memo Q1 |
+| DT3 | Serial format unchanged (`GS`+10 digits), no type encoding. Convenience blocks: rollator dev `GS9999999980–89`, rollator production `GS0001000000–GS0001999999` | Memo D2/Q6 |
+| DT4 | Shared topic family `gs/{serial}/{class}` — no per-type topics or IoT Rules; per-type validation dispatches via `_shared/device_types/` **after** patient resolution (registry picks the contract, never the payload) | Memo D3/D6 + spec D2 |
+| DT5 | Every new device type implements Core Device Contract v1 (§7.0) before its first cloud-connected unit — no per-type forks of lifecycle/heartbeat/cmd/shadow semantics | Memo D4 / DT-I4 |
+| DT6 | One IoT Thing Type per device type (`GoSteadyWalkerCap-{env}`, `GoSteadyRollatorPlatform-{env}`); fleet-provisioning template stays cap-pinned until Phase 5A | Memo D7 |
+| DT7 | Heartbeat `device_type` self-report is cross-checked against the registry; mismatch → log + metric + alarm, never rejected | Memo Q7 |
+| DT8 | `activeMinutes` is the universal cross-type metric: activity auto-resume (DT-0), behavioral rules (DT-4), and daily rollups (1C-rollup) key on it | Memo Q8/Q15 + spec D4 |
+
 ### Device & Ingestion
 | # | Requirement | Source |
 |---|-------------|--------|
@@ -1764,7 +1803,7 @@ Surfaced by the first physical-device activation through the facility portal on 
 | 2C | Notifications | — | 🔲 Planned |
 | 3A | Portal Hosting | [`phase-3a-portal-hosting.md`](phase-3a-portal-hosting.md) | 🟡 Sketch drafted 2026-05-23 — locks in same-origin reverse-proxy + CSP shape for 2B impl. Full depth when 2B-FAC-R approaches prod |
 | 3B | CI/CD Pipeline | — | 🔲 Planned |
-| DT-0 | Device-Type Scaffold (cloud) | [`phase-dt0-device-type-scaffold.md`](phase-dt0-device-type-scaffold.md) | 🔲 Spec drafted 2026-07-01 — first phase of the multi-device-type plan ([`2026-07-01-device-types.md`](2026-07-01-device-types.md) §8); all backward-compatible; DT-1…DT-4 follow per memo phasing |
+| DT-0 | Device-Type Scaffold (cloud) | [`phase-dt0-device-type-scaffold.md`](phase-dt0-device-type-scaffold.md) | ✅ **Deployed (dev) 2026-07-01** — `deviceType` end-to-end (registry → assignment snapshot → telemetry rows → API projections), per-type validation dispatch (`_shared/device_types/`), second Thing Type, type-keyed thresholds, heartbeat `device_type` cross-check + alarm (fired+routed in smoke). Smoke **15/15 PASS** (`infra/scripts/smoke-dt0.py`); registry backfill done; walker-cap byte-identical. Bonus: fixed pre-existing activity-processor Patients-write IAM gap (2A-UM-P auto-resume was silently dead since 2026-05-24). DT-1 (firmware bench bring-up) is next per memo §8 |
 | 5A | Device Onboarding | — | ⬜ Future |
 | 5B | End-to-End Validation | — | ⬜ Future |
 

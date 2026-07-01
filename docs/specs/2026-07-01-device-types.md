@@ -1,6 +1,6 @@
 # Design memo: Multi-device-type architecture — adding the rollator accessory platform
 
-> **Date:** 2026-07-01 | **Status:** ✅ DECIDED 2026-07-01 — D1–D11 locked with product owner; Q1–Q15 all resolved (residual TODOs in §10); implementation not started (DT-0 is next)
+> **Date:** 2026-07-01 | **Status:** ✅ DECIDED 2026-07-01 — D1–D11 locked with product owner; Q1–Q15 all resolved (residual TODOs in §10). **DT-0 deployed (dev) same day** ([`phase-dt0-device-type-scaffold.md`](phase-dt0-device-type-scaffold.md), smoke 15/15); DT-1 (firmware bench bring-up + capture readiness) is next
 > **Supersedes:** nothing (first formalization of the device-type concept)
 > **Related:** [`ARCHITECTURE.md`](ARCHITECTURE.md) §4 (lifecycle), §6 (data model), §7 (MQTT contracts), §16 ("Multi-device per patient" medium-term question) · firmware coord doc (append-only log)
 
@@ -372,3 +372,4 @@ plumbing is shared; this is rendering work only.
 |---|---|
 | 2026-07-01 | Initial scoping memo — D1–D9 proposed, Q1–Q15 opened (scoping session with product owner; form factor = rollator accessory platform, session summaries, one-patient, bench-first) |
 | 2026-07-01 (later same session) | Q1–Q15 all resolved with product owner: 13 ratified as leaned; **Q2 upgraded** → D10 (comprehensive cross-system arc, walker-cap metric parity target incl. gait); **Q13 reversed** → D11 (**D2C-first** go-to-market; D2C wrap-up folded in as DT-4). D1–D9 ratified. Phasing restructured DT-0…DT-4 (bring-up/capture → data+algo → hardening → D2C launch readiness); residual-TODO table added |
+| 2026-07-01 (implementation) | **DT-0 deployed to dev + exit criteria met** — walker regression green (synthetic + physical-cap heartbeat), synthetic rollator activity landed with `deviceType` + `extras`, synthetic D2C claim path deferred to next d2c smoke (writer line-identical to validated device-api). Coord §C48 announces Core Device Contract v1 + serial blocks to firmware. Spec changelog has full detail |

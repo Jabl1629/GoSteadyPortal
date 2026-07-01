@@ -180,6 +180,40 @@ export class HandlerAlarms extends Construct {
         rejectAlarm.addAlarmAction(snsAction);
       }
 
+      if (fn.endsWith('-heartbeat-processor')) {
+        // Device-type mismatch (Phase DT-0, memo Q7). heartbeat-processor
+        // cross-checks the firmware's self-reported `device_type` against
+        // the registry-authoritative Device Registry value; a mismatch means
+        // the wrong product firmware is flashed on the board. The handler
+        // logs a WARNING + emits the EMF metric and returns 200 (never
+        // rejects — registry wins), so this alarm is the only ops signal.
+        const typeMismatchAlarm = new cloudwatch.Alarm(
+          this,
+          'HeartbeatProcessorDeviceTypeMismatch',
+          {
+            alarmName: `gosteady-${env}-heartbeat-processor-device-type-mismatch`,
+            alarmDescription:
+              `${fn}: heartbeat device_type disagrees with Device Registry ` +
+              'deviceType — likely wrong product firmware flashed on the ' +
+              'board. Shadow still updates (registry wins; never rejected). ' +
+              `Inspect /aws/lambda/${fn} for the device_type_mismatch ` +
+              'warning line (reportedType vs registryType + serial).',
+            metric: new cloudwatch.Metric({
+              namespace: `GoSteady/Processing/${env}`,
+              metricName: 'device_type_mismatch_count',
+              dimensionsMap: { service: fn },
+              statistic: 'Sum',
+              period: cdk.Duration.minutes(5),
+            }),
+            threshold: 0,
+            comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            evaluationPeriods: 1,
+            treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+          },
+        );
+        typeMismatchAlarm.addAlarmAction(snsAction);
+      }
+
       if (fn.endsWith('-snippet-parser')) {
         addLogPatternAlarm(this, {
           env,

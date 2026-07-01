@@ -27,6 +27,7 @@ from botocore.exceptions import ClientError
 
 from _shared import (
     PatientContext,
+    device_types,
     emit_audit,
     get_logger,
     get_metrics,
@@ -40,7 +41,10 @@ ALERT_TABLE = os.environ["ALERT_TABLE"]
 # 24 months on Alerts (L5 / 0B-rev D2).
 ALERT_TTL_SECONDS = 24 * 30 * 86_400
 
-VALID_ALERT_TYPES = {"tipover", "fall", "impact"}
+# DT-0: the alert-type enum is per device type (_shared/device_types/*.py
+# VALID_ALERT_TYPES — walker: tipover/fall/impact; rollator v0: empty).
+# Enum check runs AFTER patient resolution (type comes from the assignment
+# snapshot); envelope checks below stay up front.
 VALID_SEVERITIES = {"critical", "warning", "info"}
 REQUIRED_FIELDS = ("ts", "alert_type", "severity")
 
@@ -55,7 +59,9 @@ def _parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
-def _validate(event: dict) -> tuple[bool, str]:
+def _validate_envelope(event: dict) -> tuple[bool, str]:
+    """Device-agnostic checks (presence, ts parse, severity enum). The
+    per-type alert_type enum check runs after patient resolution."""
     for f in REQUIRED_FIELDS:
         if f not in event:
             return False, f"missing:{f}"
@@ -63,8 +69,6 @@ def _validate(event: dict) -> tuple[bool, str]:
         _parse_iso(event["ts"])
     except (TypeError, ValueError) as e:
         return False, f"bad_timestamp:{e}"
-    if event["alert_type"] not in VALID_ALERT_TYPES:
-        return False, f"bad_alert_type:{event['alert_type']}"
     if event["severity"] not in VALID_SEVERITIES:
         return False, f"bad_severity:{event['severity']}"
     return True, "ok"
@@ -86,7 +90,7 @@ def _to_ddb_safe(value: Any) -> Any:
 def handler(event: dict, _context):
     serial = event.get("serial") or event.get("thingName") or "UNKNOWN"
 
-    ok, reason = _validate(event)
+    ok, reason = _validate_envelope(event)
     if not ok:
         logger.warning("alert_reject", extra={"serial": serial, "reason": reason})
         metrics.add_metric(name="alert_reject_count", unit=MetricUnit.Count, value=1)
@@ -101,6 +105,19 @@ def handler(event: dict, _context):
         metrics.add_metric(name="unmapped_serial_count", unit=MetricUnit.Count, value=1)
         return {"statusCode": 200, "body": "no active assignment; dropped"}
 
+    # DT-0: per-type alert enum (walker: tipover/fall/impact; rollator v0:
+    # empty — any device alert from a rollator rejects here, memo Q11).
+    dtype = device_types.resolve(patient.deviceType)
+    if event["alert_type"] not in dtype.VALID_ALERT_TYPES:
+        reason = f"bad_alert_type:{event['alert_type']}"
+        logger.warning(
+            "alert_reject",
+            extra={"serial": serial, "reason": reason, "deviceType": dtype.TYPE},
+        )
+        metrics.add_metric(name="alert_reject_count", unit=MetricUnit.Count, value=1)
+        metrics.add_metadata(key="deviceType", value=dtype.TYPE)
+        return {"statusCode": 400, "body": f"invalid payload: {reason}"}
+
     ts = _parse_iso(event["ts"])
     ts_iso = ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     alert_type = event["alert_type"]
@@ -112,6 +129,7 @@ def handler(event: dict, _context):
         "patientId": patient.patientId,
         "timestamp": sk,
         "deviceSerial": serial,
+        "deviceType": dtype.TYPE,
         "clientId": patient.clientId,
         "facilityId": patient.facilityId,
         "censusId": patient.censusId,
