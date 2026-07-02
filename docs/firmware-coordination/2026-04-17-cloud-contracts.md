@@ -9032,3 +9032,99 @@ metric) instead of `steps` — env knob renamed `AUTO_RESUME_MIN_ACTIVE_MIN`
 - Watch items: `GS0000000001`'s next real walk confirms activity-row shape on
   the new dispatch path (synthetic walker regression already green); the
   deferred T10 (d2c-claim runtime snapshot) folds into the next d2c smoke.
+
+---
+
+# §C49 — [rollator] DT-1: firmware product split shipped + GS9999999981 bring-up (blocked only on SIM claim) (2026-07-02)
+
+## C49.1 — What landed (firmware, direct-to-main)
+
+The one-app/two-products split per memo D8/Q5 (portal spec
+`phase-dt1-rollator-bench-bringup.md`):
+
+- **Kconfig `choice GOSTEADY_PRODUCT`** (default `WALKER_CAP` — all
+  pre-DT-1 overlays resolve unchanged; verified in both build `.config`s
+  and at the binary-string level).
+- **`src/version.h`**: 2-D product × power-mode cascade. Walker strings
+  byte-identical (cohort continuity); rollator line `rol-0.1.0-{bench|
+  pilot|ww}` (`ww` not `wakewindow`: the .dat header's
+  `firmware_version[16]` fits 15+NUL — the walker wakewindow string
+  already truncates there, pre-existing). New
+  `GS_PRODUCT_DEVICE_TYPE_STR` = the cloud enum string.
+- **`src/cloud.c`**: (1) heartbeat gains `device_type` (BOTH products —
+  walker units start self-reporting on their next flash; DT-0's
+  cross-check + alarm are live cloud-side); (2) `build_activity_payload`
+  is product-split at the wire boundary — rollator bench-v0 emits
+  `serial/session_start/session_end/active_min` + the §C47 time block +
+  `time_source` + `firmware_version`; walker branch byte-identical to
+  pre-change; roughness/gait/surface compile-gated out for rollator
+  (sentinels are data-driven, so compile-time gating is the only way to
+  guarantee omission).
+- **Capture vocab, append-only in lockstep** (session.h enums +
+  control.c tables + read_session.py + workbooks): `rollator_4wheel`,
+  `frame_mount`, `accessory_platform`, `brake_stop`, `brake_drag`,
+  `park_brake_seated`, `heavy_lean`. A 2026-05-05 walker .dat re-parsed
+  clean post-change.
+- **`prj_rollator_cloud.conf`** (self-contained; exactly 3 diffs vs
+  prj_cloud: product flag, client id `GS9999999981`, snippets OFF).
+- **Tooling/assets**: `tools/capture_rollator.html` (39-run matrix =
+  3 surfaces × 13 incl. 90° turns / brake_stop / heavy_lean /
+  park_brake_seated; isolated localStorage), control.py rollator
+  presets, `GoSteady_Rollator_Capture_Protocol_v1.md` +
+  `GoSteady_Rollator_Annotations_v1.xlsx`.
+
+Validation: rollator build RAM 62.6%; walker regression via prj_pilot
+pristine (see C49.3); host suite 64/64; 4-lens adversarial review — zero
+blockers/majors, all cross-repo contract checks pass (payloads accepted
+by deployed DT-0 validators; envelope fields land as envelope, not
+extras).
+
+## C49.2 — GS9999999981 bring-up state (READ THIS before touching the unit)
+
+Fresh Thingy:91 X, SW2=nRF91 throughout (factory bridge fine — no nRF53
+flash needed). Done: cert minted + flashed (sec_tag 201, verified);
+Thing under `GoSteadyRollatorPlatform-dev`; registry record via the
+DT-0 bulk-create path (`deviceType=rollator_platform`,
+`hardwareVariant=thingy91x_bench`); `rol-0.1.0-bench` flashed;
+**9.5 h overnight soak: boot 1, faults 0/0/0**; provisioned to
+`pat_dt1_rollator_bench_1782968418` (client_rd_test) — activate cmd
+`act_7bcdb1ca…` queued (24 h window from 2026-07-02T05:00Z); a 15 s
+desk session (`e7f1be80…`) recorded via the uart1 rollator preset
+(motion-gate auto-stop fired correctly on stillness; activity enqueued
+with empty ISO + uptimes = the §C47 reconstruction path, waiting on
+cellular) — the `.dat` is ON-DEVICE, **pull before any reboot** (boot
+orphan sweep).
+
+**BLOCKED on one operator step: the iBasis trial eSIM is unactivated —
+EMM cause 8 ("EPS+non-EPS services not allowed") on every attach for
+9.5 h across multiple cells/TACs.** Claim the SIM on nRF Cloud (ICCID
+on the box label, or AT%XICCID via at_client), power-cycle, and
+registration should complete → first heartbeat carries
+`device_type:"rollator_platform"` → §C24 coordinator delivers the
+queued activate. USB CDC also needs a re-plug (disconnected 08:23;
+board is on battery — J-Link still reads the target). Full resume
+runbook: portal spec §Deployment.
+
+## C49.3 — Finding: plain `prj_cloud.conf` no longer links at 0.17.0 (pre-existing)
+
+Pristine walker `prj_cloud` build on unmodified `main` fails: **RAM
+overflows by 1296 B** (identical overflow with the DT-1 diff applied —
+i.e., the product split adds zero RAM). Every recently-flashed unit
+shipped pilot/wakewindow configs (snippets OFF), so the plain-cloud
+overlay quietly rotted past the 0.16/0.17 growth. Documented in
+GOSTEADY_CONTEXT.md's build table; walker-side fix deferred (needs its
+own bench validation). Walker regression for DT-1 was validated on
+`prj_pilot.conf` — the config actually deployed on GS0000000001/98.
+
+## C49.4 — Known follow-ups
+
+- Behavioral `no_activity_today`/`below_typical` are steps-keyed → will
+  mis-fire on rollator patients until the DT-4 `activeMinutes` re-key
+  (memo Q8). Bench patient is synthetic (client_rd_test) so the alerts
+  are inert rows; flagged in the spec runbook so nobody mistakes it for
+  a firmware fault.
+- iBasis SIM-claim step should be added to the bring-up playbook
+  pre-flight once the exact claim flow is confirmed on this SIM.
+- Rollator DT-2 queue: mount the board on a real rollator, run the
+  39-run capture protocol, start the wheeled-motion algo arc (target:
+  walker-cap metric parity incl. gait, memo D10).

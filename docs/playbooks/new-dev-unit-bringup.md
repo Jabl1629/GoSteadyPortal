@@ -95,6 +95,18 @@ TABLE=gosteady-dev-devices
 BUNDLE=~/Desktop/gosteady-firmware-cert-handoff-2026-04-27
 ```
 
+> **Second-product parameterization (DT-1, 2026-07-01).** The flow below is
+> product-agnostic except three knobs. For a **rollator_platform** unit:
+> `THING_TYPE=GoSteadyRollatorPlatform-dev`; serials come from the rollator
+> dev block `GS9999999981–89` (…80 is a cloud-smoke fixture — never a
+> physical unit); the §3.4 build uses `-DEXTRA_CONF_FILE=prj_rollator_cloud.conf`
+> (client id default is already GS9999999981; override per unit) into a
+> `build_rollator_<serial>` dir. Prefer creating the registry row via the
+> DT-0 admin bulk-create path (deviceType + hardwareVariant + audit) instead
+> of §1.4's raw put-item — see `infra/scripts/smoke-dt0.py` for the
+> synthetic-invoke shape. First rollator bring-up (GS9999999981) executed
+> 2026-07-01, coord §C49.
+
 ### 1.1 Mint cert + key
 
 ```bash
