@@ -242,16 +242,17 @@ device provisioned to `pat_dt1_rollator_bench_1782968418` with activate cmd
    then `read_session.py` on it (expect `rollator_4wheel`/`frame_mount`/
    `accessory_platform` decode + `rol-0.1.0-bench`).
 2. **Activate the iBasis eSIM** — overnight registration was rejected with
-   **EMM cause 8** on every attempt (unactivated trial SIM). Claim it on
-   nRF Cloud (nrfcloud.com → SIM claim) using the ICCID:
-   - Easiest: the ICCID is printed on the Thingy:91 X **box label**.
-   - Otherwise: reflash at_client (`nrfjprog -f NRF91 --program
-     /tmp/at_client.hex --chiperase --verify --reset --snr 802006700`),
-     `screen /dev/cu.usbmodem*1102 115200`, send `AT%XICCID`; then reflash
-     `build_rollator_gs81/merged.hex` (cert survives chiperase; pull the
-     session before this per step 1!).
-   After claiming: power-cycle the board; watch uart0 for
-   `nw_reg_status=registered` + `psm:` grant + first heartbeat.
+   **EMM cause 8** on every attempt. Verified 2026-07-02 via at_client AT
+   interrogation: SIM reads fine (**ICCID `89444611503503713990`**, IMSI
+   `204043547240713` — iBasis home profile), so the reject is
+   subscription-level (unactivated trial), matching Nordic's guidance that
+   Nordic-bundled iBasis SIMs are activated at nrfcloud.com (DevZone
+   "iBASIS eSIM Activation"). Claim at nrfcloud.com → SIM activation →
+   enter the ICCID above (+ PUK from the Thingy:91 X box label), then
+   power-cycle; watch uart0 for `nw_reg_status=registered` + `psm:` grant
+   + first heartbeat. (Why GS98/GS01 "just worked" is unresolved — earlier
+   pre-activated batch or a forgotten claim; this SIM's evidence is
+   unambiguous.)
 
 **Then the user smoke (P2–P7 completion, ~15 min):**
 3. First heartbeat → check Shadow `device_type:"rollator_platform"` +
