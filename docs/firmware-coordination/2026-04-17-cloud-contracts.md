@@ -9128,3 +9128,33 @@ own bench validation). Walker regression for DT-1 was validated on
 - Rollator DT-2 queue: mount the board on a real rollator, run the
   39-run capture protocol, start the wheeled-motion algo arc (target:
   walker-cap metric parity incl. gait, memo D10).
+
+---
+
+# §C50 — [rollator] Capture-image fixes from the first live BLE protocol smoke (2026-07-02)
+
+First operator-driven capture attempt on `GS9999999981` (capture_rollator.html
+over the always-on BLE bridge) surfaced three findings; all fixed same-day
+(fw commit on main):
+
+1. **Motion auto-start vs operator capture** — handling the rollator between
+   runs auto-started squatter sessions; the operator's next START returned
+   `ERR already active` and stray STOPs closed phantom sessions (2/4 runs
+   lost their POST-WALK popups). Fix: `CONFIG_GOSTEADY_MOTION_AUTOSTART`
+   (default y; capture image sets =n). Field/pilot/cloud builds unchanged.
+2. **Stillness auto-stop vs 30 s baseline runs** — the 15 s Phase-3
+   auto-stop would kill `stationary_baseline`/`park_brake_seated` protocol
+   runs. Fix: control.c-started sessions are marked manual
+   (`gosteady_session_mark_manual`) and exempt from stillness auto-stop
+   (flash-full auto-stop still applies).
+3. **Cloud build auto-prune ate the day's raw data** — all smoke-run `.dat`s
+   were pruned seconds after their activity uplinks PUBACKed (working as
+   designed, wrong build for capture). The capture-day image
+   (`build_rollator_bench`: no cloud + autostart off + DATE_TIME NITZ-only)
+   is now flashed + documented as the protocol prerequisite.
+
+Bridge note: `GS9999999981`'s nRF5340 runs the fork with
+`CONFIG_BRIDGE_BLE_ALWAYS_ON=y` (Config.txt toggle proved unreliable to
+persist from macOS; the compiled-out option is the robust posture for
+dedicated capture units). Canonical bridge flash on this env:
+`west flash --runner nrfjprog --recover` (default nrfutil runner is broken).
