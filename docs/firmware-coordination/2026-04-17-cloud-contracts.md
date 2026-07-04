@@ -9158,3 +9158,72 @@ Bridge note: `GS9999999981`'s nRF5340 runs the fork with
 persist from macOS; the compiled-out option is the robust posture for
 dedicated capture units). Canonical bridge flash on this env:
 `west flash --runner nrfjprog --recover` (default nrfutil runner is broken).
+
+---
+
+# §C51 — [rollator] Capture-day blockers: bridge uart1 enable-on-USB-only + boot orphan sweep data loss (2026-07-04)
+
+## C51.1 — Bridge bug, empirically confirmed (ROOT CAUSE OF ALL BLE dead-air)
+
+The nRF5340 bridge fork only enables/opens **uart1 when a USB CDC host opens
+the port** (DTR/SET_LINE_CODING path). A BLE peer connect does NOT enable it
+— the fork's peer_conn_event(dev_idx=1) patch updates routing but evidently
+not the UART-enable path. Once USB has enabled uart1, the state PERSISTS
+(asymmetric enable/disable), which produced the confusing intermittency:
+
+- 2026-07-02 11:17 BLE session: zero RX (cold boot, BLE-only) — dead air
+- 2026-07-02 14:15+ sessions: WORKED — Claude's USB CDC sniffer/tools had
+  opened uart1 minutes earlier
+- 2026-07-04: cold boot ~12:02 → BLE-only dead air again; **user-confirmed
+  workaround: plug USB once after power-on ("get started"), then unplug and
+  BLE keeps working for the rest of the boot**
+
+**FIX (pending, next session):** force uart1 permanently enabled at bridge
+boot in `bridge_fw` (it is a dedicated command tunnel; read
+`src/modules/uart_handler.c` subscriber/enable logic and give uart1 a
+permanent subscriber or enable at init). Rebuild with
+`-DCONFIG_BRIDGE_BLE_ALWAYS_ON=y` as before; flash needs SW2→nRF53 +
+`west flash --runner nrfjprog --recover` (default nrfutil runner broken on
+this env).
+
+## C51.2 — Boot orphan sweep = un-pulled capture data loss (COST 15 RUNS TODAY... see C51.3)
+
+`session.c` boot-time orphan sweep (called from main.c init) deletes ALL
+`/lfs/sessions/*.dat` unconditionally at every boot — including on the
+capture image, where un-pulled files are irreplaceable protocol data, not
+stale garbage. The 2026-07-02 runs survived only because they were pulled
+same-day; today's boot wiped what remained.
+
+**FIX (pending, next session):** `CONFIG_GOSTEADY_BOOT_ORPHAN_SWEEP`
+(default y — field/cloud hygiene unchanged), set =n in the capture image
+build args alongside `MOTION_AUTOSTART=n`.
+
+## C51.3 — 15 protocol runs lost today
+
+User executed ~15 protocol runs on 2026-07-04; **only one session
+(`c3d15e15`, 39.3 s stationary connectivity test, 12:14) ever reached the
+device** — the runs were driven through a dead-air BLE session (C51.1;
+commands never arrived, so nothing recorded; the capture page was also on a
+different origin (localhost vs github.io), so its notes stayed empty in the
+github.io export). Runs must be repeated after the fixes.
+
+## C51.4 — Interim workaround (until both fixes land)
+
+1. After EVERY power-on: plug USB, open the uart1 port once (e.g.
+   `tools/control.py status`), or just start the session flow with USB
+   attached — then unplug and collect over BLE freely.
+2. NEVER power off / reboot the board with un-pulled `.dat` files —
+   pull per block (`tools/pull_sessions.py`) religiously.
+3. Verify recording is real before walking a block: after START, the page's
+   Last response must show `OK started <uuid>` (dead air = no response).
+
+## C51.5 — State after this entry
+
+- Device: GS9999999981 on capture image (§C50 fixes in) + always-on-BLE
+  bridge; healthy, Onomondo NITZ, one stationary test session pulled today.
+- Safe on disk: 2026-07-02 runs 1-2 + handling sessions
+  (`raw_sessions/2026-07-02-dt1-bench/`), today's `c3d15e15` pending pull.
+- Pending next session: C51.1 bridge fix + C51.2 sweep Kconfig, reflash
+  both cores' owners, cold-boot BLE-only validation, then re-run the
+  protocol. P5 End-Monitoring/wipe smoke still queued (needs cloud image
+  reflash after capture days conclude).
