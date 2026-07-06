@@ -1,4 +1,5 @@
 import { spawnSync } from 'child_process';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as cdk from 'aws-cdk-lib/core';
@@ -65,6 +66,18 @@ export class ProcessingLambda extends Construct {
 
     const tracingActive = props.tracingActive === true;
 
+    // Asset identity MUST include _shared/. The fromAsset path is only the
+    // handler dir, but bundling vendors _shared/ in from outside it, so the
+    // default SOURCE hash misses _shared-only changes — they would silently
+    // NOT deploy ("no changes" on a real edit). Hash both trees' contents.
+    const assetHash = (() => {
+      const h = crypto.createHash('sha256');
+      hashDirInto(handlerDirAbs, h);
+      h.update('\0_shared\0');
+      hashDirInto(sharedDir, h);
+      return h.digest('hex');
+    })();
+
     this.function = new lambda.Function(this, 'Function', {
       functionName: props.functionName,
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -82,6 +95,7 @@ export class ProcessingLambda extends Construct {
       description: props.description,
       logRetention: logs.RetentionDays.ONE_MONTH,
       code: lambda.Code.fromAsset(handlerDirAbs, {
+        assetHash,
         bundling: {
           // Image is required for CDK bundling-option type, but we use the
           // local tryBundle path on this machine (no Docker installed).
@@ -148,6 +162,25 @@ function copyRecursive(src: string, dest: string): void {
       copyRecursive(sp, dp);
     } else {
       fs.copyFileSync(sp, dp);
+    }
+  }
+}
+
+/** Deterministic content hash of a directory tree (sorted; skips caches).
+ * Used so the Lambda asset identity reflects _shared/ edits, not just the
+ * handler dir (see the assetHash note in the constructor). */
+function hashDirInto(dir: string, hash: crypto.Hash): void {
+  const entries = fs
+    .readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    if (entry.name === '__pycache__' || entry.name === '.pytest_cache') continue;
+    const p = path.join(dir, entry.name);
+    hash.update(entry.name);
+    if (entry.isDirectory()) {
+      hashDirInto(p, hash);
+    } else {
+      hash.update(fs.readFileSync(p));
     }
   }
 }

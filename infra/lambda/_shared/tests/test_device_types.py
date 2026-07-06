@@ -175,12 +175,60 @@ class TestRollatorValidation(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("active_out_of_range", reason)
 
-    def test_build_promotes_active_minutes_only(self):
+    def test_build_stray_steps_not_promoted(self):
+        # Rollator has no steps (frame-mount, no lift-and-place impulses). A
+        # stray value stays in extras — build promotes only recognized metrics.
         attrs, warnings = rollator_platform.build_metric_attrs(
-            _rollator_event(steps=99)  # provisional field — NOT promoted
+            _rollator_event(steps=99)
         )
         self.assertEqual(attrs, {"activeMinutes": 4})
         self.assertEqual(warnings, [])
+
+    def test_build_promotes_distance_and_gait(self):
+        attrs, warnings = rollator_platform.build_metric_attrs(
+            _rollator_event(distance_ft=123.4, gait_speed_fts=1.1)
+        )
+        self.assertEqual(attrs["activeMinutes"], 4)
+        self.assertEqual(attrs["distanceFt"], Decimal("123.4"))
+        self.assertEqual(attrs["gaitSpeedFts"], Decimal("1.1"))
+        self.assertEqual(warnings, [])
+
+    def test_build_distance_gait_omitted_active_min_only(self):
+        # Confidence-gated: a stationary session (no rolling motion) sends
+        # active_min only — distance/gait absent, still a valid row.
+        attrs, warnings = rollator_platform.build_metric_attrs(_rollator_event())
+        self.assertEqual(attrs, {"activeMinutes": 4})
+        self.assertNotIn("distanceFt", attrs)
+        self.assertNotIn("gaitSpeedFts", attrs)
+        self.assertEqual(warnings, [])
+
+    def test_build_distance_out_of_range_dropped_with_warning(self):
+        attrs, warnings = rollator_platform.build_metric_attrs(
+            _rollator_event(distance_ft=50_001)
+        )
+        self.assertNotIn("distanceFt", attrs)
+        self.assertEqual(warnings[0]["warning"], "distance_out_of_range")
+
+    def test_build_gait_out_of_range_dropped_with_warning(self):
+        attrs, warnings = rollator_platform.build_metric_attrs(
+            _rollator_event(gait_speed_fts=11.0)
+        )
+        self.assertNotIn("gaitSpeedFts", attrs)
+        self.assertEqual(warnings[0]["warning"], "gait_out_of_range")
+
+    def test_build_distance_unparseable_dropped_silently(self):
+        attrs, warnings = rollator_platform.build_metric_attrs(
+            _rollator_event(distance_ft="far")
+        )
+        self.assertNotIn("distanceFt", attrs)
+        self.assertEqual(warnings, [])
+
+    def test_named_fields_include_distance_gait_not_steps(self):
+        # So the handler excludes distance/gait from the `extras` catch-all,
+        # but a stray `steps` still flows to extras.
+        self.assertIn("distance_ft", rollator_platform.ACTIVITY_NAMED_FIELDS)
+        self.assertIn("gait_speed_fts", rollator_platform.ACTIVITY_NAMED_FIELDS)
+        self.assertNotIn("steps", rollator_platform.ACTIVITY_NAMED_FIELDS)
 
     def test_alert_enum_empty(self):
         self.assertEqual(rollator_platform.VALID_ALERT_TYPES, frozenset())

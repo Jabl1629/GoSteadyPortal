@@ -754,8 +754,8 @@ As of Phase DT-0 ([`2026-07-01-device-types.md`](2026-07-01-device-types.md) §3
 
 | | `walker_cap` | `rollator_platform` |
 |---|---|---|
-| Required activity metrics | `steps`, `distance_ft`, `active_min` | Bench v0: `active_min` only → **walker parity at DT-2 exit** (memo D10) |
-| Optional activity metrics | `roughness_R`, `surface_class`, `gait_speed_fts` | `gait_speed_fts` at parity; provisional fields flow to `extras` (D16) |
+| Required activity metrics | `steps`, `distance_ft`, `active_min` | `active_min` only (`steps` N/A — a frame-mount has no lift-and-place impulses, §C52.2) |
+| Optional activity metrics | `roughness_R`, `surface_class`, `gait_speed_fts` | **`distance_ft`, `gait_speed_fts`** (rol-0.1.0-ww / §C52; within-resident trend ~26–31% MAPE). Other provisional fields → `extras` (D16) |
 | Device-alert enum | `tipover`, `fall`, `impact` (unused in v1) | None in v1 (memo Q11) |
 | Threshold defaults | ARCH §8 values | Inherits walker values until DT-3 (memo Q3) |
 
@@ -764,8 +764,10 @@ New heartbeat optional field `device_type` (string): firmware self-reports its p
 ### Activity (session-end event)
 
 > **Per-type note (DT-0):** the field table below documents the **`walker_cap`**
-> metric contract. The `rollator_platform` bench-v0 contract requires only
-> `active_min` (see §7.0 above); the envelope + time fields are Core and
+> metric contract. The `rollator_platform` contract requires only `active_min`,
+> with `distance_ft` + `gait_speed_fts` optional (rol-0.1.0-ww / §C52,
+> [`2026-07-06-rollator-distance-cloud-promotion.md`](2026-07-06-rollator-distance-cloud-promotion.md));
+> `steps` is not a rollator metric. The envelope + time fields are Core and
 > identical for every type.
 ```json
 {
