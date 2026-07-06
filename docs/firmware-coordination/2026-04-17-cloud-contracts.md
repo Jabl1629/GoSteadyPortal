@@ -9227,3 +9227,103 @@ github.io export). Runs must be repeated after the fixes.
   both cores' owners, cold-boot BLE-only validation, then re-run the
   protocol. P5 End-Monitoring/wipe smoke still queued (needs cloud image
   reflash after capture days conclude).
+
+---
+
+# §C52 — [rollator] Distance estimator: data recovery + honest re-validation + firmware port (flashed) (2026-07-05/06)
+
+## C52.1 — §C51.3 "15 runs lost" is RETRACTED — 16 sessions recovered
+
+Before any reflash, a non-destructive `pull_sessions.py --list-only` found **16
+valid sessions still on GS9999999981** and pulled them all
+(`raw_sessions/2026-07-04-dt1-rollator/`, all validate). The runs recorded fine
+over BLE; they only *looked* lost because (1) the uart0 console log had a ~19-min
+gap (USB unplugged for untethered BLE capture, so `session_start` lines weren't
+logged) and (2) **Bug 1 is RX-biased, not dead air** — page→device commands DID
+arrive (sessions started + recorded), only the device→page confirmations were
+missing, so the operator saw "dead air" and assumed nothing recorded. Nothing was
+lost; the device never rebooted, so the boot sweep hadn't run. **Lesson (firmware
+GOSTEADY_CONTEXT + memory): LIST the device before declaring capture lost —
+on-device flash is ground truth, console-log gaps ≠ no recording.** This also
+right-sizes §C51: those "blockers" were largely a misread, so **Path B (bridge
+uart1 fix + boot-sweep Kconfig) is PARKED** — USB-touch + pull-before-reboot
+suffice.
+
+## C52.2 — Distance estimator: steps dropped; surface-normalized vibration odometer; the honest arc
+
+Frame-mount rollator IMU is **wheel-vibration-dominated, not step impulses**
+(measured: 72–98 % of dynamic-accel energy in the 10–45 Hz wheel band, ~0–7 % in
+the 0.7–3 Hz gait band). **Steps dropped for rollator** (operator decision); metric
+set = `active_min` + `distance_ft` + `gait_speed_fts`. Approach:
+`distance = m · Σ_active(HP window RMS · dt) / flatness`, where flatness (spectral
+flatness of the wheel vibration) is a **speed-independent roughness** descriptor
+that de-confounds amplitude (a rougher surface buzzes harder at equal speed).
+
+**Honest arc — a headline was retracted, then re-validated:** an initial
+"flatness-normalized ~17 % ≈ oracle" result was a **constant-speed artifact**. A
+13-agent adversarial-review workflow reproduced the numbers and showed a plain
+stopwatch (`dist = m·walk_t`) *beat* it (11.6 % vs 16.9 %) because the 07-04 runs
+were all ~0.66–1.21 ft/s; within one surface flatness added nothing; the naive-vs-
+flat gap CI crossed zero. Rebuilt the harness honestly (time-only baseline beside
+every model, nested feature selection, wheel-band Schmitt gate, leave-one-SURFACE-
+out first, bootstrap CIs). The **07-05 pull** (asphalt = 3rd surface; real speed
+range **0.55–3.08 ft/s**) **reversed it**: flat-norm **29.4 %** vs time-only
+**42.7 %** (gap CI [−22, −6], p=0); within-surface raw vibration 11–14 %; realistic
+deploy (82 % surface classifier → per-surface curve) **26.3 %** ≈ walker parity;
+oracle 15.9 %. **Wheel-rotation odometry ruled out** (implied circumference CV
+94 %). **Continuous flat-norm chosen for the port** (no misclassification cliff,
+simpler on-device, ~3 pp cost). Full arc + figures:
+`gosteady-firmware/docs/specs/2026-07-04-rollator-algorithm-scope.md` §3a–§3f.
+
+## C52.3 — Capture protocol reconfigured + 07-05 data
+
+`tools/capture_rollator.html` reconfigured to a **42-run distance protocol** (3
+surfaces polished < sidewalk < asphalt × 3 speeds × 2 distances [20/40 ft] × 2 reps
++ 2 mid-run 10 s-pause runs/surface), pushed live to github.io. Operator captured
+it (53 sessions pulled). **First sidewalk pass (14 runs) invalidated** — mistaped
+course distance, per operator (adjusted notes; original preserved). Asphalt set
+complete. Pause runs validate the motion-gate trim: the wheel-band gate correctly
+ignores a lean-during-pause (frame load, no roll → no wheel vibration → no fake
+distance).
+
+## C52.4 — Firmware port (flashed + on-device verified) + NEW cloud-contract fields
+
+New `src/algo/gs_rollator_distance.{c,h}` + `gs_rollator_params.h` (coeffs from the
+golden reference `algo/rollator_distance_ref.py`): streaming **causal** biquads,
+16-band filter bank (1–49 Hz), wheel-band Schmitt gate + flat-norm at finalize.
+**No FFT, no classifier.** Compile-gated `CONFIG_GOSTEADY_PRODUCT_ROLLATOR`
+everywhere → **walker build byte-identical (verified: module not compiled in the
+pilot build).** **Host-parity validated** (`tests/host/test_rollator_distance.c`)
+on all **44** valid walking sessions: distance & flatness max rel-err **0.02 %**,
+gate windows identical, valid 44/44. Two bugs fixed en route: CMSIS biquad sign
+convention (a1,a2 negated vs scipy) and window RMS = `np.std` (mean-subtracted).
+
+**⚠ CLOUD-CONTRACT DELTA (cloud side please note):** the **rollator** activity
+payload (`cloud.c` `build_activity_payload`, `PRODUCT_ROLLATOR` branch) now emits
+**`distance_ft` + `gait_speed_fts`**, confidence-gated (`isfinite` → else omitted;
+distance is a within-resident **trend** ~26–31 % MAPE, not a precise odometer).
+These were walker-only fields — **the DT-0 validators + activity-processor should
+accept them for `device_type:"rollator_platform"`.** `active_min` unchanged.
+
+**Flashed** `build_rollator_dist/merged.hex` via **`nrfutil device`** — ⚠ the
+standalone `nrfjprog` CLI is broken on this machine (bound to stale system JLink
+**V9.34a** → `-256`; not a probe/cable fault). Use `~/.nrfutil/bin/nrfutil device
+program …` (current bundled JLink) or the nRF Connect GUI. On-device stationary
+session logged `ROLL_DIST valid=0 dist_ft=0.00 flat=0.0000 vib=0.099 walk_s=0.5
+nact=1`; host C on the same pulled `.dat` matched exactly → **Python ref == host C
+== on-device** on real data. Full flash+test runbook: firmware port spec §8
+(`docs/specs/2026-07-05-rollator-distance-firmware-port.md`).
+
+## C52.5 — State after this entry
+
+- GS9999999981 runs the rollator distance capture image (`build_rollator_dist`).
+  Restore point: `build_rollator_bench/merged.hex` (nrfutil, same options).
+- **Remaining:** (1) a **pushed-rollator** session to exercise the *valid-distance*
+  path on hardware (bench sessions only reach `valid=0` — no motion); (2) the cloud
+  rollator build to verify the payload end-to-end (pre-existing RAM overflow, §C49);
+  (3) a **2nd-rollator generalization capture** — decides compile-time vs NV
+  calibration (all data is one rollator/mount/subject); (4) cloud-side accept of the
+  two new rollator activity fields.
+- Firmware commits (main), all pushed: honest harness → port scope → rotation-rate
+  ruled out / flat-norm chosen → `gs_rollator_distance` module + host parity →
+  session/payload integration → flashed + verified.
