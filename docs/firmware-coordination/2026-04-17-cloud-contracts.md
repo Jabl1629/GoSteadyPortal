@@ -9327,3 +9327,101 @@ nact=1`; host C on the same pulled `.dat` matched exactly → **Python ref == ho
 - Firmware commits (main), all pushed: honest harness → port scope → rotation-rate
   ruled out / flat-norm chosen → `gs_rollator_distance` module + host parity →
   session/payload integration → flashed + verified.
+
+---
+
+# §C53 — [rollator] Pilot firmware flashed → end-to-end live; cloud distance/gait promotion; a ProcessingLambda bundling-bug fix (2026-07-06)
+
+Closes the §C52.5 remaining items on both sides: the rollator is now flashed to
+its deployment posture, live + activated on the cloud, and the two new activity
+fields (`distance_ft` + `gait_speed_fts`) are promoted cloud-side and
+synthetic-validated end-to-end.
+
+## C53.1 — Firmware: deployment overlays + canonical build-config doc
+
+An audit (does the walker's battery/stability work carry forward to the
+rollator?) confirmed the split is a **single-app Kconfig product gate**, not a
+fork (walker default) — so every platform mechanism is inherited by
+construction. BUT the rollator had only a bench+cloud overlay
+(`prj_rollator_cloud.conf`); the battery/shipping-mode bundle had no rollator
+overlay to switch it on. Added:
+- **`prj_rollator_field.conf`** (deployment baseline) + **`prj_rollator_pilot.conf`**
+  (= field + LOW_POWER + SESSION_LED + PREACT_LOWPOWER) — carries the walker's
+  proven battery/shelf-life/shipping-mode work forward verbatim (shared code).
+  Snippets OFF (rollator corpus is uart1 `.dat`, not cloud snippets; also RAM).
+  Build-verified: `rol-0.1.0-ww`, app RAM 63.05%.
+- **`gosteady-firmware/docs/build-configurations.md`** — canonical overlay×symbol
+  matrix + build-dir→device map + version-string ambiguity note (capture/cloud/
+  field rollator builds all report `rol-0.1.0-bench`; fix proposed, not applied —
+  `firmware_version` feeds cloud cohorts). Fixes the doc scatter that caused a
+  diagnosis miss (a capture-image unit *looked* like it lacked basic features —
+  really `MOTION_AUTOSTART=n` by design).
+Firmware commits (main): `b8c952a`, `acf4aaf`.
+
+## C53.2 — Firmware: pilot flashed to GS9999999981 → end-to-end LIVE
+
+Flashed `prj_rollator_pilot.conf` (`rol-0.1.0-ww`) via `nrfutil device`. Boot +
+Shadow confirm the whole stack:
+- **Onomondo SIM works** (the dev-unit record's "iBasis EMM-cause-8 unactivated"
+  note was stale — the user swapped in an Onomondo SIM): `registered_roaming`
+  LTE-M, **PSM granted tau=3 h/active=2 s**, NITZ time OK (`src=nitz`, correct
+  2026 date), rsrp −92, battery ~100%.
+- **Already activated** (`activated_at=2026-07-02T16:16:40Z`, cmd `act_7bcdb1ca…`)
+  — `activation.bin` persisted across the reflash (ext-flash preserved).
+- Cloud Shadow `reported`: `firmware=rol-0.1.0-ww`, `device_type=rollator_platform`
+  (heartbeat-processor cross-check PASS, no mismatch alarm); registry
+  `active_monitoring`. Carried-forward mechanisms confirmed in the boot log (WDT,
+  forensics, gated sampler, OCV).
+The one on-device capture session was pulled first
+(`raw_sessions/2026-07-06-pre-pilot-flash/`, validates) — LIST-before-reflash.
+
+## C53.3 — Cloud: distance_ft + gait_speed_fts promoted to named columns
+
+Firmware §C52 emits `distance_ft` + `gait_speed_fts`, but the DT-0 validator only
+named `active_min`, so they landed in `extras` — invisible to the portal.
+Promoted (`_shared/device_types/rollator_platform.py`):
+- `distanceFt` + `gaitSpeedFts` are now named columns — **optional**,
+  confidence-gated, drop-on-invalid (mirrors walker gait; firmware omits them
+  when the vibration odometer can't produce a valid estimate). `active_min` stays
+  the only required metric.
+- **`steps` dropped for rollator** (a frame-mount has no lift-and-place impulses,
+  §C52.2) — a stray `steps` stays in `extras`. **This amends memo D10** (target
+  was walker parity incl. steps): rollator metric set = `active_min` +
+  `distance_ft` + `gait_speed_fts`. Docs in lockstep (ARCHITECTURE §7.0,
+  device-types §3.2/D10; scope spec
+  `docs/specs/2026-07-06-rollator-distance-cloud-promotion.md`).
+- Deployed to `GoSteady-Dev-Processing`; 29/29 unit tests; **synthetic-validated**
+  (distance+gait → named columns, stray steps → extras, stationary payload →
+  `active_min`-only + valid). Backward-compatible.
+Portal commit (`feature/infra-scaffold`): `3b697e3`.
+
+## C53.4 — Finding + fix: ProcessingLambda `_shared`-only changes silently didn't deploy
+
+The first `cdk deploy` reported **"no changes" (3.75 s no-op)** on a real Python
+edit. Root cause (pre-existing): `ProcessingLambda` uses
+`Code.fromAsset(handlerDir, …)` → default `SOURCE` asset hash covers only the
+handler dir, but bundling vendors `_shared/` in from **outside** it. So any
+`_shared`-only change is invisible to the asset hash and **silently does not
+deploy**. Past `_shared` changes only shipped because they rode alongside handler
+edits (DT-0 refactored the handlers; §C47 device_time touched them). Fixed:
+`assetHash` now hashes both the handler dir AND `_shared/` content
+(`processing-lambda.ts`) — the redeploy became a real 40 s update. Unblocks all
+future `_shared`-only Processing deploys.
+
+## C53.5 — State after this entry
+
+- **Rollator is end-to-end live** on the deployment posture: device → cloud →
+  named `distanceFt`/`gaitSpeedFts` columns (portal-readable). GS9999999981
+  `active_monitoring`, `rol-0.1.0-ww`, Onomondo.
+- **Remaining for real distance data:** a **pushed/rolling** session (bench + desk
+  sessions reach `valid=0` — the odometer needs actual wheel motion) + a
+  2nd-rollator generalization capture (compile-time vs NV calibration).
+- **Next phase — DT-4 (D2C launch readiness), now unblocked:** Twilio compliance
+  **approved 2026-07-06** (external gate cleared; `gosteady/dev/twilio` secret
+  population still pending, operator). DT-4 = D2C dashboard rollator rendering
+  (per-type widget registry — Q10 lands here first), rollator QR-claim + SMS-OTP
+  live, behavioral rules re-keyed on `activeMinutes` (Q8 launch gate), D2C
+  wrap-up (§C41.3). Portal-rendering scope is being drawn up next.
+- Deferred/known: the `rol-0.1.0-*` version-string collision (capture/cloud/field)
+  — fix proposed in `build-configurations.md` §5, not yet applied (cloud-cohort
+  surface).
