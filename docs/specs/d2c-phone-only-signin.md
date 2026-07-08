@@ -58,3 +58,40 @@ That splits the work into two options.
 ## 5. Open questions
 - **Keep email at all?** Recommend collecting it as **optional** (receipts / future recovery) but never gating on it. Account recovery with a phone-only pool = re-run SMS-OTP (no password to reset); fine.
 - **Do it with, or before, the hosting cutover?** Independent — can land either order. Cleanest to do while the D2C app is still being validated (pre real households).
+
+---
+
+## 6. Broader onboarding coverage — purchase / caregiver / binding (spec review 2026-07-08)
+
+From a 6-agent + adversarial review of the whole `docs/` tree + deployed code (workflow `d2c-purchase-caregiver-spec-review`). Answers "is the purchase → caregiver-vs-walker-user → binding → walker-access flow already specced?"
+
+| Element | Status | Notes |
+|---|---|---|
+| QR scan → SMS-OTP **bind → activate** (the go-live path) | ✅ specced **+ built** (dev) | solo self-claim; `d2c-phase1` §3–5 + `d2c-claim` |
+| Household / role model (owner/member, `isWalkerUser`) | ✅ specced (data model) | deployed for the solo case only |
+| **Purchaser ≠ walker-user** separation | 🟡 designed + mocked, **unbuilt** | claim hard-conflates claimer = walker = Admin |
+| Caregiver **invite / add-member** (Care Circle) | 🟡 specced as **Phase 5**, unbuilt | email-based invites; no endpoints/tables yet |
+| **Subscription / billing / entitlement** | ❌ **not specced** | explicitly deferred ("no Stripe yet"); no data field |
+| Device **purchase / order pipeline** (pre-bound Admin) | ❌ **not specced** | the stated 70–80% path; deferred until a checkout channel is chosen |
+| **Pre-set walker phone → QR scan authorized** | ❌ **total gap** | every invite path in the specs is *email*-based |
+
+**Bottom line:** the initial go-live (QR + phone bind/activate) is fully covered and built. The caregiver-ordered / purchase / subscription / phone-pre-authorization flows are designed-at-best (mostly deferred), and the specific "pre-set the walker's phone so their scan is recognized" mechanism isn't specced at all.
+
+## 7. What to get right NOW so the rest is additive (no later migration)
+
+Key finding: **the only irreversible piece is the Cognito pool.** The account model is already shaped to grow — the pre-token is *data-model-driven* (reads RoleAssignments; emits `role` + `isWalkerUser` true/false; honors a **stored clientId over the bootstrap default**), RoleAssignments `PK=userId` (no SK) already allows **N members per household**, and the `Organizations` `META#client` row is schemaless. So subscription, invites/members, and Care Circle are **additive with no pool/token migration** — *provided* the claim + tenancy shape below is right now.
+
+**One-way doors — encode at pool/claim setup time:**
+1. **Pool** — phone-first, email optional/unverified, nullable identity (Option B above). Immutable post-creation.
+2. **Claim identity contract** — split "who is the Cognito account" from "who is the walker Patient." Today `d2c-claim` hardcodes `isWalkerUser=True` + `cognitoUserId=sub` on the Patient and derives `displayName` from the claimer. Even with a solo-only go-live UI, make the claim's *data writes* support caregiver ≠ walker: nullable `Patient.cognitoUserId` (already schema-optional), separate `walkerDisplayName` vs `ownerName`, and an optional `caregiverSetup` request flag. Retrofitting after real households exist = rewrite of the atomic bootstrap + a data migration. **This single change unblocks the caregiver-initiated flow (the ~70–80% path).**
+3. **Tenancy anchor = a stable `household_id`, not the Cognito sub.** Today `clientId=dtc_{sub}`, `facilityId=fac_{sub[:12]}` — the household is welded to the first claimer's sub, blocking household transfer, N-Admins, and account-less walker. Use `clientId=dtc_{householdId}`. Changing later = data migration.
+4. **(If the caregiver-orders → walker-scans-later flow matters)** reserve a place to store an **expected/pending phone** (on the Patient or a PendingClaims/Invites row) so a walker's first SMS-OTP signup matches the *existing* household instead of spawning a new solo client. Total gap today; email invites don't cover it.
+5. **Rename `walkerId → claimId` before QR stickers are physically printed** (field problem afterward).
+6. **Re-key the pre-claim-race masked-owner hint off a phone tail** (email becomes optional in the new pool; else it degrades to "another account").
+
+**Additive later — no migration (already supported):**
+- Subscription/entitlement → a `subscriptionStatus` field on the household `Organizations` row (the **household**, not the user or pool, is the billing subject; keeps "who pays" separable from "who signs in").
+- Invites / N-Admins / `family_viewer` members → RoleAssignments already allows N rows/household; the pre-token already emits the `family_viewer` / `isWalkerUser=false` branches from the row — **only a claim/invite writer is missing**.
+- Care Circle → a derived view over RoleAssignments (by-client-role GSI), not a new table.
+
+**Correction (stale worry retired):** the `status_patientId` `active#` vs `active_` divergence is **already fixed** across all three writers (DT-4 WS4) — not a precondition for any of this.
