@@ -1,6 +1,6 @@
 # Phase DT-4 — D2C launch readiness (rollator)
 
-> **Date:** 2026-07-08 | **Status:** 🟡 SCOPED (this doc) — implementation not started
+> **Date:** 2026-07-08 | **Status:** 🟢 all 4 workstreams IMPLEMENTED; backend + facility-frontend DEPLOYED to dev (portal `4289809` WS1 / `6dc62d2` WS2 / `318b0c6` WS4; WS3 Twilio secret populated + OTP proven live). **First browser test surfaced 3 gaps — see coord §C54:** (1) the live D2C app (`main_d2c.dart`) is **not hosted** (ran locally on `:8080` for the test); (2) the dashboard hit **`401`** — D2C Cognito JWT likely not accepted by the API authorizer (fix first); (3) email-verify + SMS-OTP is **double verification** (UX decision). Also owed: WS2 walker alert-rate check (pre-PROD), physical exit-bar test, deferred cosmetics (walkerId→claimId, D2C test device).
 > **Related:** [`2026-07-01-device-types.md`](2026-07-01-device-types.md) §8 (DT-4) + Q8/Q10/D11 · [`2026-07-06-rollator-distance-cloud-promotion.md`](2026-07-06-rollator-distance-cloud-promotion.md) · [`d2c.md`](d2c.md) · [`d2c-phase1-walker-activation.md`](d2c-phase1-walker-activation.md) · coord §C37 (D2C P1), §C48 (DT-0), §C53 (rollator end-to-end live)
 > **External gate:** Twilio compliance **approved 2026-07-06** — cleared.
 > **Discovery:** scoped from a 6-agent read-only pass over frontend + API + specs (2026-07-08).

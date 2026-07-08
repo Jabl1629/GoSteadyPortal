@@ -9425,3 +9425,80 @@ future `_shared`-only Processing deploys.
 - Deferred/known: the `rol-0.1.0-*` version-string collision (capture/cloud/field)
   — fix proposed in `build-configurations.md` §5, not yet applied (cloud-cohort
   surface).
+
+---
+
+# §C54 — [rollator] DT-4 D2C launch work: 4 workstreams implemented + deployed; browser test surfaced a D2C↔API auth gap (2026-07-08)
+
+DT-4 (D2C launch readiness for the rollator) implemented across all four
+workstreams; backend + facility frontend deployed to dev. A first live browser
+test surfaced three gaps (below). **Code is done + committed/pushed; both repos
+clean.** Full spec: `docs/specs/phase-dt4-d2c-launch-readiness.md`.
+
+## C54.1 — What shipped (committed + deployed to dev)
+
+- **WS1 — D2C dashboard per-type rendering** (portal `4289809`): lean
+  `deviceType → metric` registry (`lib/d2c/rendering/metric_registry.dart`).
+  Rollator leads on **active-minutes** (hero + 7-day trend + greeting + context),
+  shows distance ("—" when the confidence-gated value is null) + gait (hidden
+  when null), **no steps**; walker unchanged (registry defaults to walker_cap).
+  `deviceType` now surfaced on activity rows + the current-device projection
+  (`patient-api`); repo aggregation + dashboard + live history all hero-aware.
+  `dart analyze` clean.
+- **WS2 — behavioral re-key** (portal `6dc62d2`): no_activity_today /
+  below_typical / declining_trend re-keyed `steps → activeMinutes` (3 rules +
+  history_window + tests, 42/42; thresholds unchanged). **Owed: the empirical
+  walker alert-rate before/after check** (activeMinutes is coarser) — a pre-PROD
+  gate; deployed to dev anyway (dev has only synthetic walkers).
+- **WS3 — SMS-OTP go-live**: operator populated `gosteady/dev/twilio`; **proven
+  live** — a Cognito custom-auth challenge on pool `us-east-1_bhvtxuHwD` /
+  client `1mfi0ori1r0r5tvd5rq11m3ac3` sent a real OTP to the operator's phone.
+- **WS4 — deviceType claim/setup + status_patientId fix** (portal `318b0c6`):
+  **fixed a latent bug** — `d2c-claim` wrote `status_patientId` as `active#{id}`
+  (hash) vs the readers' `begins_with("active_")`, so D2C patients were invisible
+  to `/me/patients` (how the dashboard finds its patient); aligned to `active_`.
+  Public lookup now returns `deviceType`; the live `/setup` landing reads it.
+- **Deploys**: `GoSteady-Dev-Api` + `GoSteady-Dev-Processing` (real updates,
+  51s / 40s, Lambda LastModified confirmed); facility frontend redeployed.
+
+## C54.2 — Finding: the LIVE D2C consumer app is NOT hosted (blocks the exit bar)
+
+Three D2C surfaces exist: the facility portal (`main.dart` →
+`dev.portal.gosteady.co`, no `/setup`), a mock wireframe (`main_userdemo.dart` →
+`gosteady.co/userdemo/`), and the **live D2C app** (`main_d2c.dart` — real API,
+`/setup/:walkerId`, real claim) — which **has no deploy script or URL**. That's
+why `/setup` gave the facility sign-in. **A hosting target for `main_d2c.dart`
+is required for the exit bar + real users.** Interim: ran it locally
+(`flutter run -d web-server --web-port=8080 -t lib/main_d2c.dart
+--dart-define=BUILD_MODE=live --dart-define=API_BASE_URL=<Api HttpApiUrl>`) —
+CORS already allows localhost:8080; D2C Cognito config is baked in.
+
+## C54.3 — Finding: D2C dashboard 401 (the bug to fix first next session)
+
+Local test: email verify + SMS OTP both succeeded, but the dashboard then failed
+**`Request failed (401)`** on its first API call. Almost certainly the **D2C
+Cognito pool's JWT is not accepted by the HTTP API authorizer** (which likely
+validates the facility pool, not `us-east-1_bhvtxuHwD`) — a D2C↔API
+auth-integration gap the never-hosted live app never surfaced. Check the
+authorizer's accepted issuer/audience vs the D2C pool/client.
+
+## C54.4 — Finding: email-verify + SMS-OTP = double verification (UX)
+
+D2C sign-up required BOTH an email confirmation and the SMS OTP — redundant/heavy
+for consumer onboarding. Reconsider: phone-only (SMS-OTP sole factor) or
+email-only, not both. Product decision.
+
+## C54.5 — State + remaining
+
+- **Code done + pushed** (WS1/2/4 above); both repos clean; backend + facility
+  frontend deployed to dev.
+- **Test artifacts staged (dev):** synthetic claimable rollator `GS0001000042`
+  (`rollator_platform`, walkerId `wlk_dt4smoke_rollator`, ready_to_provision);
+  Cognito smoke user `d2c-rollator-smoke@gosteady.co` (+ the operator's sign-up
+  user). A local `:8080` flutter dev server may still be running.
+- **Remaining for the exit bar (next session):** (1) **fix the dashboard 401**
+  (D2C-pool authorizer); (2) **host the live D2C app** (`main_d2c.dart`); (3)
+  the email+SMS UX decision; (4) WS2 walker alert-rate check (pre-PROD); (5)
+  physical exit-bar test (re-stage GS9999999981 for D2C → claim → activate →
+  roll → dashboard); (6) deferred cosmetics: walkerId→claimId rename, dedicated
+  D2C test device.
