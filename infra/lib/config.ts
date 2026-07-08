@@ -24,6 +24,12 @@ export interface GoSteadyEnvConfig {
   readonly dynamoBillingMode: 'PAY_PER_REQUEST' | 'PROVISIONED';
   /** CloudFront custom domain (null = use default CF domain). */
   readonly portalDomain?: string;
+  /**
+   * CloudFront custom domain for the live D2C consumer app (main_d2c.dart).
+   * DT-4 (coord §C54) — its own S3+CloudFront site, separate from the
+   * facility portal. null = no D2C-app hosting for this env.
+   */
+  readonly d2cAppDomain?: string;
   /** Whether to enable detailed CloudWatch alarms. */
   readonly alarmsEnabled: boolean;
   /**
@@ -214,6 +220,7 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     pitrEnabled: false,
     dynamoBillingMode: 'PAY_PER_REQUEST',
     portalDomain: 'dev.portal.gosteady.co', // Phase 2B-0 — minimum-viable hosting at dev.portal
+    d2cAppDomain: 'dev.app.gosteady.co', // DT-4 — live D2C consumer app (main_d2c.dart)
     alarmsEnabled: false,
     kmsCmkEnabled: true,
     cloudTrailEnabled: true,
@@ -269,6 +276,7 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     pitrEnabled: true,
     dynamoBillingMode: 'PAY_PER_REQUEST', // switch to PROVISIONED when usage patterns are clear
     portalDomain: 'portal.gosteady.co',
+    d2cAppDomain: 'app.gosteady.co', // DT-4 — live D2C consumer app (main_d2c.dart)
     alarmsEnabled: true,
     kmsCmkEnabled: true,
     cloudTrailEnabled: true,

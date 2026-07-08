@@ -114,12 +114,18 @@ export class ApiStack extends cdk.Stack {
       corsPreflight: {
         allowOrigins:
           env === 'prod'
-            ? ['https://portal.gosteady.co']
+            ? [
+                'https://portal.gosteady.co',
+                // DT-4 — hosted live D2C consumer app (main_d2c.dart)
+                'https://app.gosteady.co',
+              ]
             : [
                 'http://localhost:8080',
                 'http://localhost:8090',
                 // Phase 2B-0 — minimum-viable hosting at dev.portal.gosteady.co
                 'https://dev.portal.gosteady.co',
+                // DT-4 — hosted live D2C consumer app (main_d2c.dart)
+                'https://dev.app.gosteady.co',
               ],
         allowMethods: [
           apigwv2.CorsHttpMethod.GET,
@@ -1044,6 +1050,30 @@ export class ApiStack extends cdk.Stack {
       methods: [apigwv2.HttpMethod.GET],
       integration: d2cClaimIntegration,
     });
+
+    // ── D2C dashboard reads (DT-4 / coord §C54) ──────────────────────
+    // The consumer dashboard reuses the facility patient-api reads, but the
+    // D2C app signs in against the D2C pool — whose JWT the facility
+    // authorizer rejects (→ 401 on the dashboard's first call). So the same
+    // four reads are re-registered under an /api/v1/d2c/* prefix bound to the
+    // D2C authorizer, pointing at the SAME patientApiIntegration. patient-api
+    // normalizes the /d2c/ prefix before its dispatch table (handler.py
+    // _route), and d2c-pre-token injects identical custom:clientId claims, so
+    // the handlers are pool-agnostic. Facility routes above are untouched.
+    const d2cReadRoutes: Array<[apigwv2.HttpMethod, string]> = [
+      [apigwv2.HttpMethod.GET, '/api/v1/d2c/me/patients'],
+      [apigwv2.HttpMethod.GET, '/api/v1/d2c/patients/{id}'],
+      [apigwv2.HttpMethod.GET, '/api/v1/d2c/patients/{id}/activity'],
+      [apigwv2.HttpMethod.GET, '/api/v1/d2c/patients/{id}/alerts'],
+    ];
+    for (const [method, p] of d2cReadRoutes) {
+      this.httpApi.addRoutes({
+        path: p,
+        methods: [method],
+        integration: patientApiIntegration,
+        authorizer: d2cAuthorizer,
+      });
+    }
 
     // d2c-claim alarms (mirror the per-handler pattern).
     const d2cClaimErrorsAlarm = new cloudwatch.Alarm(this, 'D2CClaimErrors', {

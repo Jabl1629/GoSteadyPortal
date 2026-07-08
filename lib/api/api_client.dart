@@ -26,15 +26,27 @@ class ApiClient {
   final String _baseUrl;
   final http.Client _http;
 
+  /// Path prefix for the authenticated patient-read endpoints
+  /// (`/me/patients`, `/patients/{id}`, `.../activity`, `.../alerts`).
+  /// Defaults to `/api/v1` (facility pool). The D2C consumer app passes
+  /// `/api/v1/d2c` so those reads hit the routes bound to the **D2C** Cognito
+  /// authorizer — the facility JWT authorizer rejects D2C-pool tokens (→ 401
+  /// on the dashboard's first call; coord §C54). The `claim` +
+  /// public-lookup routes are already D2C/unauthenticated and are NOT
+  /// prefixed. See api-stack.ts (D2C section).
+  final String _readPrefix;
+
   ApiClient({
     required AuthServiceInterface auth,
     required String baseUrl,
+    String readPathPrefix = '/api/v1',
     http.Client? httpClient,
   })  : _auth = auth,
         // Strip trailing slash to make path concatenation predictable.
         _baseUrl = baseUrl.endsWith('/')
             ? baseUrl.substring(0, baseUrl.length - 1)
             : baseUrl,
+        _readPrefix = readPathPrefix,
         _http = httpClient ?? http.Client();
 
   void dispose() => _http.close();
@@ -60,12 +72,12 @@ class ApiClient {
     if (cursor != null && cursor.isNotEmpty) query['cursor'] = cursor;
     if (clientId != null && clientId.isNotEmpty) query['clientId'] = clientId;
     if (status != null && status.isNotEmpty) query['status'] = status;
-    final body = await _get('/api/v1/me/patients', query: query);
+    final body = await _get('$_readPrefix/me/patients', query: query);
     return MePatientsResponse.fromJson(body);
   }
 
   Future<PatientDetailResponse> getPatient(String patientId) async {
-    final body = await _get('/api/v1/patients/$patientId');
+    final body = await _get('$_readPrefix/patients/$patientId');
     return PatientDetailResponse.fromJson(body);
   }
 
@@ -77,7 +89,7 @@ class ApiClient {
     final query = <String, String>{'range': range.wireValue};
     if (cursor != null && cursor.isNotEmpty) query['cursor'] = cursor;
     final body =
-        await _get('/api/v1/patients/$patientId/activity', query: query);
+        await _get('$_readPrefix/patients/$patientId/activity', query: query);
     return ActivityResponse.fromJson(body);
   }
 
@@ -88,7 +100,7 @@ class ApiClient {
   }) async {
     final query = <String, String>{'status': status.wireValue};
     if (cursor != null && cursor.isNotEmpty) query['cursor'] = cursor;
-    final body = await _get('/api/v1/patients/$patientId/alerts', query: query);
+    final body = await _get('$_readPrefix/patients/$patientId/alerts', query: query);
     return AlertsResponse.fromJson(body);
   }
 

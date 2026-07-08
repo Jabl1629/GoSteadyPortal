@@ -134,7 +134,21 @@ api.addDependency(security); // Phase 2A-DL: device-api + discharge-cascade need
 const hosting = new HostingStack(app, `${prefix}-Hosting`, {
   env,
   config,
+  siteKey: 'portal',
+  domain: config.portalDomain,
   description: `GoSteady Hosting — ${config.envName}`,
+});
+
+// DT-4 (coord §C54) — the live D2C consumer app (main_d2c.dart) gets its
+// own S3+CloudFront+WAF site at app.gosteady.co, separate from the facility
+// portal. Deploy target for tools/deploy-d2c-app.sh. ACM cert validation for
+// the app domain is a manual Squarespace-DNS step (operator), like the portal.
+const d2cHosting = new HostingStack(app, `${prefix}-D2CHosting`, {
+  env,
+  config,
+  siteKey: 'd2c-app',
+  domain: config.d2cAppDomain,
+  description: `GoSteady D2C App Hosting — ${config.envName}`,
 });
 
 const integration = new IntegrationStack(app, `${prefix}-Integration`, {

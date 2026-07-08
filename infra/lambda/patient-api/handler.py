@@ -622,6 +622,13 @@ def _route(api_event: dict[str, Any]) -> tuple[str, dict[str, str]]:
     http = rc.get("http", {}) or {}
     method = (http.get("method") or "").upper()
     route_key = api_event.get("routeKey", "")
+    # D2C consumer routes are the SAME handlers behind a second (D2C-pool)
+    # JWT authorizer, registered under an /api/v1/d2c/* prefix (api-stack.ts
+    # D2C section, coord §C54). Strip the prefix so one dispatch table serves
+    # both pools; the d2c-pre-token Lambda injects identical custom:clientId
+    # claims, so authz is pool-agnostic. Facility routeKeys lack the substring
+    # (no-op for them).
+    route_key = route_key.replace("/api/v1/d2c/", "/api/v1/")
     path_params = api_event.get("pathParameters") or {}
 
     table = {

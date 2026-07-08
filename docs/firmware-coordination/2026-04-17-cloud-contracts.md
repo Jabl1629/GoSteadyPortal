@@ -9502,3 +9502,89 @@ email-only, not both. Product decision.
   physical exit-bar test (re-stage GS9999999981 for D2C → claim → activate →
   roll → dashboard); (6) deferred cosmetics: walkerId→claimId rename, dedicated
   D2C test device.
+
+# §C55 — [rollator+walker] DT-4 setup gaps fixed: dashboard 401 resolved + live D2C app given its own home (app.gosteady.co); both form factors staged claimable (2026-07-08)
+
+Picked up the three §C54 gaps. **The 401 is fixed + deployed + verified; the live
+D2C app now has a real hosting target (`app.gosteady.co`, its own S3+CloudFront);
+both form factors are staged claimable.** The only session-blocking dependency
+left is operator DNS (ACM cert validation) + the SMS-gated browser E2E.
+
+## C55.1 — Dashboard 401 fixed (D2C-pool authorizer on the dashboard reads)
+
+**Root cause (confirmed):** the D2C dashboard's reads (`/me/patients`,
+`/patients/{id}[/activity|/alerts]`) were bound to the **facility**
+`userPoolAuthorizer` (pool `us-east-1_ZHbhl19tQ`); the D2C app signs in against
+the **D2C** pool (`us-east-1_bhvtxuHwD`), so its JWT was rejected at the edge →
+401 before any handler ran. Only `/claim` was on the D2C authorizer. (An HTTP API
+JWT authorizer validates exactly one issuer, so the facility one can't accept
+both pools.)
+
+**Fix (matches the existing `/claim` design):** re-registered the four reads
+under an **`/api/v1/d2c/*`** prefix bound to `d2cAuthorizer`, pointing at the
+SAME `patientApiIntegration`. `patient-api` strips the `/d2c` prefix before its
+routeKey dispatch (`handler.py::_route`); the D2C `ApiClient` gained a
+`readPathPrefix` (`/api/v1/d2c`, set in `main_d2c.dart`); facility routes +
+`ApiClient` default (`/api/v1`) untouched. Files: `api-stack.ts` (4 routes),
+`patient-api/handler.py` (1-line normalize), `api_client.dart`, `main_d2c.dart`.
+
+**Deployed** `GoSteady-Dev-Api` (50.6s). **Verified (read-only):** all four
+`/api/v1/d2c/*` → `D2CUserPoolAuthorizer` (pool `bhvtxuHwD`, client
+`1mfi0ori…`); 401 unauth / 404 unrouted; the same authorizer already guards the
+working `/claim`. Live token→200 is the operator's SMS E2E.
+
+## C55.2 — Live D2C app hosting: app.gosteady.co (own bucket/dist — kills the §C41.3 footgun)
+
+Per the DT-4 hosting decision (app.gosteady.co, not the shared portal bucket):
+- `HostingStack` **parameterized** by `siteKey` + `domain` (defaults preserve the
+  facility portal byte-for-byte — `cdk diff GoSteady-Dev-Hosting` = **no
+  differences**). New **`GoSteady-Dev-D2CHosting`** stack (`dev.app.gosteady.co`
+  dev / `app.gosteady.co` prod) — own S3+CloudFront+WAF+ACM, SPA rewrite. This
+  IS the "separate facility/D2C buckets" durable fix §C41.3 #3 flagged; the
+  legacy `dev.portal.gosteady.co/d2c/` build + `deploy-portal.sh`'s
+  `--exclude "d2c/*"` guard can retire once app.gosteady.co is live.
+- New **`tools/deploy-d2c-app.sh`** (builds `main_d2c.dart` live, own bucket, no
+  exclude footgun). App **builds clean** (17.9s).
+- **CORS**: added `https://app.gosteady.co` (prod) + `https://dev.app.gosteady.co`
+  (dev) to the API — verified preflight `204` + matching allow-origin.
+
+**⚠ Operator-gated tail (DNS):** `GoSteady-Dev-D2CHosting` is deploying but
+**hangs on ACM cert validation** (`dev.app.gosteady.co`, PENDING_VALIDATION),
+same as the portal was stood up. Operator steps: (1) add the ACM validation CNAME
+at Squarespace — `_bd0990ce3ded979cb168e5fcb7839d9b.dev.app.gosteady.co` CNAME →
+`_32e152afc717200d3a04705872efba43.jkddzztszm.acm-validations.aws`; (2) after the
+deploy finishes, add `dev.app` CNAME → the stack's `DistributionDomainName`
+output; (3) run `./tools/deploy-d2c-app.sh`. (CFN runs server-side, so a killed
+local `cdk` process doesn't abort it — re-run `cdk deploy GoSteady-Dev-D2CHosting`
+to resume/finalize.)
+
+## C55.3 — Both form factors staged claimable + rendering locked
+
+- **Staged (Devices rows; no IoT Thing needed — GS0001000042 claimed fine without
+  one):** walker_cap (Glide) **`GS0001000041`** / `wlk_dt4smoke_walker`; fresh
+  rollator **`GS0001000043`** / `wlk_dt4smoke_rollator2` — both
+  `ready_to_provision`, verified via the live public lookup (`unclaimed` + right
+  `deviceType`). Note **`GS0001000042` was CLAIMED last session** (now
+  `provisioned`, owner `dtc_3448c408…`, masked `j•••@gosteady.co`) — i.e. the D2C
+  claim path already works end-to-end through provision.
+- **WS1 rendering locked** with `test/d2c_metric_registry_test.dart` (walker
+  steps-led; rollator active-min-led, **never steps**; unknown→walker_cap D9).
+  **13/13 tests pass** (incl. the existing gait suite — no regression).
+
+## C55.4 — State + remaining
+
+- **Code done (working tree, portal repo):** 7 modified + 2 new
+  (`test/d2c_metric_registry_test.dart`, `tools/deploy-d2c-app.sh`); tsc +
+  `dart analyze` (edited files) + `py_compile` clean; `cdk diff` scoped.
+  **Not yet committed.** `GoSteady-Dev-Api` deployed; `GoSteady-Dev-D2CHosting`
+  mid-deploy (cert-gated).
+- **Remaining:** (1) operator DNS → finish D2CHosting → `deploy-d2c-app.sh`;
+  (2) **implement phone-only SMS-OTP** sign-in — C54.4 **decided 2026-07-08:**
+  phone number is the sole factor, drop the email-verify gate (email
+  optional/unverified). Needs a D2C pool reconfig (phone username/alias);
+  Cognito username attrs are immutable post-creation, so scope alias-vs-new-pool
+  first. A follow-up;
+  (3) SMS browser E2E on the hosted URL for BOTH form factors (claim
+  `GS0001000041` walker + `GS0001000043` rollator → activate → dashboard);
+  (4) WS2 walker alert-rate check (pre-PROD); (5) retire legacy
+  `dev.portal/d2c/` + the `--exclude "d2c/*"` guard once app.gosteady.co is live.

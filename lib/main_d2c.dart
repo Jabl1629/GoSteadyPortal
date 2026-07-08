@@ -43,7 +43,15 @@ Future<void> main() async {
     }
     final auth = D2CAuthService.instance;
     await auth.init();
-    final api = ApiClient(auth: auth, baseUrl: apiBaseUrl);
+    // D2C reads (`/me/patients`, `/patients/{id}[/activity|/alerts]`) go to
+    // the `/api/v1/d2c/*` routes bound to the D2C-pool authorizer; the
+    // facility authorizer 401s D2C tokens (coord §C54). claim + public
+    // lookup keep their own (unprefixed) routes.
+    final api = ApiClient(
+      auth: auth,
+      baseUrl: apiBaseUrl,
+      readPathPrefix: '/api/v1/d2c',
+    );
     final repo = LiveD2CRepository(api: api, auth: auth);
     runApp(D2CApp(auth: auth, repository: repo, d2cAuth: auth));
   } else {

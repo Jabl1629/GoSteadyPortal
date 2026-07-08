@@ -9,6 +9,17 @@ import { GoSteadyEnvConfig } from '../config.js';
 
 export interface HostingStackProps extends cdk.StackProps {
   readonly config: GoSteadyEnvConfig;
+  /**
+   * Logical site id used in physical resource names + CFN exports
+   * (`gosteady-<prefix>-<siteKey>-*`). Defaults to 'portal' (facility
+   * portal). The DT-4 live D2C consumer app uses 'd2c-app'.
+   */
+  readonly siteKey?: string;
+  /**
+   * Custom domain for this site. Defaults to `config.portalDomain` (facility
+   * portal) for back-compat; the D2C app passes `config.d2cAppDomain`.
+   */
+  readonly domain?: string;
 }
 
 /**
@@ -52,21 +63,22 @@ export class HostingStack extends cdk.Stack {
     super(scope, id, props);
 
     const { config } = props;
+    const siteKey = props.siteKey ?? 'portal';
+    const domain = props.domain ?? config.portalDomain;
 
-    // No portalDomain means no hosting — emit a scaffold marker and exit.
-    if (!config.portalDomain) {
+    // No domain means no hosting — emit a scaffold marker and exit.
+    if (!domain) {
       new cdk.CfnOutput(this, 'Status', {
-        value: 'SCAFFOLD — set config.portalDomain to enable',
+        value: 'SCAFFOLD — set the site domain in config to enable',
       });
       return;
     }
 
-    const domain = config.portalDomain;
     const prefix = config.prefix;
 
     // ── S3 bucket (private, OAC-only) ─────────────────────────────
     this.siteBucket = new s3.Bucket(this, 'SiteBucket', {
-      bucketName: `gosteady-${prefix}-portal-hosting`,
+      bucketName: `gosteady-${prefix}-${siteKey}-hosting`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       versioned: true,
@@ -98,13 +110,13 @@ export class HostingStack extends cdk.Stack {
     // Baseline: AWSManagedRulesCommonRuleSet + per-IP rate limit.
     // IP-reputation list deferred to Phase 3A per D14.
     const webAcl = new wafv2.CfnWebACL(this, 'WebAcl', {
-      name: `gosteady-${prefix}-portal-hosting-waf`,
+      name: `gosteady-${prefix}-${siteKey}-hosting-waf`,
       scope: 'CLOUDFRONT',
       defaultAction: { allow: {} },
       visibilityConfig: {
         sampledRequestsEnabled: true,
         cloudWatchMetricsEnabled: true,
-        metricName: `gosteady-${prefix}-portal-hosting-waf`,
+        metricName: `gosteady-${prefix}-${siteKey}-hosting-waf`,
       },
       rules: [
         {
@@ -186,7 +198,7 @@ export class HostingStack extends cdk.Stack {
           viewerProtocolPolicy:
             cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
           cachePolicy: new cloudfront.CachePolicy(this, 'IndexHtmlCache', {
-            cachePolicyName: `gosteady-${prefix}-portal-index-html`,
+            cachePolicyName: `gosteady-${prefix}-${siteKey}-index-html`,
             defaultTtl: cdk.Duration.minutes(5),
             maxTtl: cdk.Duration.minutes(5),
             minTtl: cdk.Duration.seconds(0),
@@ -202,27 +214,27 @@ export class HostingStack extends cdk.Stack {
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       webAclId: webAcl.attrArn,
       enableLogging: false, // 3A flips for prod
-      comment: `GoSteady ${config.envName} portal hosting`,
+      comment: `GoSteady ${config.envName} ${siteKey} hosting`,
     });
 
     // ── Outputs (consumed by tools/deploy-portal.sh) ──────────────
     new cdk.CfnOutput(this, 'BucketName', {
       value: this.siteBucket.bucketName,
       description: 'S3 bucket — sync portal build output here',
-      exportName: `gosteady-${prefix}-portal-bucket`,
+      exportName: `gosteady-${prefix}-${siteKey}-bucket`,
     });
 
     new cdk.CfnOutput(this, 'DistributionId', {
       value: this.distribution.distributionId,
       description: 'CloudFront distribution ID — create-invalidation target',
-      exportName: `gosteady-${prefix}-portal-distribution-id`,
+      exportName: `gosteady-${prefix}-${siteKey}-distribution-id`,
     });
 
     new cdk.CfnOutput(this, 'DistributionDomainName', {
       value: this.distribution.distributionDomainName,
       description:
         'CloudFront *.cloudfront.net domain — set as the CNAME data at Squarespace DNS',
-      exportName: `gosteady-${prefix}-portal-distribution-domain`,
+      exportName: `gosteady-${prefix}-${siteKey}-distribution-domain`,
     });
 
     new cdk.CfnOutput(this, 'PortalUrl', {
