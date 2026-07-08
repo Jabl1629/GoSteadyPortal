@@ -117,16 +117,52 @@ export class D2CAuthStack extends cdk.Stack {
     });
     authStack.roleAssignmentsTable.grantReadData(preTokenLambda);
 
+    // ── Pre-SignUp trigger (phone-first auto-confirm) ─────────────────
+    // Auto-confirms a self-signup + marks the phone verified so SMS-OTP is the
+    // SOLE factor (no pool-sent code). See docs/specs/d2c-phone-only-signin.md.
+    const preSignUpLambda = new lambda.Function(this, 'D2CPreSignUp', {
+      functionName: `gosteady-${p}-d2c-pre-signup`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.ARM_64,
+      handler: 'handler.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', '..', 'lambda', 'd2c-pre-signup'),
+      ),
+      memorySize: 128,
+      timeout: cdk.Duration.seconds(5),
+      tracing: lambda.Tracing.ACTIVE,
+      environment: { ENVIRONMENT: p },
+      logRetention,
+      description: 'D2C Pre-SignUp — auto-confirm + auto-verify phone (SMS-OTP is the sole factor)',
+    });
+
     // ── D2C User Pool ─────────────────────────────────────────────────
-    this.userPool = new cognito.UserPool(this, 'D2CUserPool', {
+    // NOTE: the construct id is 'D2CUserPoolPhoneFirst' (not 'D2CUserPool') on
+    // purpose — CloudFormation refuses to update `UsernameAttributes` in place
+    // ("Updates are not allowed for property - UsernameAttributes"), so the
+    // phone-first pool is a REPLACEMENT (new logical id → new pool id + client
+    // id). Because GoSteady-Dev-Api imports the old pool cross-stack, the swap
+    // is a 3-step migration (drop the api import → replace pool → rebind); see
+    // coord §C56 / docs/specs/d2c-phone-only-signin.md.
+    this.userPool = new cognito.UserPool(this, 'D2CUserPoolPhoneFirst', {
       userPoolName: `gosteady-${p}-d2c`,
       selfSignUpEnabled: true,
-      signInAliases: { email: true },
-      autoVerify: { email: true },
+      // Phone-first: phone_number is the primary sign-in identifier + the
+      // SMS-OTP channel; email is an OPTIONAL secondary identifier (a
+      // caregiver/purchaser may prefer email — d2c-phone-only-signin.md §3-4).
+      // Both are UsernameAttributes — IMMUTABLE post-creation, which is why
+      // this change forces a pool replacement (new pool id + client id).
+      signInAliases: { phone: true, email: true },
+      // No pool-sent verification codes: the phone is marked verified by the
+      // pre-signup trigger and SMS-OTP proves it at sign-in. autoVerify would
+      // try to SMS via SNS (not configured — Twilio lives in custom-auth).
+      autoVerify: { email: false, phone: false },
       standardAttributes: {
         fullname: { required: true, mutable: true },
-        email: { required: true, mutable: false },
-        // phone_number is the OTP channel — required at signup.
+        // email OPTIONAL now (was required+immutable) — a phone-only user need
+        // not provide one; if present it's an alternate sign-in alias.
+        email: { required: false, mutable: true },
+        // phone_number is the OTP channel + primary identifier — required.
         phoneNumber: { required: true, mutable: true },
       },
       customAttributes: {
@@ -149,19 +185,14 @@ export class D2CAuthStack extends cdk.Stack {
       },
       mfa: cognito.Mfa.OFF, // SMS-OTP custom auth IS the factor; no separate MFA
       lambdaTriggers: {
+        preSignUp: preSignUpLambda, // auto-confirm + auto-verify phone (no code)
         defineAuthChallenge: customAuthLambda,
         createAuthChallenge: customAuthLambda,
         verifyAuthChallengeResponse: customAuthLambda,
       },
-      userVerification: {
-        emailSubject: 'GoSteady — Verify your email',
-        emailBody:
-          'Welcome to GoSteady!\n\n' +
-          'Your verification code is: {####}\n\n' +
-          '— The GoSteady Team',
-        emailStyle: cognito.VerificationEmailStyle.CODE,
-      },
-      accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+      // Passwordless SMS-OTP: no pool-sent verification message, and no
+      // password-reset recovery path (D2CAuthService.forgotPassword throws).
+      accountRecovery: cognito.AccountRecovery.NONE,
       removalPolicy: removal,
     });
 

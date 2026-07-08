@@ -8,41 +8,47 @@ import '../../auth/user_claims.dart';
 import '../../config/d2c_cognito_config.dart';
 import '../../models/user.dart';
 
-/// Cognito-backed auth for the **D2C consumer pool** — a passwordless
-/// SMS-OTP custom-auth flow (d2c-phase1 §3.1). Distinct from the
-/// facility [AuthService] (email + password + TOTP-MFA): D2C never
-/// collects a password from the user.
+/// Cognito-backed auth for the **D2C consumer pool** — a passwordless,
+/// **phone-first** SMS-OTP custom-auth flow (d2c-phone-only-signin.md).
+/// Distinct from the facility [AuthService] (email + password + TOTP-MFA):
+/// D2C never collects a password from the user, and there is NO email/second
+/// verification step — SMS-OTP is the sole factor.
 ///
-/// Implements [AuthServiceInterface] so the shared [ApiClient] (which
-/// only needs [getIdToken]) is reused unchanged. The password / MFA
-/// methods on the interface are not part of the D2C flow and throw
-/// [UnsupportedError]; D2C uses the dedicated methods below instead:
+/// The pool signs users in by **phone number** (email is an optional secondary
+/// alias / contact, never verified). A fresh self-signup is auto-confirmed by
+/// the pool's pre-signup trigger, so the flow is simply:
 ///
-///   1. [signUp]        — create the account (random throwaway password).
-///   2. [confirmSignUp] — confirm via the EMAILED code (`autoVerify: email`
-///                        on the pool means a fresh self-signup is
-///                        UNCONFIRMED until this runs — d2c-auth-stack.ts).
-///   3. [startSignIn]   — begin CUSTOM_AUTH; Cognito SMS-OTPs the phone.
-///   4. [submitOtp]     — answer the challenge; on success, tokens issue.
+///   1. [signUp]      — create the account (name + phone [+ optional email]).
+///   2. [startSignIn] — begin CUSTOM_AUTH; Cognito SMS-OTPs the phone.
+///   3. [submitOtp]   — answer the challenge; on success, tokens issue.
 ///
-/// > NOTE: end-to-end OTP *delivery* is gated on the operator populating
-/// > the `gosteady/dev/twilio` secret (coord §C37.3). This client is built
-/// > to the deployed contract; the live exit test runs once SMS is enabled.
+/// Implements [AuthServiceInterface] so the shared [ApiClient] (which only
+/// needs [getIdToken]) is reused unchanged. Password / MFA methods throw
+/// [UnsupportedError]; D2C uses the dedicated methods below.
+///
+/// > NOTE: OTP *delivery* is gated on the operator populating the
+/// > `gosteady/dev/twilio` secret (coord §C37.3). Sessions are in-memory
+/// > (default Cognito storage) — a page reload requires re-sign-in.
 class D2CAuthService extends AuthServiceInterface {
   D2CAuthService._();
   static final D2CAuthService instance = D2CAuthService._();
 
-  static const _emailPrefsKey = 'gs_d2c_auth_email';
+  /// Convenience key: the phone (sign-in username) of the last session, so a
+  /// same-page session restore can reconstruct the CognitoUser.
+  static const _phonePrefsKey = 'gs_d2c_auth_phone';
 
   late final CognitoUserPool _pool;
   CognitoUser? _cognitoUser;
   CognitoUserSession? _session;
   GoSteadyUser? _currentUser;
 
+  /// The sign-in username (E.164 phone) for the current/last session.
+  String? _username;
+
   /// The user mid-sign-in: held between [startSignIn] (challenge issued)
   /// and [submitOtp] (challenge answered).
   CognitoUser? _pendingSignInUser;
-  String? _pendingSignInEmail;
+  String? _pendingSignInPhone;
 
   @override
   GoSteadyUser? get currentUser => _currentUser;
@@ -61,95 +67,68 @@ class D2CAuthService extends AuthServiceInterface {
     await _tryRestoreSession();
   }
 
-  // ── D2C sign-up + confirm (email code) ────────────────────────
+  // ── D2C sign-up (phone-first; auto-confirmed, no code) ────────
 
-  /// Register a new walker user. `phone` is the SMS-OTP channel and is
-  /// normalised to E.164 (`+1` prepended for a bare 10-digit US number).
-  /// Returns whether the account is already confirmed — for this pool it
-  /// is NOT (email confirmation required), so callers route to the
-  /// confirm-code step.
-  Future<D2CSignUpResult> signUp({
+  /// Register a new walker user, **phone-first**. `phone` is the sign-in
+  /// identifier + the SMS-OTP channel, normalised to E.164 (`+1` prepended for
+  /// a bare 10-digit US number). `email` is OPTIONAL (a secondary sign-in alias
+  /// / contact) and is NOT verified. The pool's pre-signup trigger auto-confirms
+  /// the account, so the caller proceeds straight to [startSignIn] — there is
+  /// no email/second confirmation step.
+  Future<void> signUp({
     required String name,
-    required String email,
     required String phone,
+    String? email,
   }) async {
-    final normalizedEmail = email.trim().toLowerCase();
+    final normalizedPhone = _normalizePhone(phone);
+    final attrs = <AttributeArg>[
+      AttributeArg(name: 'name', value: name.trim()),
+      AttributeArg(name: 'phone_number', value: normalizedPhone),
+    ];
+    final e = (email ?? '').trim();
+    if (e.isNotEmpty) {
+      attrs.add(AttributeArg(name: 'email', value: e.toLowerCase()));
+    }
     try {
-      final data = await _pool.signUp(
-        normalizedEmail,
+      await _pool.signUp(
+        normalizedPhone,
         _randomThrowawayPassword(),
-        userAttributes: [
-          AttributeArg(name: 'name', value: name.trim()),
-          AttributeArg(name: 'email', value: normalizedEmail),
-          AttributeArg(name: 'phone_number', value: _normalizePhone(phone)),
-        ],
+        userAttributes: attrs,
       );
-      return D2CSignUpResult(confirmed: data.userConfirmed ?? false);
-    } on CognitoClientException catch (e) {
-      throw AuthException(_friendlyMessage(e.code, e.message));
-    } catch (e) {
-      throw AuthException(e.toString());
-    }
-  }
-
-  /// Confirm a fresh sign-up with the code Cognito emailed (ConfirmSignUp).
-  Future<void> confirmSignUp({
-    required String email,
-    required String code,
-  }) async {
-    final user = CognitoUser(email.trim().toLowerCase(), _pool);
-    try {
-      final ok = await user.confirmRegistration(code.trim());
-      if (ok != true) {
-        throw const AuthException('Confirmation failed. Try again.');
-      }
-    } on CognitoClientException catch (e) {
-      throw AuthException(_friendlyMessage(e.code, e.message));
-    } on AuthException {
-      rethrow;
-    } catch (e) {
-      throw AuthException(e.toString());
-    }
-  }
-
-  /// Re-send the sign-up confirmation (email) code.
-  Future<void> resendSignUpCode(String email) async {
-    final user = CognitoUser(email.trim().toLowerCase(), _pool);
-    try {
-      await user.resendConfirmationCode();
-    } on CognitoClientException catch (e) {
-      throw AuthException(_friendlyMessage(e.code, e.message));
-    } catch (e) {
-      throw AuthException(e.toString());
+    } on CognitoClientException catch (ex) {
+      throw AuthException(_friendlyMessage(ex.code, ex.message));
+    } catch (ex) {
+      throw AuthException(ex.toString());
     }
   }
 
   // ── D2C sign-in: CUSTOM_AUTH SMS-OTP ──────────────────────────
 
-  /// Begin sign-in for [email]. Triggers Cognito CUSTOM_AUTH, which fires
-  /// the custom-auth Lambda → SMS-OTP to the phone on file. Returns the
-  /// challenge (carrying the `phoneHint` the UI shows, e.g. "••34").
-  /// Follow with [submitOtp].
-  Future<D2COtpChallenge> startSignIn(String email) async {
-    final normalizedEmail = email.trim().toLowerCase();
-    final user = CognitoUser(normalizedEmail, _pool);
+  /// Begin sign-in for [phone]. Triggers Cognito CUSTOM_AUTH, which fires the
+  /// custom-auth Lambda → SMS-OTP to that phone. Returns the challenge
+  /// (carrying the `phoneHint` the UI shows, e.g. "•••34"). Follow with
+  /// [submitOtp].
+  Future<D2COtpChallenge> startSignIn(String phone) async {
+    final normalizedPhone = _normalizePhone(phone);
+    final user = CognitoUser(normalizedPhone, _pool);
     try {
       // initiateAuth sends AuthFlow=CUSTOM_AUTH and throws the custom
       // challenge exception once the OTP is dispatched (expected path).
       final session = await user.initiateAuth(
-        AuthenticationDetails(username: normalizedEmail, authParameters: []),
+        AuthenticationDetails(username: normalizedPhone, authParameters: []),
       );
-      // Unreachable for this pool (a session without a challenge would
-      // mean Cognito issued tokens with no factor) — treat as success.
+      // Unreachable for this pool (tokens with no factor) — treat as success.
       if (session != null && session.isValid()) {
+        _username = normalizedPhone;
         _adoptSession(user, session);
+        await _persistSession();
         return const D2COtpChallenge(phoneHint: '');
       }
       throw const AuthException('Could not start sign-in. Try again.');
     } on CognitoUserCustomChallengeException catch (e) {
       // Expected: OTP sent, awaiting the code.
       _pendingSignInUser = user;
-      _pendingSignInEmail = normalizedEmail;
+      _pendingSignInPhone = normalizedPhone;
       return D2COtpChallenge(phoneHint: _phoneHintFrom(e.challengeParameters));
     } on CognitoClientException catch (e) {
       throw AuthException(_friendlyMessage(e.code, e.message));
@@ -160,9 +139,9 @@ class D2CAuthService extends AuthServiceInterface {
     }
   }
 
-  /// Answer the SMS-OTP challenge. On success the session is established
-  /// and the [GoSteadyUser] (with `dtc_*` claims) is returned. A wrong
-  /// code re-issues the challenge (up to 3 attempts) — surfaced as an
+  /// Answer the SMS-OTP challenge. On success the session is established and
+  /// the [GoSteadyUser] (with `dtc_*` claims) is returned. A wrong code
+  /// re-issues the challenge (up to 3 attempts) — surfaced as an
   /// [AuthException] so the caller can let the user retry.
   Future<GoSteadyUser> submitOtp(String code) async {
     final user = _pendingSignInUser;
@@ -174,9 +153,10 @@ class D2CAuthService extends AuthServiceInterface {
       if (session == null || !session.isValid()) {
         throw const AuthException('Verification failed. Try again.');
       }
+      _username = _pendingSignInPhone;
       _adoptSession(user, session);
       _pendingSignInUser = null;
-      _pendingSignInEmail = null;
+      _pendingSignInPhone = null;
       await _persistSession();
       return _currentUser!;
     } on CognitoUserCustomChallengeException {
@@ -198,13 +178,13 @@ class D2CAuthService extends AuthServiceInterface {
     }
   }
 
-  /// Re-send the SMS-OTP (restarts the challenge for the in-progress email).
+  /// Re-send the SMS-OTP (restarts the challenge for the in-progress phone).
   Future<D2COtpChallenge> resendOtp() async {
-    final email = _pendingSignInEmail;
-    if (email == null) {
+    final phone = _pendingSignInPhone;
+    if (phone == null) {
       throw const AuthException('No sign-in in progress. Start again.');
     }
-    return startSignIn(email);
+    return startSignIn(phone);
   }
 
   // ── Token access (60s refresh buffer, mirrors facility L8) ─────
@@ -236,6 +216,29 @@ class D2CAuthService extends AuthServiceInterface {
     return _session!.getIdToken().getJwtToken();
   }
 
+  /// Force a fresh token mint (using the refresh token) so newly-persisted
+  /// custom claims are reflected — the D2C flow calls this right after
+  /// `POST /claim` so `custom:clientId` picks up the just-created household
+  /// (the pre-claim bootstrap token carried `dtc_{sub}`, not the persisted
+  /// `dtc_{householdId}`) before the dashboard reads.
+  @override
+  Future<void> refreshClaims() async {
+    final u = _cognitoUser;
+    final rt = _session?.getRefreshToken();
+    if (u == null || rt == null) return;
+    try {
+      final s = await u.refreshSession(rt);
+      if (s != null && s.isValid()) {
+        _session = s;
+        _currentUser = _extractUser(s);
+        await _persistSession();
+        notifyListeners();
+      }
+    } catch (_) {
+      // Best-effort; getIdToken() will refresh on next use if needed.
+    }
+  }
+
   // ── Sign out ──────────────────────────────────────────────────
 
   @override
@@ -250,10 +253,11 @@ class D2CAuthService extends AuthServiceInterface {
     _session = null;
     _currentUser = null;
     _cognitoUser = null;
+    _username = null;
     _pendingSignInUser = null;
-    _pendingSignInEmail = null;
+    _pendingSignInPhone = null;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_emailPrefsKey);
+    await prefs.remove(_phonePrefsKey);
     notifyListeners();
   }
 
@@ -302,27 +306,29 @@ class D2CAuthService extends AuthServiceInterface {
   Future<void> _tryRestoreSession() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final email = prefs.getString(_emailPrefsKey);
-      if (email == null) return;
+      final phone = prefs.getString(_phonePrefsKey);
+      if (phone == null || phone.isEmpty) return;
 
-      _cognitoUser = CognitoUser(email, _pool);
+      _username = phone;
+      _cognitoUser = CognitoUser(phone, _pool);
       _session = await _cognitoUser!.getSession();
       if (_session?.isValid() == true) {
         _currentUser = _extractUser(_session!);
         notifyListeners();
       } else {
-        await prefs.remove(_emailPrefsKey);
+        await prefs.remove(_phonePrefsKey);
       }
     } catch (_) {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(_emailPrefsKey);
+      await prefs.remove(_phonePrefsKey);
     }
   }
 
   Future<void> _persistSession() async {
-    if (_currentUser == null) return;
+    final u = _username;
+    if (u == null || u.isEmpty) return;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_emailPrefsKey, _currentUser!.email);
+    await prefs.setString(_phonePrefsKey, u);
   }
 
   /// Pull the masked phone hint out of the challenge's public parameters
@@ -336,8 +342,8 @@ class D2CAuthService extends AuthServiceInterface {
   }
 
   /// E.164 normaliser: keeps a leading `+`, strips other non-digits, and
-  /// prepends `+1` for a bare 10-digit US number. The pool requires a
-  /// valid `phone_number` at sign-up.
+  /// prepends `+1` for a bare 10-digit US number. The pool requires a valid
+  /// `phone_number` at sign-up + uses it as the sign-in identifier.
   String _normalizePhone(String raw) {
     final trimmed = raw.trim();
     if (trimmed.startsWith('+')) {
@@ -349,8 +355,7 @@ class D2CAuthService extends AuthServiceInterface {
   }
 
   /// A throwaway password satisfying the pool policy (≥14, upper/lower/
-  /// digit/symbol). Never shown or reused — the user always SMS-OTPs in
-  /// (d2c-auth-stack.ts §passwordPolicy comment).
+  /// digit/symbol). Never shown or reused — the user always SMS-OTPs in.
   String _randomThrowawayPassword() {
     final rng = Random.secure();
     const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -371,13 +376,13 @@ class D2CAuthService extends AuthServiceInterface {
   String _friendlyMessage(String? code, String? message) {
     switch (code) {
       case 'UsernameExistsException':
-        return 'An account with that email already exists. Sign in instead.';
+        return 'An account with that phone already exists. Sign in instead.';
       case 'CodeMismatchException':
         return 'Incorrect code. Try again.';
       case 'ExpiredCodeException':
         return 'Code expired. Request a new one.';
       case 'UserNotFoundException':
-        return 'No account found with that email.';
+        return 'No account found with that phone number.';
       case 'InvalidParameterException':
         return 'Please check your details and try again.';
       case 'TooManyRequestsException':
@@ -389,17 +394,9 @@ class D2CAuthService extends AuthServiceInterface {
   }
 }
 
-/// Result of [D2CAuthService.signUp] — whether the account is already
-/// confirmed (for the D2C pool it never is; the caller routes to the
-/// email-code confirmation step).
-class D2CSignUpResult {
-  final bool confirmed;
-  const D2CSignUpResult({required this.confirmed});
-}
-
 /// The pending SMS-OTP challenge returned by [D2CAuthService.startSignIn].
 class D2COtpChallenge {
-  /// Masked tail of the destination phone (e.g. `"••34"`), or neutral
+  /// Masked tail of the destination phone (e.g. `"•••34"`), or neutral
   /// copy ("your phone") when the backend didn't surface a hint.
   final String phoneHint;
   const D2COtpChallenge({required this.phoneHint});

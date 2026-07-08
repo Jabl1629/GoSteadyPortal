@@ -309,21 +309,24 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
   }
 
   Future<void> _submit() async {
-    if (_name.text.trim().isEmpty || _email.text.trim().isEmpty || _phone.text.trim().isEmpty) {
-      _snack(context, 'Please fill in your name, email, and phone.');
+    if (_name.text.trim().isEmpty || _phone.text.trim().isEmpty) {
+      _snack(context, 'Please enter your name and mobile phone.');
       return;
     }
     setState(() => _busy = true);
     try {
       await widget.auth.signUp(
         name: _name.text,
-        email: _email.text,
         phone: _phone.text,
+        email: _email.text.trim().isEmpty ? null : _email.text,
       );
+      // The pool auto-confirms the account — straight to SMS-OTP, no email
+      // confirmation step (phone-first, d2c-phone-only-signin.md).
+      final challenge = await widget.auth.startSignIn(_phone.text);
       if (!mounted) return;
-      final q = StringBuffer('email=${Uri.encodeComponent(_email.text.trim())}');
+      final q = StringBuffer('phoneHint=${Uri.encodeComponent(challenge.phoneHint)}');
       if (widget.walkerId != null) q.write('&walkerId=${Uri.encodeComponent(widget.walkerId!)}');
-      context.go('/confirm?$q');
+      context.go('/otp?$q');
     } catch (e) {
       if (mounted) {
         setState(() => _busy = false);
@@ -346,8 +349,8 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
           ),
         ),
         _field(_name, label: 'Your name'),
-        _field(_email, label: 'Email', keyboard: TextInputType.emailAddress),
         _field(_phone, label: 'Mobile phone', keyboard: TextInputType.phone),
+        _field(_email, label: 'Email (optional)', keyboard: TextInputType.emailAddress),
         const SizedBox(height: 6),
         _PrimaryButton(label: 'Continue', busy: _busy, onPressed: _submit),
       ],
@@ -356,88 +359,7 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// /confirm — email confirmation code (first-time accounts)
-// ════════════════════════════════════════════════════════════════════
-
-class D2CConfirmEmailScreen extends StatefulWidget {
-  const D2CConfirmEmailScreen({
-    super.key,
-    required this.auth,
-    required this.email,
-    this.walkerId,
-  });
-
-  final D2CAuthService auth;
-  final String email;
-  final String? walkerId;
-
-  @override
-  State<D2CConfirmEmailScreen> createState() => _D2CConfirmEmailScreenState();
-}
-
-class _D2CConfirmEmailScreenState extends State<D2CConfirmEmailScreen> {
-  final _code = TextEditingController();
-  bool _busy = false;
-
-  @override
-  void dispose() {
-    _code.dispose();
-    super.dispose();
-  }
-
-  Future<void> _submit() async {
-    setState(() => _busy = true);
-    try {
-      await widget.auth.confirmSignUp(email: widget.email, code: _code.text);
-      // Account confirmed — kick off the SMS-OTP sign-in immediately.
-      final challenge = await widget.auth.startSignIn(widget.email);
-      if (!mounted) return;
-      final q = StringBuffer('phoneHint=${Uri.encodeComponent(challenge.phoneHint)}');
-      if (widget.walkerId != null) q.write('&walkerId=${Uri.encodeComponent(widget.walkerId!)}');
-      context.go('/otp?$q');
-    } catch (e) {
-      if (mounted) {
-        setState(() => _busy = false);
-        _snack(context, _errText(e));
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _OnboardScaffold(
-      title: 'Check your email',
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(bottom: 18),
-          child: Text(
-            'We emailed a confirmation code to ${widget.email}. Enter it below.',
-            style: const TextStyle(color: AppTheme.textSoft, height: 1.4),
-          ),
-        ),
-        _field(_code, label: 'Confirmation code', keyboard: TextInputType.number),
-        const SizedBox(height: 6),
-        _PrimaryButton(label: 'Confirm', busy: _busy, onPressed: _submit),
-        TextButton(
-          onPressed: _busy
-              ? null
-              : () async {
-                  try {
-                    await widget.auth.resendSignUpCode(widget.email);
-                    if (mounted) _snack(context, 'A new code is on its way.');
-                  } catch (e) {
-                    if (mounted) _snack(context, _errText(e));
-                  }
-                },
-          child: const Text('Resend code'),
-        ),
-      ],
-    );
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════
-// /sign-in — email → start SMS-OTP
+// /sign-in — phone → start SMS-OTP
 // ════════════════════════════════════════════════════════════════════
 
 class D2CSignInScreen extends StatefulWidget {
@@ -450,23 +372,23 @@ class D2CSignInScreen extends StatefulWidget {
 }
 
 class _D2CSignInScreenState extends State<D2CSignInScreen> {
-  final _email = TextEditingController();
+  final _phone = TextEditingController();
   bool _busy = false;
 
   @override
   void dispose() {
-    _email.dispose();
+    _phone.dispose();
     super.dispose();
   }
 
   Future<void> _submit() async {
-    if (_email.text.trim().isEmpty) {
-      _snack(context, 'Enter your email to continue.');
+    if (_phone.text.trim().isEmpty) {
+      _snack(context, 'Enter your mobile phone to continue.');
       return;
     }
     setState(() => _busy = true);
     try {
-      final challenge = await widget.auth.startSignIn(_email.text);
+      final challenge = await widget.auth.startSignIn(_phone.text);
       if (!mounted) return;
       context.go('/otp?phoneHint=${Uri.encodeComponent(challenge.phoneHint)}');
     } catch (e) {
@@ -485,11 +407,11 @@ class _D2CSignInScreenState extends State<D2CSignInScreen> {
         const Padding(
           padding: EdgeInsets.only(bottom: 18),
           child: Text(
-            "We'll text a one-time code to the phone on your account.",
+            "We'll text a one-time code to your phone.",
             style: TextStyle(color: AppTheme.textSoft, height: 1.4),
           ),
         ),
-        _field(_email, label: 'Email', keyboard: TextInputType.emailAddress),
+        _field(_phone, label: 'Mobile phone', keyboard: TextInputType.phone),
         const SizedBox(height: 6),
         _PrimaryButton(label: 'Send code', busy: _busy, onPressed: _submit),
         TextButton(

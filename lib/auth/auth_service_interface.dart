@@ -56,6 +56,13 @@ abstract class AuthServiceInterface extends ChangeNotifier {
   ///
   /// Per phase-2b-0-foundation.md L8.
   Future<String?> getIdToken();
+
+  /// Force a token refresh so freshly-persisted custom claims are reflected.
+  /// The D2C flow calls this after `POST /claim` so `custom:clientId` picks up
+  /// the new household (the pre-claim bootstrap token carried `dtc_{sub}`, not
+  /// the persisted `dtc_{householdId}`). No-op by default (facility auth mints
+  /// its claims at sign-in).
+  Future<void> refreshClaims() async {}
 }
 
 /// Thrown when [signIn] returns a Cognito MFA challenge — caller

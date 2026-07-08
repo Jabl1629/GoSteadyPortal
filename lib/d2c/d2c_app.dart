@@ -44,8 +44,8 @@ class D2CApp extends StatelessWidget {
 }
 
 /// Builds the live D2C router. Public (no-auth) routes: `/setup/:walkerId`
-/// + the onboarding flow (sign-up / confirm / sign-in / otp). Everything
-/// else requires a signed-in session.
+/// + the onboarding flow (sign-up / sign-in / otp — phone-first SMS-OTP, no
+/// email confirm step). Everything else requires a signed-in session.
 GoRouter buildD2CRouter({
   required AuthServiceInterface auth,
   required D2CRepository repository,
@@ -55,7 +55,6 @@ GoRouter buildD2CRouter({
       loc.startsWith('/setup') ||
       loc == '/sign-in' ||
       loc == '/sign-up' ||
-      loc == '/confirm' ||
       loc == '/otp';
 
   // Onboarding routes need the concrete D2C auth service; in demo it's
@@ -89,15 +88,6 @@ GoRouter buildD2CRouter({
         redirect: requireD2CAuth,
         builder: (context, state) => D2CSignUpScreen(
           auth: d2cAuth!,
-          walkerId: state.uri.queryParameters['walkerId'],
-        ),
-      ),
-      GoRoute(
-        path: '/confirm',
-        redirect: requireD2CAuth,
-        builder: (context, state) => D2CConfirmEmailScreen(
-          auth: d2cAuth!,
-          email: state.uri.queryParameters['email'] ?? '',
           walkerId: state.uri.queryParameters['walkerId'],
         ),
       ),

@@ -79,6 +79,14 @@ STATE_DECOMMISSIONED = "decommissioned"
 AUDIT_D2C_HOUSEHOLD_CREATED = "d2c.household_created"
 AUDIT_D2C_DEVICE_CLAIMED = "d2c.device_claimed"
 
+# Pure claim helpers (household anchor + identity split + contact masking) live
+# in claim_logic.py so they're unit-testable without boto3/powertools.
+from claim_logic import (  # noqa: E402
+    mask_contact,
+    resolve_household,
+    resolve_identity,
+)
+
 
 # ── Router ─────────────────────────────────────────────────────────────
 
@@ -111,9 +119,15 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
     serial = device["serialNumber"]
     status = device.get("status", STATE_READY)
 
-    client_id = f"dtc_{sub}"
+    # Resolve THIS user's household. Anchored on a stable householdId, NOT the
+    # Cognito sub, so ownership can transfer / gain members / include an
+    # account-less walker later without a data migration (bake-in #3). A
+    # returning user's household comes from their existing RoleAssignments row;
+    # a first-time claimer mints a fresh householdId.
+    existing_role = _role_for_user(sub)
+    client_id, household_id, _is_new = resolve_household(existing_role, sub)
 
-    # Idempotent: if this user already owns it, return current patient.
+    # Idempotent: if this user's household already owns it, return the patient.
     if device.get("owningClientId") == client_id:
         existing = _patient_for_client(client_id)
         if existing:
@@ -127,18 +141,26 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
         raise ApiError(code="DEVICE_UNAVAILABLE",
                        message="This device is already set up", status=409)
 
-    display_name = (body.get("displayName") or claims.get("raw", {}).get("name")
-                    or "Walker user").strip()
+    # Identity split (bake-in #2): owner (this Cognito user) and walker (the
+    # Patient) are the same for solo self-claim (default) but MAY differ when a
+    # caregiver sets up for someone else. Phase-1 UI does solo only; the data
+    # writes support the split so the caregiver flow is additive later.
+    owner_name, walker_name, owner_is_walker = resolve_identity(body, claims)
+    raw = claims.get("raw", {}) or {}
+    owner_hint = mask_contact(phone=raw.get("phone_number", ""),
+                              email=claims.get("email", ""))
 
-    facility_id = f"fac_{sub[:12]}"
-    census_id = f"cen_{sub[:12]}"
+    facility_id = f"fac_{household_id[:12]}"
+    census_id = f"cen_{household_id[:12]}"
     actor = {"userId": sub, "role": "household_owner", "clientId": client_id}
     req_id = _request_id(event)
 
     # 1. Household (Organizations): client + synthetic facility + census.
-    _ensure_household(client_id, facility_id, census_id, display_name)
+    _ensure_household(client_id, facility_id, census_id, owner_name)
 
-    # 2. Patient row (walker user).
+    # 2. Patient row (the walker). `cognitoUserId` is set ONLY when the owner
+    #    IS the walker (solo); a caregiver-owned walker is account-less (the
+    #    key is omitted — Patients.cognitoUserId is optional by design).
     patient_id = f"pat_d2c_{uuid.uuid4().hex[:16]}"
     now_iso = _now_iso()
     patient_item = {
@@ -146,38 +168,33 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
         "clientId": client_id,
         "facilityId": facility_id,
         "censusId": census_id,
-        "displayName": display_name,
+        "displayName": walker_name,
         "status": "active",
-        # by-client-status + by-census-status GSI sort key. Sparse GSI:
-        # without this composite attribute the patient row is INVISIBLE to
-        # both indexes (breaks /me/patients reads + idempotent re-claim).
-        # MUST be `<status>_<patientId>` (underscore) to match the readers'
-        # `begins_with("active_")` filter (queries.py) + patient-mgmt's create
-        # shape — the prior `active#` (hash) hid every D2C patient from
-        # /me/patients, which is exactly how the D2C dashboard finds its
-        # patient (§C41.3 / DT-4 WS4 fix, 2026-07-08).
+        # by-client-status + by-census-status GSI sort key. MUST be
+        # `<status>_<patientId>` (underscore) to match the readers'
+        # `begins_with("active_")` filter — the DT-4 WS4 fix (§C41.3).
         "status_patientId": f"active_{patient_id}",
         "isWalkerUser": True,
-        "cognitoUserId": sub,
         "createdAt": now_iso,
         "createdBy": sub,
     }
+    if owner_is_walker:
+        patient_item["cognitoUserId"] = sub
     _patients.put_item(Item=patient_item)
 
-    # 3. RoleAssignments row (Admin + walker user of own household).
-    # DynamoDB rejects EMPTY string/number sets ("An ... set may not be
-    # empty"), so scopedFacilityIds / scopedCensusIds are OMITTED rather
-    # than written as empty sets. Absent = unrestricted within the
-    # household scope — exactly right for a solo D2C Admin, and the
-    # facility handlers treat a missing scope attribute the same way.
-    # `email` is stored so the pre-claim-race masked-owner hint works.
+    # 3. RoleAssignments row (household Admin). `isWalkerUser` marks whether
+    #    THIS account user is the walker (true=solo, false=caregiver). scoped*
+    #    ids are OMITTED (DynamoDB rejects empty sets; absent = unrestricted in
+    #    the household). `email`/`phone` back the masked-owner hint (email may
+    #    be empty under the phone-first pool).
     _roles.put_item(Item={
         "userId": sub,
         "clientId": client_id,
         "role": "household_owner",
         "role_userId": f"household_owner#{sub}",
-        "isWalkerUser": True,
+        "isWalkerUser": owner_is_walker,
         "email": claims.get("email", ""),
+        "phone": raw.get("phone_number", ""),
         "validFrom": now_iso,
         "assignedBy": sub,
     })
@@ -194,6 +211,7 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
             census_id=census_id,
             actor=actor,
             device=device,
+            owner_hint=owner_hint,
         )
     except ApiError:
         try:
@@ -251,6 +269,7 @@ def _provision_inline(
     census_id: str,
     actor: dict[str, Any],
     device: dict[str, Any],
+    owner_hint: str = "",
 ) -> dict[str, Any]:
     """3-step provision with rollback. Returns {cmd_id, assigned_at}.
 
@@ -284,9 +303,13 @@ def _provision_inline(
         ":now": now_iso,
     }
     if is_first_provision:
-        set_parts.extend(["owningClientId = :oc", "owningFacilityId = :of"])
+        # ownerHint = already-masked owner contact, read by the unauth public
+        # lookup for the pre-claim-race hint (avoids a reverse RoleAssignments
+        # lookup — clientId is a householdId now, not the owner's sub).
+        set_parts.extend(["owningClientId = :oc", "owningFacilityId = :of", "ownerHint = :oh"])
         attr_values[":oc"] = client_id
         attr_values[":of"] = facility_id
+        attr_values[":oh"] = owner_hint
 
     try:
         _devices.update_item(
@@ -368,7 +391,7 @@ def _rollback_device_step1(serial: str, cmd_id: str, was_first_provision: bool) 
         set_parts = ["#status = :ready", "lastTransitionAt = :now"]
         remove_parts = ["outstandingActivationCmds.#cid", "currentAssignmentSk"]
         if was_first_provision:
-            remove_parts.extend(["owningClientId", "owningFacilityId"])
+            remove_parts.extend(["owningClientId", "owningFacilityId", "ownerHint"])
         _devices.update_item(
             Key={"serialNumber": serial},
             UpdateExpression="SET " + ", ".join(set_parts) + " REMOVE " + ", ".join(remove_parts),
@@ -417,6 +440,15 @@ def _org_exists(client_id: str, sk: str) -> bool:
     return "Item" in _orgs.get_item(Key={"clientId": client_id, "sk": sk})
 
 
+def _role_for_user(sub: str) -> dict[str, Any] | None:
+    """The caller's existing RoleAssignments row (PK=userId), or None. Used to
+    resolve a returning user's household clientId (see resolve_household)."""
+    try:
+        return _roles.get_item(Key={"userId": sub}).get("Item")
+    except ClientError:
+        return None
+
+
 def _patient_for_client(client_id: str) -> dict[str, Any] | None:
     res = _patients.query(
         IndexName="by-client-status",
@@ -429,24 +461,10 @@ def _patient_for_client(client_id: str) -> dict[str, Any] | None:
 
 
 def _masked_owner(device: dict[str, Any]) -> str:
-    client_id = device.get("owningClientId", "")
-    if not client_id.startswith("dtc_"):
-        return "another account"
-    sub = client_id[len("dtc_"):]
-    try:
-        row = _roles.get_item(Key={"userId": sub}).get("Item")
-    except ClientError:
-        row = None
-    email = (row or {}).get("email", "")
-    return _mask_email(email) if email else "another account"
-
-
-def _mask_email(email: str) -> str:
-    if "@" not in email:
-        return "another account"
-    local, domain = email.split("@", 1)
-    head = local[0] if local else "•"
-    return f"{head}•••@{domain}"
+    # The already-masked owner hint is written to the device at first provision
+    # (see mask_contact). No reverse RoleAssignments lookup — clientId is now a
+    # householdId, not the owner's Cognito sub.
+    return device.get("ownerHint") or "another account"
 
 
 def _patient_view(p: dict[str, Any]) -> dict[str, Any]:

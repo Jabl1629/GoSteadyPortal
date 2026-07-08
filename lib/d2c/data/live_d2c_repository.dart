@@ -44,8 +44,15 @@ class LiveD2CRepository implements D2CRepository {
       _api.publicWalkerLookup(walkerId);
 
   @override
-  Future<ClaimResponse> claim(String walkerId, {String? displayName}) =>
-      _api.claimDevice(walkerId, displayName: displayName);
+  Future<ClaimResponse> claim(String walkerId, {String? displayName}) async {
+    final resp = await _api.claimDevice(walkerId, displayName: displayName);
+    // The household clientId is now persisted server-side; force a token
+    // refresh so custom:clientId reflects the new household (dtc_{householdId})
+    // before the dashboard reads — the pre-claim bootstrap token carried
+    // dtc_{sub}, which would scope /me/patients to an empty client (DT-5).
+    await _auth.refreshClaims();
+    return resp;
+  }
 
   @override
   Future<String?> myWalkerPatientId() async {
