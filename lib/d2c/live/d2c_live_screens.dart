@@ -9,6 +9,7 @@ import '../auth/d2c_auth_service.dart';
 import '../d2c_routes.dart';
 import '../data/d2c_mock_data.dart';
 import '../data/d2c_repository.dart';
+import '../rendering/metric_registry.dart';
 import '../screens/d2c_dashboard_screen.dart';
 import '../widgets/d2c_bottom_nav.dart';
 
@@ -715,14 +716,19 @@ class _D2CHistoryHostState extends State<D2CHistoryHost> {
               text: 'No activity recorded yet.',
             );
           }
-          final total = days.fold<int>(0, (a, d) => a + d.steps);
+          // Per-type (DT-4): a rollator has no steps → show active-minutes.
+          final isActiveMin = deviceTypeView(days.first.deviceType).hero ==
+              ActivityMetric.activeMinutes;
+          int val(HistoryDay d) => isActiveMin ? d.activeMinutes : d.steps;
+          final noun = isActiveMin ? 'active min' : 'steps';
+          final total = days.fold<int>(0, (a, d) => a + val(d));
           final avg = (total / days.length).round();
           return ListView(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 96),
             children: [
               Text('Last ${days.length} days', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 4),
-              Text('Average $avg steps/day', style: const TextStyle(color: AppTheme.textSoft)),
+              Text('Average $avg $noun/day', style: const TextStyle(color: AppTheme.textSoft)),
               const SizedBox(height: 16),
               for (final d in days.reversed)
                 Padding(
@@ -734,7 +740,7 @@ class _D2CHistoryHostState extends State<D2CHistoryHost> {
                         '${d.date.month}/${d.date.day}',
                         style: const TextStyle(color: AppTheme.textSoft),
                       ),
-                      Text('${d.steps} steps', style: const TextStyle(color: AppTheme.textDark)),
+                      Text('${val(d)} $noun', style: const TextStyle(color: AppTheme.textDark)),
                     ],
                   ),
                 ),

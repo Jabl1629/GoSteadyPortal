@@ -10,6 +10,7 @@ import '../../api/api_models.dart' hide CareNote;
 import '../../api/d2c_api_models.dart';
 import '../../auth/auth_service_interface.dart';
 import '../../models/user.dart';
+import '../rendering/metric_registry.dart';
 import 'd2c_mock_data.dart';
 import 'd2c_repository.dart';
 
@@ -68,10 +69,23 @@ class LiveD2CRepository implements D2CRepository {
     final weekSessions = await weekF;
     final openAlertRows = (await alertsF).alerts;
 
-    // ── Daily step buckets (zero-filled 7-day window ending today) ──
+    // ── Per-device-type view (DT-4). Prefer the current device's type (known
+    // even before the first session); else the newest session's type; else
+    // walker_cap (D9). The registry decides which metric leads. ──
+    final deviceType = patient.currentDevice?.deviceType ??
+        _mostRecentDeviceType(weekSessions) ??
+        _mostRecentDeviceType(todaySessions) ??
+        'walker_cap';
+    final heroIsActiveMin =
+        deviceTypeView(deviceType).hero == ActivityMetric.activeMinutes;
+
+    // ── Daily buckets (zero-filled 7-day window). Carry BOTH metrics so the
+    // trend chart can plot the hero one per deviceType. ──
     final stepsByDate = <String, int>{};
+    final activeMinByDate = <String, int>{};
     for (final s in weekSessions) {
       stepsByDate[s.date] = (stepsByDate[s.date] ?? 0) + s.steps;
+      activeMinByDate[s.date] = (activeMinByDate[s.date] ?? 0) + s.activeMinutes;
     }
     final today0 = DateTime(now.year, now.month, now.day);
     final last7Dates = [
@@ -83,39 +97,49 @@ class LiveD2CRepository implements D2CRepository {
         todaySessions.fold<double>(0, (a, s) => a + s.distanceFt).round();
     final todayMinutes =
         todaySessions.fold<int>(0, (a, s) => a + s.activeMinutes);
+    final todayGait = _avgGait(todaySessions);
+
+    // Hero-metric daily total (today prefers the more-current 24h total).
+    int heroForYmd(String ymd) =>
+        heroIsActiveMin ? (activeMinByDate[ymd] ?? 0) : (stepsByDate[ymd] ?? 0);
+    final todayHero = heroIsActiveMin ? todayMinutes : todaySteps;
 
     final last7Days = [
       for (final d in last7Dates)
         DayStep(
           weekday: _weekdayLabel(d.weekday),
           // Today's bucket uses the (more current) 24h total.
-          steps: _isSameDay(d, today0)
-              ? todaySteps
-              : (stepsByDate[_ymd(d)] ?? 0),
+          steps: _isSameDay(d, today0) ? todaySteps : (stepsByDate[_ymd(d)] ?? 0),
+          activeMinutes: _isSameDay(d, today0)
+              ? todayMinutes
+              : (activeMinByDate[_ymd(d)] ?? 0),
         ),
     ];
 
-    // Prior 6 days (excludes today) → rolling average for "above usual".
-    final priorSteps = [
-      for (final d in last7Dates.take(6)) stepsByDate[_ymd(d)] ?? 0,
+    // Prior 6 days (excludes today) → rolling average of the HERO metric for
+    // the "above/below your usual" context.
+    final priorHero = [
+      for (final d in last7Dates.take(6)) heroForYmd(_ymd(d)),
     ];
-    final weeklyAvg = priorSteps.isEmpty
+    final weeklyAvgHero = priorHero.isEmpty
         ? 0
-        : (priorSteps.reduce((a, b) => a + b) / priorSteps.length).round();
-    final priorMax = priorSteps.isEmpty ? 0 : priorSteps.reduce(max);
-    final is7DayHigh = todaySteps > 0 && todaySteps >= priorMax;
+        : (priorHero.reduce((a, b) => a + b) / priorHero.length).round();
+    final priorMax = priorHero.isEmpty ? 0 : priorHero.reduce(max);
+    final is7DayHigh = todayHero > 0 && todayHero >= priorMax;
 
-    final yesterdaySteps =
-        last7Dates.length >= 2 ? (stepsByDate[_ymd(last7Dates[5])] ?? 0) : 0;
-    final pctChange = yesterdaySteps == 0
+    final yesterdayHero =
+        last7Dates.length >= 2 ? heroForYmd(_ymd(last7Dates[5])) : 0;
+    final pctChange = yesterdayHero == 0
         ? 0
-        : (((todaySteps - yesterdaySteps) / yesterdaySteps) * 100).round();
+        : (((todayHero - yesterdayHero) / yesterdayHero) * 100).round();
 
     // Streak of consecutive days (ending today) at/above the weekly avg.
     var streak = 0;
-    if (weeklyAvg > 0) {
+    if (weeklyAvgHero > 0) {
       for (var i = last7Days.length - 1; i >= 0; i--) {
-        if (last7Days[i].steps >= weeklyAvg) {
+        final v =
+            heroIsActiveMin ? last7Days[i].activeMinutes : last7Days[i].steps;
+        if (v >= weeklyAvgHero) {
           streak++;
         } else {
           break;
@@ -145,6 +169,8 @@ class LiveD2CRepository implements D2CRepository {
               : s.sessionEnd.difference(s.sessionStart).inMinutes,
           steps: s.steps,
           distanceFt: s.distanceFt.round(),
+          activeMinutes: s.activeMinutes,
+          gaitSpeedFts: s.gaitSpeedFts,
         ),
     ];
 
@@ -211,15 +237,17 @@ class LiveD2CRepository implements D2CRepository {
     return D2CDashboardSnapshot(
       viewer: viewer,
       walker: walker,
+      deviceType: deviceType,
       today: TodayActivity(
         steps: todaySteps,
         distanceFt: todayDistFt,
         activeMinutes: todayMinutes,
         lastSessionEndedMinAgo: lastEndedMinAgo,
         percentChangeFromYesterday: pctChange,
-        weeklyAverageSteps: weeklyAvg,
+        weeklyAverageSteps: weeklyAvgHero,
         is7DayHigh: is7DayHigh,
         streakDaysAboveAverage: streak,
+        gaitSpeedFts: todayGait,
       ),
       last7Days: last7Days,
       recentWalks: recentWalks,
@@ -238,6 +266,7 @@ class LiveD2CRepository implements D2CRepository {
     // 2A-RD activity windows max out at 30 days, so 90-day history is not
     // available from Phase-1 reads — we return up to 30 days regardless.
     final sessions = await _allSessions(patientId, ActivityRange.d30);
+    final deviceType = _mostRecentDeviceType(sessions) ?? 'walker_cap';
     final agg = <String, List<int>>{}; // date -> [steps, minutes]
     for (final s in sessions) {
       final e = agg.putIfAbsent(s.date, () => [0, 0]);
@@ -250,6 +279,7 @@ class LiveD2CRepository implements D2CRepository {
           date: DateTime.tryParse(entry.key) ?? DateTime.now(),
           steps: entry.value[0],
           activeMinutes: entry.value[1],
+          deviceType: deviceType,
         ),
     ]..sort((a, b) => a.date.compareTo(b.date));
     return out;
@@ -272,6 +302,33 @@ class LiveD2CRepository implements D2CRepository {
       guard++;
     } while (cursor != null && cursor.isNotEmpty && guard < 20);
     return out;
+  }
+
+  /// The `deviceType` of the newest session (by end time), or null if none of
+  /// the rows carry one (all pre-DT-0). Used as the fallback framing source
+  /// when the current-device projection has no type yet.
+  String? _mostRecentDeviceType(List<ActivitySession> sessions) {
+    ActivitySession? newest;
+    for (final s in sessions) {
+      if (s.deviceType == null) continue;
+      if (newest == null || s.sessionEnd.isAfter(newest.sessionEnd)) newest = s;
+    }
+    return newest?.deviceType;
+  }
+
+  /// Mean of the sessions' gait speed (ft/s) over those that reported one;
+  /// null when none did (firmware confidence-gates it) → renders as "—".
+  double? _avgGait(List<ActivitySession> sessions) {
+    var sum = 0.0;
+    var n = 0;
+    for (final s in sessions) {
+      final g = s.gaitSpeedFts;
+      if (g != null) {
+        sum += g;
+        n++;
+      }
+    }
+    return n == 0 ? null : sum / n;
   }
 
   double? _batteryFromAlerts(List<AlertRow> alerts) {

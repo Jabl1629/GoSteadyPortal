@@ -75,6 +75,7 @@ class TodayActivity {
     required this.weeklyAverageSteps,
     required this.is7DayHigh,
     required this.streakDaysAboveAverage,
+    this.gaitSpeedFts,
   });
 
   final int steps;
@@ -82,21 +83,32 @@ class TodayActivity {
   final int activeMinutes;
   final int? lastSessionEndedMinAgo;
   final int percentChangeFromYesterday;
-  /// Rolling 7-day mean (excluding today). Drives "above/below your pace".
+  /// Rolling 7-day mean of the **hero metric** (excluding today) — steps for a
+  /// walker cap, active-minutes for a rollator (DT-4). Drives "above/below
+  /// your pace". (Name kept for wireframe back-compat; holds the hero metric.)
   final int weeklyAverageSteps;
-  /// True iff today.steps >= max(last 7 days). Drives "strongest day".
+  /// True iff today's hero-metric total >= max(last 7 days). "Strongest day".
   final bool is7DayHigh;
+  /// Session-average gait speed (ft/s), when the firmware reported it; null
+  /// otherwise (confidence-gated). A rollator stat; unused by the walker view.
+  final double? gaitSpeedFts;
   /// Number of consecutive days (ending today) at or above weekly average.
   /// 0 = today is the first time below average in a streak; 3 = today is
   /// the third day in a row above. Drives streak language.
   final int streakDaysAboveAverage;
 }
 
-/// 7-day step history for the trend bar chart.
+/// 7-day history for the trend bar chart — carries both metrics; the registry
+/// picks which to chart per deviceType (walker → steps, rollator → active-min).
 class DayStep {
-  const DayStep({required this.weekday, required this.steps});
+  const DayStep({
+    required this.weekday,
+    required this.steps,
+    this.activeMinutes = 0,
+  });
   final String weekday; // "Mon", "Tue", ...
   final int steps;
+  final int activeMinutes;
 }
 
 /// One completed walking session (Strava-style activity feed row).
@@ -106,6 +118,8 @@ class WalkSession {
     required this.durationMinutes,
     required this.steps,
     required this.distanceFt,
+    this.activeMinutes = 0,
+    this.gaitSpeedFts,
   });
 
   /// e.g. "7:42 AM" — local time-of-day; renders right-aligned.
@@ -113,6 +127,11 @@ class WalkSession {
   final int durationMinutes;
   final int steps;
   final int distanceFt;
+
+  /// Active-minutes for this session; the rollator recent-walk row shows this
+  /// in place of steps. Gait speed (ft/s) when the firmware reported it.
+  final int activeMinutes;
+  final double? gaitSpeedFts;
 }
 
 /// An active (unacknowledged) alert.
@@ -176,10 +195,16 @@ class D2CDashboardSnapshot {
     required this.careNote,
     required this.device,
     this.isPreActivation = false,
+    this.deviceType = 'walker_cap',
   });
 
   final CareCircleMember viewer;
   final Walker walker;
+
+  /// Device type of the patient's current device (`walker_cap` |
+  /// `rollator_platform`) — selects the per-type metric view (DT-4). Default
+  /// walker_cap keeps every existing wireframe snapshot rendering unchanged.
+  final String deviceType;
   final TodayActivity today;
   final List<DayStep> last7Days;
   /// Today's completed walking sessions, newest-first. Drives the
@@ -263,11 +288,13 @@ class HistoryDay {
     required this.date,
     required this.steps,
     required this.activeMinutes,
+    this.deviceType = 'walker_cap',
   });
 
   final DateTime date;
   final int steps;
   final int activeMinutes;
+  final String deviceType;
 }
 
 /// One row in the customer-facing audit log ("who accessed Mom's data").

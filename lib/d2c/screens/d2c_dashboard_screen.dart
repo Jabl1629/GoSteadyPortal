@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../../theme/app_theme.dart';
 import '../d2c_routes.dart';
 import '../data/d2c_mock_data.dart';
+import '../rendering/metric_registry.dart';
 import '../widgets/d2c_bottom_nav.dart';
 
 /// D2C Home / Dashboard. Single household viewed by either an Admin
@@ -39,6 +40,10 @@ class D2CDashboardScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Per-device-type metric view (DT-4): walker leads on steps, rollator on
+    // active-minutes (no steps). Drives the stat row, trend chart, context
+    // line, greeting, and recent-walks rendering below.
+    final view = deviceTypeView(snapshot.deviceType);
     if (snapshot.isPreActivation) {
       return Scaffold(
         backgroundColor: AppTheme.warmWhite,
@@ -68,19 +73,17 @@ class D2CDashboardScreen extends StatelessWidget {
               children: [
                 _GreetingCard(snapshot: snapshot),
                 const SizedBox(height: 18),
-                _StatRow(today: snapshot.today),
+                _StatRow(today: snapshot.today, view: view),
                 const SizedBox(height: 12),
-                _WeekContextLine(today: snapshot.today),
+                _WeekContextLine(today: snapshot.today, view: view),
                 const SizedBox(height: 22),
-                _DayTrendCard(
-                  days: snapshot.last7Days,
-                  todayLabel: NumberFormat('#,##0').format(snapshot.today.steps),
-                ),
+                _DayTrendCard(days: snapshot.last7Days, view: view),
                 if (snapshot.recentWalks.isNotEmpty) ...[
                   const SizedBox(height: 26),
                   _RecentWalksSection(
                     walks: snapshot.recentWalks,
                     isWalkerUser: _isWalkerUser,
+                    view: view,
                   ),
                 ],
                 if (snapshot.openAlerts.isNotEmpty) ...[
@@ -336,53 +339,57 @@ class _GreetingCard extends StatelessWidget {
     final isYou = snapshot.viewer.isWalkerUser;
     final theirs = isYou ? 'your' : '${w.firstName}\'s';
 
+    // Per-type hero metric (DT-4): steps for a walker cap, active-minutes for a
+    // rollator (no steps). is7DayHigh / streak / weeklyAverageSteps are already
+    // computed on the hero metric upstream — only the display noun differs.
+    final heroIsActiveMin = deviceTypeView(snapshot.deviceType).hero ==
+        ActivityMetric.activeMinutes;
+    final heroVal = heroIsActiveMin ? t.activeMinutes : t.steps;
+    final heroAvg = t.weeklyAverageSteps;
+    final noun = heroIsActiveMin ? 'active minutes' : 'steps';
+    final heroFmt = NumberFormat('#,##0').format(heroVal);
+
     // 1. Personal best — strongest day this week
-    if (t.is7DayHigh && t.steps > 0) {
+    if (t.is7DayHigh && heroVal > 0) {
       return (
         headline: isYou
             ? 'Your most active day this week.'
             : "${w.firstName}'s most active day this week.",
         subhead:
-            '${NumberFormat('#,##0').format(t.steps)} steps · ${t.percentChangeFromYesterday}% above yesterday.',
+            '$heroFmt $noun · ${t.percentChangeFromYesterday}% above yesterday.',
       );
     }
 
     // 2. Three-day streak above pace
-    if (t.streakDaysAboveAverage >= 3 && t.steps >= t.weeklyAverageSteps) {
+    if (t.streakDaysAboveAverage >= 3 && heroVal >= heroAvg) {
       return (
         headline: isYou
             ? '${t.streakDaysAboveAverage} steady days in a row.'
             : '${w.firstName} — ${t.streakDaysAboveAverage} steady days in a row.',
         subhead:
-            '${NumberFormat('#,##0').format(t.steps)} steps so far, above $theirs usual again. Nice and steady.',
+            '$heroFmt $noun so far, above $theirs usual again. Nice and steady.',
       );
     }
 
     // 3. Above weekly pace (less than 3-day streak)
-    if (t.steps >= t.weeklyAverageSteps && t.weeklyAverageSteps > 0) {
-      final pct =
-          (((t.steps - t.weeklyAverageSteps) / t.weeklyAverageSteps) * 100)
-              .round();
+    if (heroVal >= heroAvg && heroAvg > 0) {
+      final pct = (((heroVal - heroAvg) / heroAvg) * 100).round();
       return (
         headline: isYou
             ? "You're ahead of your usual today."
             : '${w.firstName} is ahead of her usual today.',
-        subhead:
-            '${NumberFormat('#,##0').format(t.steps)} steps so far · $pct% above a typical day.',
+        subhead: '$heroFmt $noun so far · $pct% above a typical day.',
       );
     }
 
     // 4. Lighter than usual but still some movement
-    if (t.steps > 0 && t.steps < t.weeklyAverageSteps) {
-      final pct =
-          (((t.weeklyAverageSteps - t.steps) / t.weeklyAverageSteps) * 100)
-              .round();
+    if (heroVal > 0 && heroVal < heroAvg) {
+      final pct = (((heroAvg - heroVal) / heroAvg) * 100).round();
       return (
         headline: isYou
             ? 'A quieter day so far.'
             : 'A quieter day for ${w.firstName} so far.',
-        subhead: '${NumberFormat('#,##0').format(t.steps)} steps · $pct% '
-            'below a typical day.',
+        subhead: '$heroFmt $noun · $pct% below a typical day.',
       );
     }
 
@@ -446,37 +453,44 @@ class _GreetingCard extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────
 
 class _StatRow extends StatelessWidget {
-  const _StatRow({required this.today});
+  const _StatRow({required this.today, required this.view});
   final TodayActivity today;
+  final DeviceTypeView view;
 
   @override
   Widget build(BuildContext context) {
-    final stepsFmt = NumberFormat('#,##0').format(today.steps);
-    final distFmt = NumberFormat('#,##0').format(today.distanceFt);
+    final tiles = view.statRow;
     return Row(
       children: [
-        Expanded(
-          child: _StatTile(
-            value: stepsFmt,
-            unit: 'steps',
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _StatTile(
-            value: distFmt,
-            unit: 'feet',
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _StatTile(
-            value: today.activeMinutes.toString(),
-            unit: 'active min',
-          ),
-        ),
+        for (var i = 0; i < tiles.length; i++) ...[
+          if (i > 0) const SizedBox(width: 12),
+          Expanded(child: _tile(tiles[i])),
+        ],
       ],
     );
+  }
+
+  _StatTile _tile(ActivityMetric m) {
+    final rollator = view.deviceType == 'rollator_platform';
+    switch (m) {
+      case ActivityMetric.steps:
+        return _StatTile(
+            value: NumberFormat('#,##0').format(today.steps), unit: 'steps');
+      case ActivityMetric.activeMinutes:
+        return _StatTile(
+            value: today.activeMinutes.toString(), unit: 'active min');
+      case ActivityMetric.distanceFt:
+        // Rollator distance is firmware confidence-gated — 0 means "no valid
+        // estimate" (a stationary session), shown as "—", not "0".
+        final v = (rollator && today.distanceFt == 0)
+            ? '—'
+            : NumberFormat('#,##0').format(today.distanceFt);
+        return _StatTile(value: v, unit: 'feet');
+      case ActivityMetric.gaitSpeedFts:
+        final g = today.gaitSpeedFts;
+        return _StatTile(
+            value: g == null ? '—' : g.toStringAsFixed(1), unit: 'ft/s');
+    }
   }
 }
 
@@ -528,22 +542,25 @@ class _StatTile extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────
 
 class _WeekContextLine extends StatelessWidget {
-  const _WeekContextLine({required this.today});
+  const _WeekContextLine({required this.today, required this.view});
   final TodayActivity today;
+  final DeviceTypeView view;
 
   String? _line() {
-    final delta = today.steps - today.weeklyAverageSteps;
-    final pct = today.weeklyAverageSteps == 0
-        ? 0
-        : ((delta / today.weeklyAverageSteps) * 100).round();
-    if (today.is7DayHigh && today.steps > 0) {
+    final heroVal = view.hero == ActivityMetric.activeMinutes
+        ? today.activeMinutes
+        : today.steps;
+    final avg = today.weeklyAverageSteps;
+    final delta = heroVal - avg;
+    final pct = avg == 0 ? 0 : ((delta / avg) * 100).round();
+    if (today.is7DayHigh && heroVal > 0) {
       return 'Personal best this week';
     }
     if (today.streakDaysAboveAverage >= 3) {
       return '${today.streakDaysAboveAverage} days in a row above weekly average';
     }
     if (delta > 0) return '$pct% above weekly average';
-    if (delta < 0 && today.steps > 0) {
+    if (delta < 0 && heroVal > 0) {
       return '${pct.abs()}% below weekly average';
     }
     return null;
@@ -581,14 +598,17 @@ class _WeekContextLine extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────
 
 class _DayTrendCard extends StatelessWidget {
-  const _DayTrendCard({required this.days, required this.todayLabel});
+  const _DayTrendCard({required this.days, required this.view});
   final List<DayStep> days;
-  final String todayLabel;
+  final DeviceTypeView view;
 
   @override
   Widget build(BuildContext context) {
-    final maxSteps =
-        days.map((d) => d.steps).fold<int>(0, (a, b) => a > b ? a : b);
+    final heroIsActiveMin = view.hero == ActivityMetric.activeMinutes;
+    int val(DayStep d) => heroIsActiveMin ? d.activeMinutes : d.steps;
+    final maxVal = days.map(val).fold<int>(0, (a, b) => a > b ? a : b);
+    final todayLabel =
+        days.isEmpty ? '' : NumberFormat('#,##0').format(val(days.last));
     final maxBarHeight = 70.0;
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
@@ -634,7 +654,8 @@ class _DayTrendCard extends StatelessWidget {
                   Expanded(
                     child: _DayBar(
                       day: days[i],
-                      maxSteps: maxSteps,
+                      value: val(days[i]),
+                      maxValue: maxVal,
                       maxHeight: maxBarHeight,
                       isToday: i == days.length - 1,
                       todayLabel: i == days.length - 1 ? todayLabel : null,
@@ -653,21 +674,23 @@ class _DayTrendCard extends StatelessWidget {
 class _DayBar extends StatelessWidget {
   const _DayBar({
     required this.day,
-    required this.maxSteps,
+    required this.value,
+    required this.maxValue,
     required this.maxHeight,
     required this.isToday,
     this.todayLabel,
   });
 
   final DayStep day;
-  final int maxSteps;
+  final int value;
+  final int maxValue;
   final double maxHeight;
   final bool isToday;
   final String? todayLabel;
 
   @override
   Widget build(BuildContext context) {
-    final h = maxSteps == 0 ? 0.0 : (day.steps / maxSteps) * maxHeight;
+    final h = maxValue == 0 ? 0.0 : (value / maxValue) * maxHeight;
     final color = isToday ? AppTheme.sage : AppTheme.sage.withOpacity(0.32);
     return Column(
       mainAxisAlignment: MainAxisAlignment.end,
@@ -745,10 +768,12 @@ class _RecentWalksSection extends StatelessWidget {
   const _RecentWalksSection({
     required this.walks,
     required this.isWalkerUser,
+    required this.view,
   });
 
   final List<WalkSession> walks;
   final bool isWalkerUser;
+  final DeviceTypeView view;
 
   @override
   Widget build(BuildContext context) {
@@ -786,7 +811,7 @@ class _RecentWalksSection extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           for (var i = 0; i < shown.length; i++) ...[
-            _WalkRow(walk: shown[i]),
+            _WalkRow(walk: shown[i], view: view),
             if (i < shown.length - 1)
               Divider(
                 height: 1,
@@ -800,12 +825,32 @@ class _RecentWalksSection extends StatelessWidget {
 }
 
 class _WalkRow extends StatelessWidget {
-  const _WalkRow({required this.walk});
+  const _WalkRow({required this.walk, required this.view});
   final WalkSession walk;
+  final DeviceTypeView view;
 
   @override
   Widget build(BuildContext context) {
-    final stepsFmt = NumberFormat('#,##0').format(walk.steps);
+    final rollator = view.deviceType == 'rollator_platform';
+    // A walker's per-walk headline is steps; a rollator has none, so it leads
+    // with distance ("—" when the odometer had no valid estimate) and shows
+    // gait beside the duration when the firmware reported it.
+    final String trailingValue;
+    final String trailingUnit;
+    final String subLine;
+    if (rollator) {
+      trailingValue = walk.distanceFt == 0
+          ? '—'
+          : NumberFormat('#,##0').format(walk.distanceFt);
+      trailingUnit = 'ft';
+      subLine = walk.gaitSpeedFts == null
+          ? '${walk.durationMinutes} min'
+          : '${walk.durationMinutes} min · ${walk.gaitSpeedFts!.toStringAsFixed(1)} ft/s';
+    } else {
+      trailingValue = NumberFormat('#,##0').format(walk.steps);
+      trailingUnit = 'steps';
+      subLine = '${walk.durationMinutes} min · ${walk.distanceFt} ft';
+    }
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: Row(
@@ -840,7 +885,7 @@ class _WalkRow extends StatelessWidget {
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  '${walk.durationMinutes} min · ${walk.distanceFt} ft',
+                  subLine,
                   style: const TextStyle(
                     color: AppTheme.textSoft,
                     fontSize: 12.5,
@@ -850,7 +895,7 @@ class _WalkRow extends StatelessWidget {
             ),
           ),
           Text(
-            stepsFmt,
+            trailingValue,
             style: const TextStyle(
               color: AppTheme.textDark,
               fontSize: 16,
@@ -859,9 +904,9 @@ class _WalkRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 4),
-          const Text(
-            'steps',
-            style: TextStyle(
+          Text(
+            trailingUnit,
+            style: const TextStyle(
               color: AppTheme.textSoft,
               fontSize: 11.5,
               fontWeight: FontWeight.w500,

@@ -239,10 +239,16 @@ class CurrentDevice {
   final String status;
   final DateTime? lastSeen;
 
+  /// Device type (`walker_cap` | `rollator_platform`); null → walker_cap per
+  /// DT-0 D9. Drives which per-type widget set the D2C dashboard renders,
+  /// including before the patient's first session (DT-4).
+  final String? deviceType;
+
   const CurrentDevice({
     required this.serialNumber,
     required this.status,
     this.lastSeen,
+    this.deviceType,
   });
 
   factory CurrentDevice.fromJson(Map<String, dynamic> json) {
@@ -250,6 +256,7 @@ class CurrentDevice {
       serialNumber: (json['serialNumber'] as String?) ?? '',
       status: (json['status'] as String?) ?? 'unknown',
       lastSeen: _parseTs(json['lastSeen']),
+      deviceType: json['deviceType'] as String?,
     );
   }
 }
@@ -298,6 +305,11 @@ class ActivitySession {
   final double distanceFt;
   final int activeMinutes;
   final String? deviceSerial;
+
+  /// Device type (`walker_cap` | `rollator_platform`) denormalized onto the
+  /// row (DT-0); null on pre-DT-0 rows → readers treat as walker_cap (D9).
+  /// The D2C dashboard keys per-type rendering on this (DT-4).
+  final String? deviceType;
   final double? roughnessR;
   final String? surfaceClass;
   final String? firmwareVersion;
@@ -312,6 +324,7 @@ class ActivitySession {
     required this.distanceFt,
     required this.activeMinutes,
     this.deviceSerial,
+    this.deviceType,
     this.roughnessR,
     this.surfaceClass,
     this.firmwareVersion,
@@ -328,6 +341,7 @@ class ActivitySession {
       distanceFt: _parseDouble(json['distanceFt']) ?? 0.0,
       activeMinutes: _parseInt(json['activeMinutes']) ?? 0,
       deviceSerial: json['deviceSerial'] as String?,
+      deviceType: json['deviceType'] as String?,
       roughnessR: _parseDouble(json['roughnessR']),
       surfaceClass: json['surfaceClass'] as String?,
       firmwareVersion: json['firmwareVersion'] as String?,

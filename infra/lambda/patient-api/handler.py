@@ -263,6 +263,10 @@ def _action_get_patient(
                 "status": device.get("status"),
                 "lastSeen": device.get("lastSeen") or device.get("firstHeartbeatAt"),
                 "firmwareVersion": device.get("firmwareVersion"),
+                # DT-4: lets the D2C dashboard pick the per-type widget set
+                # before the patient's first session (no activity rows yet).
+                # Null on pre-DT-0 registry records → readers treat as walker_cap.
+                "deviceType": device.get("deviceType"),
             }
 
     body = {
