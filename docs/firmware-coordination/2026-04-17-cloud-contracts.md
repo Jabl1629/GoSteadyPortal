@@ -9581,9 +9581,12 @@ to resume/finalize.)
 - **Remaining:** (1) operator DNS → finish D2CHosting → `deploy-d2c-app.sh`;
   (2) **implement phone-only SMS-OTP** sign-in — C54.4 **decided 2026-07-08:**
   phone number is the sole factor, drop the email-verify gate (email
-  optional/unverified). Needs a D2C pool reconfig (phone username/alias);
-  Cognito username attrs are immutable post-creation, so scope alias-vs-new-pool
-  first. A follow-up;
+  optional/unverified). **Scoped: `docs/specs/d2c-phone-only-signin.md`** —
+  finding: phone-as-identifier needs a **NEW pool** (UsernameAttributes/aliases
+  are immutable; an alias tweak can't do it), but **migration is free
+  pre-launch** (no real D2C users yet), so do it now. Change surface + ordering
+  (deploy pool → new ids → redeploy api-stack authorizer → frontend) in the doc.
+  A follow-up;
   (3) SMS browser E2E on the hosted URL for BOTH form factors (claim
   `GS0001000041` walker + `GS0001000043` rollator → activate → dashboard);
   (4) WS2 walker alert-rate check (pre-PROD); (5) retire legacy
