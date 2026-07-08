@@ -151,8 +151,12 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
         # by-client-status + by-census-status GSI sort key. Sparse GSI:
         # without this composite attribute the patient row is INVISIBLE to
         # both indexes (breaks /me/patients reads + idempotent re-claim).
-        # Matches patient-mgmt's create shape.
-        "status_patientId": f"active#{patient_id}",
+        # MUST be `<status>_<patientId>` (underscore) to match the readers'
+        # `begins_with("active_")` filter (queries.py) + patient-mgmt's create
+        # shape — the prior `active#` (hash) hid every D2C patient from
+        # /me/patients, which is exactly how the D2C dashboard finds its
+        # patient (§C41.3 / DT-4 WS4 fix, 2026-07-08).
+        "status_patientId": f"active_{patient_id}",
         "isWalkerUser": True,
         "cognitoUserId": sub,
         "createdAt": now_iso,
@@ -218,12 +222,22 @@ def _public_lookup(event: dict[str, Any]) -> dict[str, Any]:
     if not device:
         # Don't 404-leak existence to an unauth caller; neutral "unknown".
         return ok_response({"status": "unknown"})
+    # DT-4 WS4: expose deviceType so the /setup landing renders device-
+    # appropriate copy (walker cap vs rollator). Product type, not identity —
+    # safe on this unauthenticated endpoint. Null-in-registry → walker_cap (D9).
+    device_type = device.get("deviceType") or DEFAULT_DEVICE_TYPE
     status = device.get("status", STATE_READY)
     if status == STATE_DECOMMISSIONED:
-        return ok_response({"status": "decommissioned"})
+        return ok_response({"status": "decommissioned", "deviceType": device_type})
     if status == STATE_READY and not device.get("owningClientId"):
-        return ok_response({"status": "unclaimed"})
-    return ok_response({"status": "claimed", "ownerMasked": _masked_owner(device)})
+        return ok_response({"status": "unclaimed", "deviceType": device_type})
+    return ok_response(
+        {
+            "status": "claimed",
+            "deviceType": device_type,
+            "ownerMasked": _masked_owner(device),
+        }
+    )
 
 
 # ── Inline provision chain (Option B — mirrors device-api/patient-mgmt) ─

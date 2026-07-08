@@ -44,7 +44,15 @@ class PublicWalkerLookup {
   /// copy on the "already registered" landing (d2c-phase1 §3.4).
   final String? ownerMasked;
 
-  const PublicWalkerLookup({required this.status, this.ownerMasked});
+  /// Device type (`walker_cap` | `rollator_platform`) — drives device-
+  /// appropriate /setup landing copy (DT-4). Null → walker_cap (D9).
+  final String? deviceType;
+
+  const PublicWalkerLookup({
+    required this.status,
+    this.ownerMasked,
+    this.deviceType,
+  });
 
   bool get isClaimable => status == PublicWalkerStatus.unclaimed;
 
@@ -52,6 +60,7 @@ class PublicWalkerLookup {
     return PublicWalkerLookup(
       status: PublicWalkerStatus.fromWire(json['status']),
       ownerMasked: json['ownerMasked'] as String?,
+      deviceType: json['deviceType'] as String?,
     );
   }
 }

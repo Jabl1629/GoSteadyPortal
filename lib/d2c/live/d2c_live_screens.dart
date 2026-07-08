@@ -201,19 +201,22 @@ class _D2CSetupLandingScreenState extends State<D2CSetupLandingScreen> {
               );
             }
             final lookup = snap.data!;
+            // DT-4: device-appropriate noun — a rollator isn't a "walker".
+            final noun =
+                lookup.deviceType == 'rollator_platform' ? 'rollator' : 'walker';
             switch (lookup.status) {
               case PublicWalkerStatus.unclaimed:
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const _Message(
+                    _Message(
                       icon: Icons.check_circle_outline,
-                      text: 'This walker is ready to set up.',
+                      text: 'This $noun is ready to set up.',
                     ),
                     const SizedBox(height: 20),
                     if (widget.signedIn)
                       _PrimaryButton(
-                        label: 'Claim this walker',
+                        label: 'Claim this $noun',
                         busy: _claiming,
                         onPressed: _claimNow,
                       )
@@ -235,18 +238,18 @@ class _D2CSetupLandingScreenState extends State<D2CSetupLandingScreen> {
                 return _Message(
                   icon: Icons.lock_outline,
                   text: lookup.ownerMasked == null
-                      ? 'This walker is already registered to another account.'
-                      : 'This walker is already registered to ${lookup.ownerMasked}.',
+                      ? 'This $noun is already registered to another account.'
+                      : 'This $noun is already registered to ${lookup.ownerMasked}.',
                 );
               case PublicWalkerStatus.decommissioned:
-                return const _Message(
+                return _Message(
                   icon: Icons.block,
-                  text: 'This walker has been retired and can no longer be set up.',
+                  text: 'This $noun has been retired and can no longer be set up.',
                 );
               case PublicWalkerStatus.unknown:
-                return const _Message(
+                return _Message(
                   icon: Icons.help_outline,
-                  text: "This link doesn't look right. Double-check the code on your walker's sticker.",
+                  text: "This link doesn't look right. Double-check the code on your $noun's sticker.",
                 );
             }
           },
