@@ -47,11 +47,11 @@ import patient_iterator
 from facility_iterator import FacilityContext, RuleSet, list_facilities, rule_set_for_facility
 from history_window import (
     HISTORY_DAYS,
-    aggregate_steps_per_day,
+    aggregate_active_min_per_day,
     facility_local_midnight,
     query_activity_for_today,
     query_activity_history,
-    sum_steps,
+    sum_active_minutes,
 )
 from patient_iterator import list_active_patients
 from rules import below_typical, declining_trend, device_offline, no_activity_today
@@ -356,7 +356,7 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
         # ── Activity windows (only fetched when needed) ───────────
         history_rows: Optional[list[dict[str, Any]]] = None
         today_rows: Optional[list[dict[str, Any]]] = None
-        today_steps_cache: Optional[int] = None
+        today_active_min_cache: Optional[int] = None
         history_per_day: Optional[list[int]] = None
 
         def _today_rows():
@@ -370,11 +370,11 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
                 )
             return today_rows
 
-        def _today_steps():
-            nonlocal today_steps_cache
-            if today_steps_cache is None:
-                today_steps_cache = sum_steps(_today_rows())
-            return today_steps_cache
+        def _today_active_minutes():
+            nonlocal today_active_min_cache
+            if today_active_min_cache is None:
+                today_active_min_cache = sum_active_minutes(_today_rows())
+            return today_active_min_cache
 
         def _history_per_day():
             nonlocal history_rows, history_per_day
@@ -387,7 +387,7 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
                         days=HISTORY_DAYS,
                         now=facility.local_now,
                     )
-                history_per_day = aggregate_steps_per_day(
+                history_per_day = aggregate_active_min_per_day(
                     history_rows,
                     days=HISTORY_DAYS,
                     tz_name=facility.timezone,
@@ -409,14 +409,14 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
         # ── below_typical + declining_trend ───────────────────────
         if rule_set.evaluate_end_of_day_behavioral:
             cand = below_typical.evaluate(
-                today_steps=_today_steps(),
-                history_steps_per_day=_history_per_day(),
+                today_active_minutes=_today_active_minutes(),
+                history_active_min_per_day=_history_per_day(),
                 local_now_iso=local_now_iso,
             )
             _maybe_fire(patient, cand, device_serial, summary)
 
             cand = declining_trend.evaluate(
-                history_steps_per_day=_history_per_day(),
+                history_active_min_per_day=_history_per_day(),
                 local_now_iso=local_now_iso,
             )
             _maybe_fire(patient, cand, device_serial, summary)

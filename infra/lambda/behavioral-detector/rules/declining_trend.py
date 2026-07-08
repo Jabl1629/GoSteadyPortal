@@ -3,12 +3,17 @@
 
 Triggers at facility-local 22:00 (same window as below_typical).
 Fires alert if:
-  - patient.median7Day.steps < threshold_pct × patient.medianPrior23Day.steps
+  - patient.median7Day.activeMinutes < threshold_pct × patient.medianPrior23Day.activeMinutes
     (default 85% — i.e., 7-day median dropped > 15% vs prior 23 days)
   - AND ≥ DEFAULT_MIN_HISTORY_DAYS_FOR_BEHAVIORAL days of history
   - AND both medians > 0
 
 Severity: STANDARD. Behavioral signal — sustained downturn vs ~4-week baseline.
+
+Re-keyed onto activeMinutes (DT-4 WS2): activeMinutes is the universal
+cross-type metric (works for walker + rollator). The 0.85 ratio is a
+ratio of medians, so it carries over regardless of scale — no per-
+deviceType override at MVP.
 
 Demo used 85% threshold; spec L10 carries it forward.
 """
@@ -30,30 +35,31 @@ from .types import (
 
 def evaluate(
     *,
-    history_steps_per_day: list[int],
+    history_active_min_per_day: list[int],
     local_now_iso: str,
     threshold_pct: float = DEFAULT_DECLINING_TREND_THRESHOLD_PCT,
     min_history_days: int = DEFAULT_MIN_HISTORY_DAYS_FOR_BEHAVIORAL,
 ) -> Optional[AlertCandidate]:
     """
     Args:
-      history_steps_per_day: ordered list of daily step counts. Oldest first,
-        most recent last. At least 30 days for the 7d-vs-prior-23d split to
-        be meaningful. Caller-built; skipped (cold-start) if len < min_history_days.
+      history_active_min_per_day: ordered list of daily active-minute totals.
+        Oldest first, most recent last. At least 30 days for the 7d-vs-prior-23d
+        split to be meaningful. Caller-built; skipped (cold-start) if
+        len < min_history_days.
       local_now_iso: ISO 8601 in facility-local time.
       threshold_pct: e.g. 0.85 → fires if median7Day < 0.85 × medianPrior23Day.
 
     Returns:
       AlertCandidate or None.
     """
-    if len(history_steps_per_day) < min_history_days:
+    if len(history_active_min_per_day) < min_history_days:
         return None  # cold-start guard
     # Need ≥30 days for the split. If between min_history and 30, abstain.
-    if len(history_steps_per_day) < 30:
+    if len(history_active_min_per_day) < 30:
         return None
     # Last 7 = recent window; prior 23 = baseline.
-    last_7 = history_steps_per_day[-7:]
-    prior_23 = history_steps_per_day[-30:-7]
+    last_7 = history_active_min_per_day[-7:]
+    prior_23 = history_active_min_per_day[-30:-7]
     if not last_7 or not prior_23:
         return None
     median_7d = int(statistics.median(last_7))
@@ -73,7 +79,7 @@ def evaluate(
             "median7Day": median_7d,
             "medianPrior23Day": median_prior_23,
             "thresholdPct": threshold_pct,
-            "thresholdSteps": threshold,
+            "thresholdActiveMin": threshold,
             "declinePct": declinePct,
         },
     )

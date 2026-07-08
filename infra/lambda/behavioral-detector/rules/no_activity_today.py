@@ -4,9 +4,13 @@
 Triggers at facility-local 09:00 (configurable per spec D6 — gives
 breakfast/morning-activity time to land before flagging). Fires alert
 if:
-  - sum(steps) over [local-midnight, local-09:00] == 0
+  - sum(activeMinutes) over [local-midnight, local-09:00] == 0
   - AND device lastSeen < 24h ago (device is alive but not moving;
     if it's been silent >24h, device_silent rule handles it instead)
+
+Re-keyed onto activeMinutes (DT-4 WS2): activeMinutes is the universal
+cross-type metric; steps is walker-only and a rollator produces none, so
+the steps-keyed check mis-fired CRITICAL every morning on rollators.
 
 Severity: CRITICAL — the most operationally-important behavioral signal
 per user-needs US-22.
@@ -40,7 +44,8 @@ def evaluate(
 
     Args:
       activity_rows_today: Activity Series rows for the patient with
-        sessionEnd in [local-midnight, local-now]. Steps summed across.
+        sessionEnd in [local-midnight, local-now]. activeMinutes summed
+        across.
       device_last_seen_epoch: Device Registry lastSeen in epoch seconds,
         or None if never seen.
       now_epoch: current epoch seconds (caller-injected; tests pass
@@ -54,8 +59,8 @@ def evaluate(
     Returns:
       AlertCandidate if rule fires; None otherwise.
     """
-    total_steps = sum(int(row.get("steps", 0)) for row in activity_rows_today)
-    if total_steps > 0:
+    total_active_minutes = sum(int(row.get("activeMinutes", 0)) for row in activity_rows_today)
+    if total_active_minutes > 0:
         return None
 
     # If device has been silent > 24h, defer to device_silent rule.
@@ -72,7 +77,7 @@ def evaluate(
         source=SOURCE_BEHAVIORAL,
         event_timestamp_iso=local_now_iso,
         data={
-            "stepsObservedBefore": 0,
+            "activeMinutesObservedBefore": 0,
             "lastDataReceivedAgo": last_seen_str,
             "checkLocalHour": check_local_hour,
             "sessionCount": len(activity_rows_today),

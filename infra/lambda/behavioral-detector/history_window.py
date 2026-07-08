@@ -7,10 +7,12 @@ Activity Series schema (Phase 0B-rev):
   attributes: steps, distanceFt, activeMinutes, date (facility-local
               YYYY-MM-DD), timezone, deviceSerial, ...
 
-For the behavioral rules we need:
-  - today_steps:               sum(steps) over rows with sessionEnd in
-                               [local_midnight, local_now]
-  - history_steps_per_day:     list[int] of daily totals over the last
+For the behavioral rules we need (re-keyed onto activeMinutes per DT-4
+WS2 — activeMinutes is the universal cross-type metric; steps is walker-
+only and a rollator produces none):
+  - today_active_minutes:      sum(activeMinutes) over rows with sessionEnd
+                               in [local_midnight, local_now]
+  - history_active_min_per_day: list[int] of daily totals over the last
                                N days (oldest first, today excluded),
                                where each day is delimited by the
                                PATIENT's facility-local midnight
@@ -61,8 +63,9 @@ def query_activity_for_today(
     """
     Activity Series rows whose sessionEnd ∈ [facility-local-midnight, now-in-UTC].
 
-    Used by no_activity_today (raw rows for the steps sum + sessionCount)
-    and by below_typical (caller sums steps from the returned rows).
+    Used by no_activity_today (raw rows for the activeMinutes sum +
+    sessionCount) and by below_typical (caller sums activeMinutes from
+    the returned rows).
     """
     if now is None:
         now = facility_local_now(tz_name)
@@ -103,7 +106,7 @@ def query_activity_history(
     return res.get("Items", [])
 
 
-def aggregate_steps_per_day(
+def aggregate_active_min_per_day(
     history_rows: list[dict[str, Any]],
     *,
     days: int = 30,
@@ -112,11 +115,15 @@ def aggregate_steps_per_day(
 ) -> list[int]:
     """
     Group history rows by facility-local-date (the `date` attribute set by
-    activity-processor) into a list of daily step totals. Returns a
-    contiguous list of length `days`, oldest first, with zeros for days
+    activity-processor) into a list of daily active-minute totals. Returns
+    a contiguous list of length `days`, oldest first, with zeros for days
     that have no activity rows. Today is excluded (rows for today
     shouldn't appear in `history_rows` since the query window excludes
     today, but defensive filtering applies).
+
+    Re-keyed onto activeMinutes (DT-4 WS2): activeMinutes is the universal
+    cross-type metric, so these daily totals work for both walker (steps)
+    and rollator (no steps) devices.
 
     Why contiguous-with-zeros: the rule fns expect a fixed-length sequence
     so the cold-start guard (len >= min_history_days) is meaningful even
@@ -132,10 +139,10 @@ def aggregate_steps_per_day(
         if not isinstance(date_str, str):
             continue
         try:
-            steps = int(row.get("steps", 0))
+            active_minutes = int(row.get("activeMinutes", 0))
         except (TypeError, ValueError):
             continue
-        by_date[date_str] = by_date.get(date_str, 0) + steps
+        by_date[date_str] = by_date.get(date_str, 0) + active_minutes
     # Walk back `days` days from yesterday, oldest first.
     result: list[int] = []
     for offset in range(days, 0, -1):
@@ -144,9 +151,9 @@ def aggregate_steps_per_day(
     return result
 
 
-def sum_steps(rows: list[dict[str, Any]]) -> int:
-    """Convenience: sum the steps column across a row list."""
-    return sum(int(r.get("steps", 0) or 0) for r in rows)
+def sum_active_minutes(rows: list[dict[str, Any]]) -> int:
+    """Convenience: sum the activeMinutes column across a row list."""
+    return sum(int(r.get("activeMinutes", 0) or 0) for r in rows)
 
 
 # Env-driven overrides surfaced for the handler.

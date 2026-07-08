@@ -55,8 +55,8 @@ class AlertCandidate:
     event_timestamp_iso: str
     # Rule-specific snapshot data — what the caregiver needs to understand
     # the alert. Caller-built; e.g.:
-    #   no_activity_today → {"stepsObservedBefore": 0, "lastDataReceivedAgo": "1h 23m", "checkLocalHour": 9}
-    #   below_typical     → {"stepsToday": 50, "median7Day": 200, "thresholdPct": 0.70}
+    #   no_activity_today → {"activeMinutesObservedBefore": 0, "lastDataReceivedAgo": "1h 23m", "checkLocalHour": 9}
+    #   below_typical     → {"activeMinutesToday": 50, "median7Day": 200, "thresholdPct": 0.70}
     #   device_offline    → {"lastSeenIso": "...", "hoursOffline": 3, "thresholdHours": 2}
     data: dict[str, Any] = field(default_factory=dict)
 
@@ -64,7 +64,7 @@ class AlertCandidate:
 # Default rule thresholds — overridable per config env vars in handler.py.
 # Sourced from phase-1c-slim-notifications.md §Configuration.
 
-# Below-typical: today.steps < BELOW_TYPICAL_THRESHOLD_PCT * patient.median7Day
+# Below-typical: today.activeMinutes < BELOW_TYPICAL_THRESHOLD_PCT * patient.median7Day
 DEFAULT_BELOW_TYPICAL_THRESHOLD_PCT = 0.70
 
 # Declining-trend: patient.median7Day < DECLINING_TREND_THRESHOLD_PCT * patient.medianPrior23Day

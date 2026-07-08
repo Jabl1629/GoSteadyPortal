@@ -55,30 +55,30 @@ class TestNoActivityToday(unittest.TestCase):
             **kw,
         )
 
-    def test_zero_steps_fresh_device_fires_critical(self):
+    def test_zero_active_min_fresh_device_fires_critical(self):
         cand = self._eval([], last_seen_offset=-3600)
         self.assertIsNotNone(cand)
         self.assertEqual(cand.alert_type, ALERT_NO_ACTIVITY_TODAY)
         self.assertEqual(cand.severity, SEVERITY_CRITICAL)
         self.assertEqual(cand.source, SOURCE_BEHAVIORAL)
-        self.assertEqual(cand.data["stepsObservedBefore"], 0)
+        self.assertEqual(cand.data["activeMinutesObservedBefore"], 0)
         self.assertEqual(cand.data["lastDataReceivedAgo"], "1h")
 
-    def test_zero_steps_empty_rows_list(self):
+    def test_zero_active_min_empty_rows_list(self):
         cand = self._eval([])
         self.assertIsNotNone(cand)
 
-    def test_one_step_does_not_fire(self):
-        cand = self._eval([{"steps": 1}])
+    def test_one_active_minute_does_not_fire(self):
+        cand = self._eval([{"activeMinutes": 1}])
         self.assertIsNone(cand)
 
-    def test_high_steps_does_not_fire(self):
-        cand = self._eval([{"steps": 500}, {"steps": 300}])
+    def test_high_active_min_does_not_fire(self):
+        cand = self._eval([{"activeMinutes": 60}, {"activeMinutes": 45}])
         self.assertIsNone(cand)
 
     def test_zero_total_across_multiple_rows_fires(self):
         # Edge: empty session (e.g. session that was started but had no real walking)
-        cand = self._eval([{"steps": 0}, {"steps": 0}])
+        cand = self._eval([{"activeMinutes": 0}, {"activeMinutes": 0}])
         self.assertIsNotNone(cand)
         self.assertEqual(cand.data["sessionCount"], 2)
 
@@ -125,28 +125,28 @@ class TestNoActivityToday(unittest.TestCase):
 
 class TestBelowTypical(unittest.TestCase):
 
-    def _hist(self, days: int, steps_each: int = 200) -> list[int]:
-        return [steps_each] * days
+    def _hist(self, days: int, active_min_each: int = 200) -> list[int]:
+        return [active_min_each] * days
 
     def test_today_below_threshold_fires(self):
-        # 100 steps today; median7=200; 0.70*200 = 140; 100 < 140 → fires
+        # 100 active-min today; median7=200; 0.70*200 = 140; 100 < 140 → fires
         cand = below_typical.evaluate(
-            today_steps=100,
-            history_steps_per_day=self._hist(14, 200),
+            today_active_minutes=100,
+            history_active_min_per_day=self._hist(14, 200),
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNotNone(cand)
         self.assertEqual(cand.alert_type, ALERT_BELOW_TYPICAL)
         self.assertEqual(cand.severity, SEVERITY_STANDARD)
-        self.assertEqual(cand.data["stepsToday"], 100)
+        self.assertEqual(cand.data["activeMinutesToday"], 100)
         self.assertEqual(cand.data["median7Day"], 200)
-        self.assertEqual(cand.data["thresholdSteps"], 140)
+        self.assertEqual(cand.data["thresholdActiveMin"], 140)
         self.assertAlmostEqual(cand.data["thresholdPct"], 0.70)
 
     def test_today_above_threshold_does_not_fire(self):
         cand = below_typical.evaluate(
-            today_steps=150,  # > 140
-            history_steps_per_day=self._hist(14, 200),
+            today_active_minutes=150,  # > 140
+            history_active_min_per_day=self._hist(14, 200),
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNone(cand)
@@ -154,16 +154,16 @@ class TestBelowTypical(unittest.TestCase):
     def test_today_exactly_at_threshold_does_not_fire(self):
         """Boundary: 0.70*200=140; today=140 → not below."""
         cand = below_typical.evaluate(
-            today_steps=140,
-            history_steps_per_day=self._hist(14, 200),
+            today_active_minutes=140,
+            history_active_min_per_day=self._hist(14, 200),
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNone(cand)
 
     def test_cold_start_under_min_history_does_not_fire(self):
         cand = below_typical.evaluate(
-            today_steps=0,
-            history_steps_per_day=self._hist(13, 200),
+            today_active_minutes=0,
+            history_active_min_per_day=self._hist(13, 200),
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNone(cand)
@@ -171,8 +171,8 @@ class TestBelowTypical(unittest.TestCase):
     def test_zero_median_does_not_fire(self):
         """Patient who's normally inactive — no signal to alert on."""
         cand = below_typical.evaluate(
-            today_steps=0,
-            history_steps_per_day=self._hist(14, 0),
+            today_active_minutes=0,
+            history_active_min_per_day=self._hist(14, 0),
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNone(cand)
@@ -181,8 +181,8 @@ class TestBelowTypical(unittest.TestCase):
         # 7 days of high (200), 7 days of low (50). Median7 should be 200.
         history = [50] * 7 + [200] * 7
         cand = below_typical.evaluate(
-            today_steps=100,
-            history_steps_per_day=history,
+            today_active_minutes=100,
+            history_active_min_per_day=history,
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNotNone(cand)
@@ -191,15 +191,15 @@ class TestBelowTypical(unittest.TestCase):
     def test_custom_threshold_pct(self):
         # 50% threshold: 0.50*200=100; today=99 fires, today=100 doesn't
         cand = below_typical.evaluate(
-            today_steps=99,
-            history_steps_per_day=self._hist(14, 200),
+            today_active_minutes=99,
+            history_active_min_per_day=self._hist(14, 200),
             local_now_iso=LOCAL_NOW_ISO,
             threshold_pct=0.50,
         )
         self.assertIsNotNone(cand)
         cand = below_typical.evaluate(
-            today_steps=100,
-            history_steps_per_day=self._hist(14, 200),
+            today_active_minutes=100,
+            history_active_min_per_day=self._hist(14, 200),
             local_now_iso=LOCAL_NOW_ISO,
             threshold_pct=0.50,
         )
@@ -209,16 +209,16 @@ class TestBelowTypical(unittest.TestCase):
         """Demo uses 65% (spec uses 70%). Verify both behaviors."""
         # 65% threshold: 0.65*200=130; today=129 fires
         cand = below_typical.evaluate(
-            today_steps=129,
-            history_steps_per_day=self._hist(14, 200),
+            today_active_minutes=129,
+            history_active_min_per_day=self._hist(14, 200),
             local_now_iso=LOCAL_NOW_ISO,
             threshold_pct=0.65,
         )
         self.assertIsNotNone(cand)
         # 70% threshold: 0.70*200=140; today=129 fires
         cand = below_typical.evaluate(
-            today_steps=129,
-            history_steps_per_day=self._hist(14, 200),
+            today_active_minutes=129,
+            history_active_min_per_day=self._hist(14, 200),
             local_now_iso=LOCAL_NOW_ISO,
             threshold_pct=0.70,
         )
@@ -233,11 +233,11 @@ class TestBelowTypical(unittest.TestCase):
 class TestDecliningTrend(unittest.TestCase):
 
     def test_clear_decline_fires(self):
-        # Prior 23 days: 300 steps/day. Last 7 days: 200 steps/day.
+        # Prior 23 days: 300 active-min/day. Last 7 days: 200 active-min/day.
         # median7=200; medianPrior23=300; threshold=255; 200 < 255 → fires.
         history = [300] * 23 + [200] * 7
         cand = declining_trend.evaluate(
-            history_steps_per_day=history,
+            history_active_min_per_day=history,
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNotNone(cand)
@@ -251,7 +251,7 @@ class TestDecliningTrend(unittest.TestCase):
     def test_flat_history_does_not_fire(self):
         history = [200] * 30
         cand = declining_trend.evaluate(
-            history_steps_per_day=history,
+            history_active_min_per_day=history,
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNone(cand)
@@ -259,7 +259,7 @@ class TestDecliningTrend(unittest.TestCase):
     def test_upward_trend_does_not_fire(self):
         history = [100] * 23 + [400] * 7
         cand = declining_trend.evaluate(
-            history_steps_per_day=history,
+            history_active_min_per_day=history,
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNone(cand)
@@ -269,7 +269,7 @@ class TestDecliningTrend(unittest.TestCase):
         # medianPrior23 = 200; threshold = 170; median7 = 170 → not below
         history = [200] * 23 + [170] * 7
         cand = declining_trend.evaluate(
-            history_steps_per_day=history,
+            history_active_min_per_day=history,
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNone(cand)
@@ -278,7 +278,7 @@ class TestDecliningTrend(unittest.TestCase):
         # 29 days isn't enough for the 7d-vs-prior-23d split
         history = [300] * 22 + [100] * 7
         cand = declining_trend.evaluate(
-            history_steps_per_day=history,
+            history_active_min_per_day=history,
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNone(cand)
@@ -286,7 +286,7 @@ class TestDecliningTrend(unittest.TestCase):
     def test_under_min_history_does_not_fire(self):
         history = [300] * 13
         cand = declining_trend.evaluate(
-            history_steps_per_day=history,
+            history_active_min_per_day=history,
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNone(cand)
@@ -294,7 +294,7 @@ class TestDecliningTrend(unittest.TestCase):
     def test_zero_medians_do_not_fire(self):
         history = [0] * 30
         cand = declining_trend.evaluate(
-            history_steps_per_day=history,
+            history_active_min_per_day=history,
             local_now_iso=LOCAL_NOW_ISO,
         )
         self.assertIsNone(cand)
