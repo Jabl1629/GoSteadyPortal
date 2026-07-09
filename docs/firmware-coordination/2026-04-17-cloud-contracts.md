@@ -9591,3 +9591,66 @@ to resume/finalize.)
   `GS0001000041` walker + `GS0001000043` rollator → activate → dashboard);
   (4) WS2 walker alert-rate check (pre-PROD); (5) retire legacy
   `dev.portal/d2c/` + the `--exclude "d2c/*"` guard once app.gosteady.co is live.
+
+# §C56 — [D2C] DT-5 phone-first identity: phone+email pool + claim identity-split + household_id anchor, implemented + CUT OVER to dev (2026-07-08)
+
+Implemented the "bake-in-now" identity foundation from the §C55 spec review
+(`docs/specs/d2c-phone-only-signin.md` §6-7) and **cut it over on dev**.
+
+## C56.1 — What shipped (committed: portal `08bc767` staged + `dcbf33f` cutover)
+
+- **New D2C pool (phone-first):** `signInAliases {phone, email}` — **both are
+  sign-in identifiers** (a caregiver/purchaser may use email; the walker uses
+  phone), email **optional + unverified**, `autoVerify` none, `accountRecovery`
+  none, new **`d2c-pre-signup`** Lambda (`autoConfirmUser` + `autoVerifyPhone`)
+  so **SMS-OTP is the sole factor** (no email/second code). **New pool
+  `us-east-1_gskGQvzhg` / client `4kb1reql2patil0buc1mt14vk0`** (in
+  `d2c_cognito_config.dart`). Email-code login was NOT built (would need a 2nd
+  custom-auth channel — deferred).
+- **Claim rewrite (`d2c-claim`):** **household_id anchor** —
+  `clientId = dtc_{householdId}` (fresh uuid, resolved from the existing role
+  row on re-claim for idempotency), decoupled from the Cognito sub (bake-in #3).
+  **Owner/walker identity split** — optional `caregiverSetup`/`ownerName`/
+  `walkerName`; `Patient.cognitoUserId` nullable (omitted for a caregiver-owned
+  account-less walker); `RoleAssignments.isWalkerUser = owner_is_walker`
+  (bake-in #2). Pure helpers → `claim_logic.py`, **13/13 unit tests**.
+  Masked-owner hint moved onto the device row (`ownerHint`) — the old reverse
+  lookup broke once clientId ≠ sub.
+- **Frontend phone-first:** `D2CAuthService` (phone username, optional email, no
+  email-confirm step, `refreshClaims()` via refresh token); `LiveD2CRepository
+  .claim()` **refreshes the token post-claim** so `custom:clientId` reflects the
+  new household before the dashboard reads; live screens + router drop `/confirm`
+  and sign in by phone. `dart analyze` + web build clean.
+
+## C56.2 — The cutover (a 3-step cross-stack migration, not a redeploy)
+
+CloudFormation **refuses to update `UsernameAttributes` in place** ("Updates are
+not allowed for property - UsernameAttributes") AND `GoSteady-Dev-Api` **imports
+the pool cross-stack** (`ExportsOutputRefD2CUserPool… ← GoSteady-Dev-Api`), so a
+naive redeploy can't replace it (export-in-use). Forced a replacement via a new
+construct id + a 3-step migration: **(1)** point `d2cAuthorizer` at the facility
+pool → `cdk deploy Api --exclusively` (drops the old import); **(2)** deploy
+`D2C-Auth` → old pool + exports deleted, new pool created; **(3)** revert
+`d2cAuthorizer` to the new pool → deploy `D2C-Auth` + `Api`. First naive attempt
+rolled back **clean** (no damage). **Gotcha:** `cdk deploy` runs the compiled
+`bin/gosteady.js` — must `npm run build` (tsc) BEFORE deploying or the synth uses
+stale `.js` (bit me once: it imported a not-yet-created export).
+
+**Verified:** D2C authorizer re-bound (issuer `…/us-east-1_gskGQvzhg`, audience
+`4kb1reql2patil0buc1mt14vk0`); pool `UsernameAttributes ['email','phone_number']`,
+AutoVerified none, PreSignUp wired; `/claim` + `/d2c/*` still 401 unauth. Old
+pool + its synthetic users **deleted** (pre-launch reset); GS0001000042's old
+`dtc_3448c408…` household is now orphaned (harmless dev cruft).
+
+## C56.3 — Remaining
+
+- **SMS sign-up E2E (needs a real phone — operator):** phone signup → SMS-OTP →
+  claim → dashboard, both form factors, against the staged claimable devices
+  **`GS0001000041`** (walker) / **`GS0001000043`** (rollator). This is the DT-5
+  exit check; can't be done headlessly.
+- **`GoSteady-Dev-D2CHosting`** still `CREATE_IN_PROGRESS` — ACM cert
+  `PENDING_VALIDATION` waiting on the operator's Squarespace DNS (§C55.2).
+- **Additive-later (data model now supports, no migration):** caregiver-initiated
+  claim (`caregiverSetup`), invites/members (Care Circle), subscription on the
+  household `Organizations` row (§C55 doc §7). `walkerId→claimId` rename before QR
+  stickers print (deferred).

@@ -1,6 +1,6 @@
 # D2C phone-only SMS-OTP sign-in — scoping
 
-> **Date:** 2026-07-08 | **Status:** 🔵 SCOPING (decision made; not implemented). Follow-up from **DT-4 / coord §C54.4 + §C55** — the email+SMS "double verification" gap. **Decision (2026-07-08):** move to **phone-only SMS-OTP** — phone number is the sole factor + the sign-in identifier; email becomes optional/unverified.
+> **Date:** 2026-07-08 | **Status:** 🟢 IMPLEMENTED + CUT OVER to dev (**coord §C56**). Follow-up from **DT-4 / coord §C54.4 + §C55** — the email+SMS "double verification" gap. **Decision (2026-07-08):** **phone-first SMS-OTP** with **phone + email both as sign-in identifiers** (email optional/unverified; SMS-OTP the sole factor). **New pool `us-east-1_gskGQvzhg` / client `4kb1reql2patil0buc1mt14vk0`** (the swap was a 3-step cross-stack migration — UsernameAttributes is CFN-immutable + the api-stack imports the pool; see §C56). Also shipped alongside: the claim **household_id anchor** + **owner/walker identity split** (§6-7 bake-ins). **Remaining:** the SMS sign-up E2E on a real phone (operator).
 > **Related:** [`d2c.md`](d2c.md) L5 (separate pool) · [`d2c-phase1-walker-activation.md`](d2c-phase1-walker-activation.md) §3.1 · `infra/lib/stacks/d2c-auth-stack.ts` · `lib/d2c/auth/d2c_auth_service.dart`
 
 ## 1. Why it's "double" today
