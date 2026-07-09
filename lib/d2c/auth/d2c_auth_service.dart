@@ -4,6 +4,7 @@ import 'package:amazon_cognito_identity_dart_2/cognito.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../auth/auth_service_interface.dart';
+import '../../auth/prefs_cognito_storage.dart';
 import '../../auth/user_claims.dart';
 import '../../config/d2c_cognito_config.dart';
 import '../../models/user.dart';
@@ -60,9 +61,15 @@ class D2CAuthService extends AuthServiceInterface {
 
   @override
   Future<void> init() async {
+    // Persistent (localStorage-backed) token storage so the session survives a
+    // page reload — otherwise the pool defaults to in-memory storage and every
+    // refresh forces a fresh SMS-OTP sign-in. getSession() then restores from
+    // the persisted tokens + auto-refreshes via the 30-day refresh token.
+    final prefs = await SharedPreferences.getInstance();
     _pool = CognitoUserPool(
       D2CCognitoConfig.userPoolId,
       D2CCognitoConfig.clientId,
+      storage: PrefsCognitoStorage(prefs, namespace: 'd2c_cognito'),
     );
     await _tryRestoreSession();
   }
