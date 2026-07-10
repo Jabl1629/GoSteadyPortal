@@ -9654,3 +9654,90 @@ pool + its synthetic users **deleted** (pre-launch reset); GS0001000042's old
   claim (`caregiverSetup`), invites/members (Care Circle), subscription on the
   household `Organizations` row (§C55 doc §7). `walkerId→claimId` rename before QR
   stickers print (deferred).
+
+# §C57 — [D2C] Hosted dev E2E landed; move-to-prod + demo-readiness plan (2026-07-08)
+
+Wrapping the DT-5 session: the phone-first D2C app is **hosted + working on dev**,
+and the QR/provisioning design is speced. This entry answers "what's needed for
+prod + the first real demos."
+
+## C57.1 — What's now working on DEV (demo-ready today)
+
+- **Hosted:** `https://dev.app.gosteady.co` (GoSteady-Dev-D2CHosting, CloudFront +
+  ACM, path routing). App CNAME + cert live (operator added the Squarespace DNS).
+  `deploy-d2c-app.sh` builds `main_d2c.dart` + syncs the bucket.
+- **Phone-first sign-up proven end-to-end** through the hosted app: a real phone
+  (`+1720…4566`) signed up (name + phone, no email code), SMS-OTP'd in, and
+  **claimed `GS0001000043`** (rollator). Household `dtc_51eecfe161444f009b15`
+  ≠ the Cognito sub → the **household_id anchor works**.
+- **Session persistence FIXED** (`6a0ee01`): `PrefsCognitoStorage`
+  (localStorage-backed) on the D2C pool → survives refresh + auto-refreshes via
+  the 30-day refresh token. (Facility pool still in-memory; same fix applies if
+  wanted.)
+- **Synthetic dashboard data injectable:** 13 rollator sessions written to
+  `gosteady-dev-activity` for `pat_d2c_10eafcc2ca5d49fb` (active-min/distance/gait,
+  no steps) to exercise the per-type dashboard without a physical device.
+- **QR/provisioning design speced:** `docs/specs/d2c-qr-provisioning.md`.
+
+## C57.2 — Prod is GREENFIELD (the key finding)
+
+`aws cloudformation list-stacks` → **zero `GoSteady-Prod-*` stacks**; no prod D2C
+pool; no `gosteady/prod/twilio`. So "get the rollator claim to prod" is a
+**first-ever full prod stand-up of the whole platform**, not a small delta.
+
+**Recommendation: run the first demos on DEV, not prod.** Dev is fully working
+now; a demo audience only sees the `dev.app.gosteady.co` URL + Twilio trial
+(verified numbers only). For a controlled demo (your phone / known
+Twilio-verified numbers) dev is demo-ready **today** with zero prod bring-up.
+Do the prod stand-up as the **launch** milestone, not a demo prerequisite.
+
+## C57.3 — Move-to-prod checklist (when you do it)
+
+Ordered; the **★ items are hard gates**.
+
+1. **Deploy the full stack set to prod:** `cdk deploy --context env=prod` in
+   dependency order (Security → Auth → **D2C-Auth** → Data → Processing →
+   Ingestion → Notification → **Api** → Hosting → **D2CHosting** → Integration →
+   Observability → Audit). **The prod D2C pool is a CLEAN CREATE** — no
+   email→phone migration (unlike dev's 3-step §C56.2), because no prod pool
+   exists. `config.ts` prod already carries `d2cAppDomain: app.gosteady.co` +
+   prod CORS (`https://app.gosteady.co`).
+2. **★ Frontend prod pool ids — CODE GAP.** `lib/config/d2c_cognito_config.dart`
+   **hardcodes the DEV pool/client ids** (`us-east-1_gskGQvzhg` /
+   `4kb1reql2patil0buc1mt14vk0`). A prod build would bake in the DEV pool →
+   broken auth. **Make the D2C pool id + client id `--dart-define`d**
+   (env-resolved from the D2C-Auth stack outputs, exactly like `API_BASE_URL`
+   already is in `deploy-d2c-app.sh`). **#1 pre-prod code task.**
+3. **★ Twilio prod + A2P 10DLC.** Populate `gosteady/prod/twilio`, AND register a
+   **10DLC brand + campaign** — prod SMS to real customers is NOT trial mode
+   (dev = trial = verified numbers only). External gate, days-to-weeks lead
+   (`docs/playbooks/d2c-twilio-setup.md`).
+4. **★ Prod DNS/certs at Squarespace:** `app.gosteady.co` (D2CHosting) +
+   `portal.gosteady.co` (facility, if used) — the ACM validation CNAME + the app
+   CNAME → CloudFront, same 2-record dance as `dev.app` (it HANGS the deploy until
+   the validation record is in; ~10-40 min for cert + CloudFront). Prod uses path
+   routing + the SPA rewrite (no hash).
+5. **★ A real physical rollator in prod:** prod serial + prod IoT Thing/cert (prod
+   IoT endpoint) + a `ready_to_provision` device row + a `walkerId` + a real QR,
+   and the firmware must actually activate + record sessions (the physical
+   exit-bar loop — never yet run through a real D2C claim). For a first prod demo,
+   hand-stage like dev, or use the QR pipeline once built.
+6. **★ WS2 walker alert-rate check (owed pre-PROD gate):** the DT-4 behavioral
+   re-key (steps→activeMinutes on the UNIVERSAL rules) still owes the empirical
+   walker alert-rate before/after check, else `no_activity_today` misfires
+   (phase-dt4 WS2 / d2c-phase1).
+7. **QR provisioning pipeline** for real labels: extend `internal_admin`
+   bulk-create to CSPRNG-mint the `walkerId` (today it writes none) + add a
+   QR-render step + the short-code fallback + claim-binding — `docs/specs/d2c-qr-provisioning.md`.
+   Lock the host string + route name BEFORE printing (immutable).
+8. **Data hygiene:** prod starts empty — do NOT inject synthetic activity into
+   prod (dev-only). Clean up the dev orphans (GS0001000042's old `dtc_3448c408`
+   household; the synthetic activity) when convenient.
+
+## C57.4 — For a DEV demo right now
+
+Stage a fresh claimable device (or reset one), point the demoer at
+`https://dev.app.gosteady.co/setup/{walkerId}`, sign up with a **Twilio-verified**
+phone, and inject synthetic activity for the claimed patient if you want a
+populated dashboard. `GS0001000041` (walker) is still unclaimed;
+`GS0001000043` (rollator) is claimed + has data.
