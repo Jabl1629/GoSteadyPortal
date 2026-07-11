@@ -9685,11 +9685,16 @@ prod + the first real demos."
 pool; no `gosteady/prod/twilio`. So "get the rollator claim to prod" is a
 **first-ever full prod stand-up of the whole platform**, not a small delta.
 
-**Recommendation: run the first demos on DEV, not prod.** Dev is fully working
-now; a demo audience only sees the `dev.app.gosteady.co` URL + Twilio trial
-(verified numbers only). For a controlled demo (your phone / known
-Twilio-verified numbers) dev is demo-ready **today** with zero prod bring-up.
-Do the prod stand-up as the **launch** milestone, not a demo prerequisite.
+**Recommendation (revised): go to PROD for real devices + real users.** A
+throwaway UI-only demo can run on dev, but **real rollators activated by real
+people's phones = production** — dev tables are `RemovalPolicy.DESTROY`, no PITR
+(`pitrEnabled:false`), short retention, and are wiped for test churn, so real
+users' data must NOT live there. Twilio is **already A2P-approved** (§C54,
+2026-07-06 — sends to any number, not trial), so that gate is CLEARED. The cloud
+loop is proven on dev; the genuinely new risk in prod is the **physical device
+activation loop** (a real rollator recording + uploading through a real D2C
+claim — never yet run). So: stand up prod, and the "first demo" IS the first
+real activation.
 
 ## C57.3 — Move-to-prod checklist (when you do it)
 
@@ -9708,10 +9713,10 @@ Ordered; the **★ items are hard gates**.
    broken auth. **Make the D2C pool id + client id `--dart-define`d**
    (env-resolved from the D2C-Auth stack outputs, exactly like `API_BASE_URL`
    already is in `deploy-d2c-app.sh`). **#1 pre-prod code task.**
-3. **★ Twilio prod + A2P 10DLC.** Populate `gosteady/prod/twilio`, AND register a
-   **10DLC brand + campaign** — prod SMS to real customers is NOT trial mode
-   (dev = trial = verified numbers only). External gate, days-to-weeks lead
-   (`docs/playbooks/d2c-twilio-setup.md`).
+3. **Twilio prod secret (gate CLEARED).** A2P 10DLC is **already approved**
+   (§C54, 2026-07-06) — no trial/verified-number limit, no lead time. Prod step
+   is just **populating `gosteady/prod/twilio`** with the (same, approved) creds
+   — a prod-scoped Twilio API key preferred (`docs/playbooks/d2c-twilio-setup.md`).
 4. **★ Prod DNS/certs at Squarespace:** `app.gosteady.co` (D2CHosting) +
    `portal.gosteady.co` (facility, if used) — the ACM validation CNAME + the app
    CNAME → CloudFront, same 2-record dance as `dev.app` (it HANGS the deploy until
