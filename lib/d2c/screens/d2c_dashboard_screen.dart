@@ -207,7 +207,7 @@ class _PreActivationView extends StatelessWidget {
         const Text(
           'Once the cap is clipped on and powered up, it connects on its '
           'own over cellular — no Wi-Fi or setup needed. The first check-in '
-          'usually lands within about 10 minutes.',
+          'usually lands within a few minutes.',
           textAlign: TextAlign.center,
           style: TextStyle(
             color: AppTheme.textSoft,
