@@ -49,6 +49,7 @@ case "$DEVICE_TYPE" in
 esac
 
 [[ "$SERIAL" =~ ^GS[0-9]{10}$ ]] || { echo "✘ serial must be GS + 10 digits" >&2; exit 64; }
+SERIAL_LC=$(printf '%s' "$SERIAL" | tr '[:upper:]' '[:lower:]')  # macOS bash 3.2 lacks ${x,,}
 
 echo "▸ PROD bring-up: $SERIAL  ($DEVICE_TYPE / $THING_TYPE)"
 echo "  account $ACCOUNT · $REGION · IoT $IOT_ENDPOINT"
@@ -157,10 +158,10 @@ cat <<EOF
     1. Flash Nordic at_client, then in gosteady-firmware:
          tools/flash_cert.py --serial $SERIAL      # cert+key → modem sec_tag 201
     2. Rebuild the rollator image with THIS serial baked (client_id):
-         west build -b thingy91x/nrf9151/ns -d build_rollator_${SERIAL,,} \\
+         west build -b thingy91x/nrf9151/ns -d build_rollator_${SERIAL_LC} \\
            -- -DEXTRA_CONF_FILE=prj_rollator_cloud.conf \\
               -DCONFIG_AWS_IOT_CLIENT_ID_STATIC=\"$SERIAL\"
-    3. nrfjprog -f NRF91 --program build_rollator_${SERIAL,,}/merged.hex \\
+    3. nrfjprog -f NRF91 --program build_rollator_${SERIAL_LC}/merged.hex \\
          --chiperase --verify --reset
     → device boots, connects as $SERIAL, publishes heartbeat to gs/$SERIAL/*.
 
