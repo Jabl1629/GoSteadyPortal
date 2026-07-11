@@ -548,11 +548,14 @@ export class ApiStack extends cdk.Stack {
       metricValue: '1',
       defaultValue: 0,
     });
-    const shadowLogGroup = logs.LogGroup.fromLogGroupName(
-      this, 'DeviceShadowHandlerLogRef',
-      `/aws/lambda/gosteady-${env}-device-shadow-handler`,
-    );
-    const wipeCompleteShadowMetric = shadowLogGroup.addMetricFilter('WipeCompleteShadowFilter', {
+    // Attach to the Lambda construct's OWN (LogRetention-managed) log group,
+    // not a fromLogGroupName import. The import carries no CFN dependency on
+    // the log group's creation, so on a FRESH deploy the metric filter races
+    // ahead of the LogRetention custom resource and fails "log group does not
+    // exist" (this bit the first prod stand-up, 2026-07-11). device-shadow-
+    // handler is created in THIS stack (above), so use its managed .logGroup —
+    // exactly like the sibling wipe/error filters, which deployed cleanly.
+    const wipeCompleteShadowMetric = shadowHandler.function.logGroup.addMetricFilter('WipeCompleteShadowFilter', {
       filterPattern: logs.FilterPattern.literal('{ $.event = "device.wipe_complete" }'),
       metricNamespace: `GoSteady/Audit/${env}`,
       metricName: 'DeviceWipeComplete',
