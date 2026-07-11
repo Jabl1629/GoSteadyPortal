@@ -963,6 +963,7 @@ def _action_admin_create(event: dict[str, Any], claims: dict[str, Any]) -> dict[
         raise ApiError(code="INVALID_REQUEST", message="`devices` array required", status=400)
 
     created = []
+    minted: list[dict[str, str]] = []  # {serialNumber, walkerId} per newly-created device
     now_iso = _now_iso()
     for dev in devices_in:
         serial = dev.get("serialNumber")
@@ -990,10 +991,21 @@ def _action_admin_create(event: dict[str, Any], claims: dict[str, Any]) -> dict[
                 details={"serialNumber": serial},
             )
 
+        # D2C claim anchor (QR-provisioning spec §4 — the "load-bearing" mint):
+        # every manufactured unit gets an opaque, server-minted UUIDv4 walkerId,
+        # indexed by the sparse `by-walker-id` GSI so the QR deep-link
+        # /setup/{walkerId} public-lookup resolves to the device (the sequential
+        # GS-serial stays server-side, never on the sticker). 122 bits of CSPRNG
+        # entropy ⇒ unique by construction; the serial-level attribute_not_exists
+        # put below keeps re-create idempotent, so a walkerId is never re-minted.
+        # (Printed short-code fallback + claim-binding deferred — coord §C57.)
+        walker_id = str(uuid.uuid4())
+
         item: dict[str, Any] = {
             "serialNumber": serial,
             "status": STATE_READY,
             "deviceType": device_type,
+            "walkerId": walker_id,
             "createdAt": now_iso,
             "createdBy": claims["userId"],
             "certFingerprint": dev.get("certFingerprint", ""),
@@ -1008,10 +1020,12 @@ def _action_admin_create(event: dict[str, Any], claims: dict[str, Any]) -> dict[
                 ConditionExpression="attribute_not_exists(serialNumber)",
             )
             created.append(serial)
+            minted.append({"serialNumber": serial, "walkerId": walker_id})
             actor = {"userId": claims["userId"], "role": claims["role"], "clientId": claims["clientId"]}
             audit_extra: dict[str, Any] = {
                 "certFingerprint": dev.get("certFingerprint", ""),
                 "deviceType": device_type,
+                "walkerId": walker_id,
             }
             if hardware_variant:
                 audit_extra["hardwareVariant"] = hardware_variant
@@ -1028,7 +1042,9 @@ def _action_admin_create(event: dict[str, Any], claims: dict[str, Any]) -> dict[
                 continue
             raise
 
-    return ok_response({"created": created, "skipped": len(devices_in) - len(created)})
+    return ok_response(
+        {"created": created, "skipped": len(devices_in) - len(created), "devices": minted}
+    )
 
 
 # ── Output shaping ─────────────────────────────────────────────────────
