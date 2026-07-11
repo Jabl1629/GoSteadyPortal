@@ -67,6 +67,28 @@ fi
 API_URL="${API_URL%/}"
 echo "  API_BASE_URL=$API_URL"
 
+# Resolve the D2C Cognito pool + client ids from the D2C-Auth stack the SAME way
+# we resolve the API URL — so a prod build bakes in the PROD pool, never the dev
+# ids (coord §C57.3 #2: d2c_cognito_config.dart no longer hardcodes them). The
+# outputs are D2CUserPoolId / D2CPortalClientId (infra/lib/stacks/d2c-auth-stack.ts).
+D2C_AUTH_STACK="${STACK_PREFIX}-D2C-Auth"
+echo "▸ Resolving D2C pool + client ids from ${D2C_AUTH_STACK}…"
+D2C_USER_POOL_ID=$(aws cloudformation describe-stacks --stack-name "$D2C_AUTH_STACK" --region "$REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`D2CUserPoolId`].OutputValue' \
+  --output text 2>/dev/null || true)
+D2C_CLIENT_ID=$(aws cloudformation describe-stacks --stack-name "$D2C_AUTH_STACK" --region "$REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`D2CPortalClientId`].OutputValue' \
+  --output text 2>/dev/null || true)
+if [[ -z "$D2C_USER_POOL_ID" || "$D2C_USER_POOL_ID" == "None" \
+   || -z "$D2C_CLIENT_ID"    || "$D2C_CLIENT_ID"    == "None" ]]; then
+  echo "✘ Could not resolve D2C pool/client ids from $D2C_AUTH_STACK outputs." >&2
+  echo "  Check that the D2C-Auth stack is deployed and exposes" >&2
+  echo "  D2CUserPoolId + D2CPortalClientId." >&2
+  exit 1
+fi
+echo "  D2C_USER_POOL_ID=$D2C_USER_POOL_ID"
+echo "  D2C_CLIENT_ID=$D2C_CLIENT_ID"
+
 # The D2C app serves at the domain ROOT with path-URL routing
 # (main_d2c.dart calls setPathUrlStrategy() + D2CRoutes.prefix = ''), so
 # --base-href stays "/". Deep links like /setup/<id> survive reload via the
@@ -75,6 +97,8 @@ echo "▸ Building Flutter D2C app (${TARGET}, BUILD_MODE=live, --release)…"
 flutter build web -t "$TARGET" \
   --dart-define=BUILD_MODE=live \
   --dart-define=API_BASE_URL="$API_URL" \
+  --dart-define=D2C_USER_POOL_ID="$D2C_USER_POOL_ID" \
+  --dart-define=D2C_CLIENT_ID="$D2C_CLIENT_ID" \
   --release
 
 if [[ $BUILD_ONLY -eq 1 ]]; then

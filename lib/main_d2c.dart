@@ -3,6 +3,7 @@ import 'package:url_strategy/url_strategy.dart';
 
 import 'api/api_client.dart';
 import 'auth/mock_auth_service.dart';
+import 'config/d2c_cognito_config.dart';
 import 'd2c/auth/d2c_auth_service.dart';
 import 'd2c/d2c_app.dart';
 import 'd2c/d2c_routes.dart';
@@ -37,8 +38,17 @@ Future<void> main() async {
 
   if (mode.isLive) {
     const apiBaseUrl = String.fromEnvironment('API_BASE_URL');
-    if (apiBaseUrl.isEmpty) {
-      runApp(const _MissingApiBaseUrlScreen());
+    // Every live-build config value is injected per-env via --dart-define by
+    // deploy-d2c-app.sh (resolved from the target env's stack outputs). Refuse
+    // to launch if any is missing rather than silently falling back to demo or,
+    // worse, baking in the wrong Cognito pool (coord §C57.3 #2).
+    final missing = <String>[
+      if (apiBaseUrl.isEmpty) 'API_BASE_URL',
+      if (D2CCognitoConfig.userPoolId.isEmpty) 'D2C_USER_POOL_ID',
+      if (D2CCognitoConfig.clientId.isEmpty) 'D2C_CLIENT_ID',
+    ];
+    if (missing.isNotEmpty) {
+      runApp(_MissingConfigScreen(missing: missing));
       return;
     }
     final auth = D2CAuthService.instance;
@@ -64,10 +74,15 @@ Future<void> main() async {
   }
 }
 
-/// Shown when `BUILD_MODE=live` but `API_BASE_URL` is unset — refuses to
-/// silently fall back to demo (per phase-2b-0-foundation.md D8).
-class _MissingApiBaseUrlScreen extends StatelessWidget {
-  const _MissingApiBaseUrlScreen();
+/// Shown when `BUILD_MODE=live` but one or more required `--dart-define`s are
+/// unset — refuses to silently fall back to demo or to sign in against the
+/// wrong Cognito pool (per phase-2b-0-foundation.md D8; coord §C57.3 #2).
+/// `deploy-d2c-app.sh` injects all of these, resolved from the target env's
+/// stack outputs, so this screen only appears on a misconfigured hand-build.
+class _MissingConfigScreen extends StatelessWidget {
+  const _MissingConfigScreen({required this.missing});
+
+  final List<String> missing;
 
   @override
   Widget build(BuildContext context) {
@@ -87,16 +102,22 @@ class _MissingApiBaseUrlScreen extends StatelessWidget {
                   style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 12),
-                const Text(
-                  'BUILD_MODE=live requires --dart-define=API_BASE_URL=…',
-                  style: TextStyle(fontFamily: 'monospace'),
+                Text(
+                  'BUILD_MODE=live requires --dart-define for: '
+                  '${missing.join(', ')}',
+                  style: const TextStyle(fontFamily: 'monospace'),
                 ),
                 const SizedBox(height: 16),
-                SelectableText(
+                const SelectableText(
                   'flutter run -d chrome -t lib/main_d2c.dart \\\n'
                   '  --dart-define=BUILD_MODE=live \\\n'
-                  '  --dart-define=API_BASE_URL=https://<api-gw-id>.execute-api.us-east-1.amazonaws.com',
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  '  --dart-define=API_BASE_URL=https://<api-gw-id>.execute-api.us-east-1.amazonaws.com \\\n'
+                  '  --dart-define=D2C_USER_POOL_ID=us-east-1_xxxxxxxxx \\\n'
+                  '  --dart-define=D2C_CLIENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxx\n'
+                  '\n'
+                  '(or just run ./tools/deploy-d2c-app.sh, which resolves all of\n'
+                  'these from the D2C-Auth + Api stack outputs)',
+                  style: TextStyle(fontFamily: 'monospace', fontSize: 12),
                 ),
               ],
             ),
