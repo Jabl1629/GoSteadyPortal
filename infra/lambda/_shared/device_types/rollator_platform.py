@@ -39,6 +39,12 @@ MAX_GAIT_FTS = 10
 
 REQUIRED_ACTIVITY_METRICS = ("active_min",)
 
+# Primary activity metric — the DDB activity-row COLUMN the behavioral rules key
+# on. The rollator produces no steps (wheel-vibration IMU), so activeMinutes is
+# the primary — and only — movement signal (DT-4 WS2). Stored column is
+# camelCase `activeMinutes` (payload field is `active_min`).
+PRIMARY_ACTIVITY_METRIC = "activeMinutes"
+
 # Per-type additions to the `extras` exclusion set (the handler unions these
 # with its universal envelope fields). distance_ft/gait_speed_fts are optional
 # but named so a present value lands in a column instead of `extras`.

@@ -67,6 +67,17 @@ class TestRegistry(unittest.TestCase):
         self.assertIs(device_types.resolve(None), walker_cap)
         self.assertIs(device_types.resolve(""), walker_cap)
 
+    def test_primary_activity_metric(self):
+        # DT-4 WS2: the DDB activity-row column the behavioral rules key on.
+        self.assertEqual(device_types.primary_activity_metric("walker_cap"), "steps")
+        self.assertEqual(
+            device_types.primary_activity_metric("rollator_platform"), "activeMinutes"
+        )
+        # None / empty / unknown → walker's steps (D9 default = pre-DT-4 behavior).
+        self.assertEqual(device_types.primary_activity_metric(None), "steps")
+        self.assertEqual(device_types.primary_activity_metric(""), "steps")
+        self.assertEqual(device_types.primary_activity_metric("bogus_type"), "steps")
+
     def test_resolve_unknown_defaults_to_walker(self):
         self.assertIs(device_types.resolve("hoverboard"), walker_cap)
         self.assertFalse(device_types.is_known("hoverboard"))

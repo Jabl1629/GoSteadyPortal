@@ -27,6 +27,14 @@ MAX_GAIT_FTS = 10
 
 REQUIRED_ACTIVITY_METRICS = ("steps", "distance_ft", "active_min")
 
+# Primary activity metric — the DDB activity-row COLUMN the behavioral rules key
+# on for this type (walker's hero metric). Steps is the sensitive walker movement
+# signal; keying the DT-4 universal rules on it for walkers keeps their behavior
+# identical to pre-DT-4 (WS2 no-regression). NB: the stored column is `steps`
+# (also camelCase `activeMinutes` for the other type), distinct from the payload
+# field names (`steps` / `active_min`).
+PRIMARY_ACTIVITY_METRIC = "steps"
+
 # Per-type metric fields excluded from the `extras` catch-all (the handler
 # unions these with its universal envelope field set).
 ACTIVITY_NAMED_FIELDS = frozenset(

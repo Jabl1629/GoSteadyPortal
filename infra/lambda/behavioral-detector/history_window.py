@@ -106,9 +106,10 @@ def query_activity_history(
     return res.get("Items", [])
 
 
-def aggregate_active_min_per_day(
+def aggregate_metric_per_day(
     history_rows: list[dict[str, Any]],
     *,
+    field: str = "activeMinutes",
     days: int = 30,
     tz_name: str = "UTC",
     now: datetime | None = None,
@@ -139,10 +140,10 @@ def aggregate_active_min_per_day(
         if not isinstance(date_str, str):
             continue
         try:
-            active_minutes = int(row.get("activeMinutes", 0))
+            value = int(row.get(field, 0))
         except (TypeError, ValueError):
             continue
-        by_date[date_str] = by_date.get(date_str, 0) + active_minutes
+        by_date[date_str] = by_date.get(date_str, 0) + value
     # Walk back `days` days from yesterday, oldest first.
     result: list[int] = []
     for offset in range(days, 0, -1):
@@ -151,9 +152,11 @@ def aggregate_active_min_per_day(
     return result
 
 
-def sum_active_minutes(rows: list[dict[str, Any]]) -> int:
-    """Convenience: sum the activeMinutes column across a row list."""
-    return sum(int(r.get("activeMinutes", 0) or 0) for r in rows)
+def sum_metric(rows: list[dict[str, Any]], field: str = "activeMinutes") -> int:
+    """Sum a numeric activity column across a row list. `field` is the DDB
+    activity-row column — "activeMinutes" (rollator / default) or "steps"
+    (walker primary metric — DT-4 WS2 no-regression)."""
+    return sum(int(r.get(field, 0) or 0) for r in rows)
 
 
 # Env-driven overrides surfaced for the handler.

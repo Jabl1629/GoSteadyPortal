@@ -4,13 +4,17 @@
 Triggers at facility-local 09:00 (configurable per spec D6 — gives
 breakfast/morning-activity time to land before flagging). Fires alert
 if:
-  - sum(activeMinutes) over [local-midnight, local-09:00] == 0
+  - sum(the device's PRIMARY metric) over [local-midnight, local-09:00] == 0
   - AND device lastSeen < 24h ago (device is alive but not moving;
     if it's been silent >24h, device_silent rule handles it instead)
 
-Re-keyed onto activeMinutes (DT-4 WS2): activeMinutes is the universal
-cross-type metric; steps is walker-only and a rollator produces none, so
-the steps-keyed check mis-fired CRITICAL every morning on rollators.
+Per-device-type primary metric (DT-4 WS2 no-regression): the rule keys on
+`steps` for a walker — identical to the original steps rule, so a low-mobility
+walker who took a few steps but summed < 1 active-minute does NOT trip a false
+CRITICAL — and on `activeMinutes` for a rollator, which produces no steps (the
+blunt DT-4 activeMinutes-only re-key mis-fired on exactly those low-activity
+walkers). The caller passes `metric_field` from
+device_types.primary_activity_metric.
 
 Severity: CRITICAL — the most operationally-important behavioral signal
 per user-needs US-22.
@@ -38,13 +42,14 @@ def evaluate(
     now_epoch: int,
     local_now_iso: str,
     check_local_hour: int = 9,
+    metric_field: str = "activeMinutes",
 ) -> Optional[AlertCandidate]:
     """
     Evaluate the rule against pre-resolved inputs.
 
     Args:
       activity_rows_today: Activity Series rows for the patient with
-        sessionEnd in [local-midnight, local-now]. activeMinutes summed
+        sessionEnd in [local-midnight, local-now]. `metric_field` summed
         across.
       device_last_seen_epoch: Device Registry lastSeen in epoch seconds,
         or None if never seen.
@@ -55,12 +60,19 @@ def evaluate(
       check_local_hour: the facility-local hour at which this rule fires
         (default 9, but the caller is already deciding "do we evaluate
         this rule now?" before calling — see facility_iterator).
+      metric_field: the device's PRIMARY activity column (DT-4 WS2
+        no-regression) — "steps" for a walker (identical to the pre-DT-4
+        steps rule, so a walker who took steps but summed < 1 active-minute
+        no longer trips a false CRITICAL), "activeMinutes" for a rollator
+        (which produces no steps). The caller resolves this from the device
+        type (device_types.primary_activity_metric); default keeps the
+        activeMinutes behavior for callers that don't pass it.
 
     Returns:
       AlertCandidate if rule fires; None otherwise.
     """
-    total_active_minutes = sum(int(row.get("activeMinutes", 0)) for row in activity_rows_today)
-    if total_active_minutes > 0:
+    total_primary = sum(int(row.get(metric_field, 0) or 0) for row in activity_rows_today)
+    if total_primary > 0:
         return None
 
     # If device has been silent > 24h, defer to device_silent rule.
@@ -71,13 +83,15 @@ def evaluate(
         return None
 
     last_seen_str = _format_ago(now_epoch - device_last_seen_epoch)
+    total_active_minutes = sum(int(row.get("activeMinutes", 0) or 0) for row in activity_rows_today)
     return AlertCandidate(
         alert_type=ALERT_NO_ACTIVITY_TODAY,
         severity=SEVERITY_CRITICAL,
         source=SOURCE_BEHAVIORAL,
         event_timestamp_iso=local_now_iso,
         data={
-            "activeMinutesObservedBefore": 0,
+            "metric": metric_field,
+            "activeMinutesObservedBefore": total_active_minutes,
             "lastDataReceivedAgo": last_seen_str,
             "checkLocalHour": check_local_hour,
             "sessionCount": len(activity_rows_today),

@@ -117,6 +117,38 @@ class TestNoActivityToday(unittest.TestCase):
         cand = self._eval([], check_local_hour=9)
         self.assertEqual(cand.data["checkLocalHour"], 9)
 
+    # ── DT-4 WS2 no-regression: walker keys on steps, not activeMinutes ──
+    def test_walker_steps_present_but_zero_active_min_does_not_fire(self):
+        """THE WS2 regression case: a low-mobility walker took steps but summed
+        < 1 active-minute across the day → must NOT trip a false CRITICAL
+        (identical to the pre-DT-4 steps rule)."""
+        cand = self._eval(
+            [{"steps": 30, "activeMinutes": 0}, {"steps": 25, "activeMinutes": 0}],
+            metric_field="steps",
+        )
+        self.assertIsNone(cand)
+
+    def test_walker_zero_steps_fires_and_reports_metric(self):
+        """Walker with zero steps fires (keyed on steps); payload reports the
+        metric used + the real activeMinutes observed."""
+        cand = self._eval([{"steps": 0, "activeMinutes": 4}], metric_field="steps")
+        self.assertIsNotNone(cand)
+        self.assertEqual(cand.data["metric"], "steps")
+        self.assertEqual(cand.data["activeMinutesObservedBefore"], 4)
+
+    def test_rollator_zero_active_min_fires(self):
+        """Rollator (no steps) keys on activeMinutes — unchanged DT-4 behavior."""
+        cand = self._eval([{"activeMinutes": 0}], metric_field="activeMinutes")
+        self.assertIsNotNone(cand)
+        self.assertEqual(cand.data["metric"], "activeMinutes")
+
+    def test_default_metric_is_active_minutes(self):
+        """Callers that omit metric_field keep the activeMinutes behavior:
+        activeMinutes==0 fires regardless of steps."""
+        cand = self._eval([{"steps": 100, "activeMinutes": 0}])  # no metric_field
+        self.assertIsNotNone(cand)
+        self.assertEqual(cand.data["metric"], "activeMinutes")
+
 
 # ──────────────────────────────────────────────────────────────────────
 # below_typical

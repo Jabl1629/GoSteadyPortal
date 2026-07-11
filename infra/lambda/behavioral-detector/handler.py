@@ -38,6 +38,7 @@ from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 from _shared import emit_audit, get_logger, get_metrics, resolve_patient
+from _shared.device_types import primary_activity_metric
 from _shared.pause_check import is_currently_paused
 from aws_lambda_powertools.metrics import MetricUnit
 
@@ -47,11 +48,11 @@ import patient_iterator
 from facility_iterator import FacilityContext, RuleSet, list_facilities, rule_set_for_facility
 from history_window import (
     HISTORY_DAYS,
-    aggregate_active_min_per_day,
+    aggregate_metric_per_day,
     facility_local_midnight,
     query_activity_for_today,
     query_activity_history,
-    sum_active_minutes,
+    sum_metric,
 )
 from patient_iterator import list_active_patients
 from rules import below_typical, declining_trend, device_offline, no_activity_today
@@ -345,6 +346,7 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
         device_serial: Optional[str] = None
         device_last_seen: Optional[int] = None
         device_status: str = ""
+        device_type: str = ""
         assignment = _get_active_assignment(patient["patientId"])
         if assignment:
             device_serial = assignment.get("serialNumber")
@@ -352,6 +354,11 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
                 device = _get_device(device_serial) or {}
                 device_status = str(device.get("status") or "")
                 device_last_seen = _device_last_seen_epoch(device)
+                device_type = str(device.get("deviceType") or "")
+        # DT-4 WS2: the behavioral rules key on the device's PRIMARY activity
+        # metric — steps for a walker (identical to pre-DT-4, no regression),
+        # activeMinutes for a rollator (no steps). None/unknown → walker/steps.
+        metric_field = primary_activity_metric(device_type)
 
         # ── Activity windows (only fetched when needed) ───────────
         history_rows: Optional[list[dict[str, Any]]] = None
@@ -373,7 +380,7 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
         def _today_active_minutes():
             nonlocal today_active_min_cache
             if today_active_min_cache is None:
-                today_active_min_cache = sum_active_minutes(_today_rows())
+                today_active_min_cache = sum_metric(_today_rows(), metric_field)
             return today_active_min_cache
 
         def _history_per_day():
@@ -387,8 +394,9 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
                         days=HISTORY_DAYS,
                         now=facility.local_now,
                     )
-                history_per_day = aggregate_active_min_per_day(
+                history_per_day = aggregate_metric_per_day(
                     history_rows,
+                    field=metric_field,
                     days=HISTORY_DAYS,
                     tz_name=facility.timezone,
                     now=facility.local_now,
@@ -403,6 +411,7 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
                 now_epoch=now_epoch,
                 local_now_iso=local_now_iso,
                 check_local_hour=facility_iterator.NO_ACTIVITY_LOCAL_HOUR,
+                metric_field=metric_field,
             )
             _maybe_fire(patient, cand, device_serial, summary)
 

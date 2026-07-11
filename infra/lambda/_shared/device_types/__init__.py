@@ -60,3 +60,13 @@ def resolve(device_type: str | None):
     if not device_type:
         return _REGISTRY[DEFAULT_TYPE]
     return _REGISTRY.get(device_type) or _REGISTRY[DEFAULT_TYPE]
+
+
+def primary_activity_metric(device_type: str | None) -> str:
+    """The DDB activity-row column the behavioral rules key on for `device_type`
+    (walker_cap → 'steps', rollator_platform → 'activeMinutes'). None/unknown
+    fall back to walker_cap's 'steps' (D9 legacy default), so pre-DT-0 walkers
+    keep steps-keyed behavior. This lets the DT-4 universal behavioral rules stay
+    per-type — walkers keyed on steps (pre-DT-4 behavior, no regression),
+    rollators on activeMinutes — without a hardcoded map (WS2)."""
+    return resolve(device_type).PRIMARY_ACTIVITY_METRIC
