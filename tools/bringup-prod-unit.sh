@@ -67,6 +67,20 @@ fi
 
 mkdir -p "$BUNDLE/$SERIAL"
 
+# flash_cert.py needs <bundle>/AmazonRootCA1.pem — stage it so the prod bundle is
+# flash-ready (else the firmware cert flash fails resolving the root CA). Copy
+# from the dev handoff bundle if present; otherwise warn (it's the public Amazon
+# Root CA 1 — drop it in before flashing).
+DEV_BUNDLE="$HOME/Desktop/gosteady-firmware-cert-handoff-2026-04-27"
+if [[ ! -f "$BUNDLE/AmazonRootCA1.pem" ]]; then
+  if [[ -f "$DEV_BUNDLE/AmazonRootCA1.pem" ]]; then
+    cp "$DEV_BUNDLE/AmazonRootCA1.pem" "$BUNDLE/AmazonRootCA1.pem"
+    echo "  staged AmazonRootCA1.pem into $BUNDLE/"
+  else
+    echo "  ⚠ AmazonRootCA1.pem missing from $BUNDLE — add it before flash_cert.py"
+  fi
+fi
+
 echo "▸ Minting cert + key…"
 aws iot create-keys-and-certificate --region "$REGION" --set-as-active \
   --certificate-pem-outfile "$BUNDLE/$SERIAL/$SERIAL.cert.pem" \

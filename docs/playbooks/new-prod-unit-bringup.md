@@ -88,18 +88,15 @@ prints the **firmware handoff** + the **claim URL**.
 
 ## Firmware handoff (bench — the physical half)
 
-Printed by the script; summary (see [new-dev-unit-bringup.md §3](new-dev-unit-bringup.md#phase-3--firmware-side-flash)
-for the full flash mechanics + SW2 caution):
-
-1. Flash Nordic `at_client`, then `tools/flash_cert.py --serial <SERIAL>` (cert+key →
-   modem sec_tag 201; survives chip-erase).
-2. Rebuild the rollator image with the serial baked:
-   `west build … -- -DEXTRA_CONF_FILE=prj_rollator_cloud.conf -DCONFIG_AWS_IOT_CLIENT_ID_STATIC="<SERIAL>"`.
-3. `nrfjprog -f NRF91 --program …/merged.hex --chiperase --verify --reset`.
-
-Device boots as `<SERIAL>`, publishes `gs/<SERIAL>/heartbeat` — confirm it lands in the
-prod Shadow (mirror [new-dev-unit-bringup.md §4](new-dev-unit-bringup.md#phase-4--cloud-side-verification)
-against `gosteady-prod-*` log groups / dashboards).
+**Rollator:** follow **[`rollator-firmware-flash.md`](rollator-firmware-flash.md)** —
+it covers the two decisions (which physical unit → serial; which build overlay,
+with the PREACT-validation caveat), the cert flash (with the prod-bundle root-CA
+gotcha), the serial-baked rebuild, and the prod-side first-heartbeat +
+claim→activate verification. In short: `flash_cert.py` (cert → sec_tag 201) →
+`west build … -DCONFIG_AWS_IOT_CLIENT_ID_STATIC="<SERIAL>"` → `nrfjprog … --chiperase`
+→ confirm the heartbeat lands in the prod Shadow. Walker units follow
+[new-dev-unit-bringup.md §3](new-dev-unit-bringup.md#phase-3--firmware-side-flash)
+with the prod cert bundle.
 
 ---
 
