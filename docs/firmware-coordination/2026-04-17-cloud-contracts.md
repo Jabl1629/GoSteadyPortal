@@ -9746,3 +9746,106 @@ Stage a fresh claimable device (or reset one), point the demoer at
 phone, and inject synthetic activity for the claimed patient if you want a
 populated dashboard. `GS0001000041` (walker) is still unclaimed;
 `GS0001000043` (rollator) is claimed + has data.
+
+# §C58 — [D2C] PROD stood up + first real prod activation (GS0002000001) E2E; cmd_id ack bug found+fixed; deployment build (pilot) DT-3 shake-to-activate validated (2026-07-11→12)
+
+The move-to-prod plan (§C57) executed end to end. **Prod is live, the first real
+rollator activated through a live D2C claim, and the deployment build's pre-
+activation shake-to-activate is validated on real rollator hardware.** Two firmware
+bugs surfaced + fixed along the way (the activate-ack handshake had never run
+before). Portal `816c670`→`352a5af`; firmware `0dc3523`→`3e30d25`.
+
+## C58.1 — Prod platform stood up (13 stacks, greenfield)
+
+`cdk deploy --context env=prod` — all 13 stacks CREATE_COMPLETE (**same account
+460223323193 as dev**; prod is NOT a separate account, so the IoT endpoint is
+shared). Deployed in phases to dodge two **fresh-deploy ordering traps** (dev never
+hit them — log groups always pre-existed):
+- **Observability + Audit LAST** — their metric-filters reference handler log groups
+  by name (`fromLogGroupName`, no CFN dep) that don't exist until the handler stacks
+  deploy; a single `cdk deploy --all` scheduled Observability early → rollback. Fix:
+  deploy the backend chain first, Obs/Audit after.
+- **Api metric-filter race** (`738ef66`): `WipeCompleteShadowFilter` attached to
+  device-shadow-handler's log group via `fromLogGroupName` (no dep) → raced the
+  LogRetention custom resource on a fresh deploy → "log group does not exist". Fixed
+  to use the Lambda construct's managed `.function.logGroup` (like its siblings).
+
+Code gaps closed pre-prod:
+- **`816c670`** — `d2c_cognito_config.dart` hardcoded the DEV pool ids → made them
+  `--dart-define`d (`D2C_USER_POOL_ID`/`D2C_CLIENT_ID`), resolved from the D2C-Auth
+  stack outputs in `deploy-d2c-app.sh` exactly like `API_BASE_URL`; fail-loud if
+  unset. A prod build now bakes the prod pool.
+- Prod D2C pool `us-east-1_WIWD2WXaq` / client `4m8nnnphtn6d4a8bi2m43onlpd`; prod API
+  `https://t4wm3og6u0.execute-api…`; **IoT endpoint UNCHANGED** (`a2dl73jkjzv6h5-ats…`).
+  `gosteady/prod/twilio` populated (operator). `app.gosteady.co` cert + app CNAME
+  added at Squarespace → D2C app deployed (prod pool baked, **zero dev leakage**; SPA
+  deep-links + public walkerId-lookup verified live).
+
+## C58.2 — Reusable prod bring-up + server-side walkerId mint (QR spec §4)
+
+Made prod bring-up **reusable** instead of a manual one-off:
+- **`internal_admin` bulk-create now CSPRNG-mints an opaque UUIDv4 `walkerId`** per
+  device into the `by-walker-id` GSI (the QR-provisioning spec's "load-bearing
+  change"), audited, returned as `devices:[{serialNumber,walkerId}]`. Verified on the
+  deployed prod Lambda (GSI resolves walkerId→serial).
+- **`tools/bringup-prod-unit.sh`** + **`docs/playbooks/new-prod-unit-bringup.md`** —
+  account guard, cert/Thing/prod-policy, server-side walkerId mint, QR render,
+  AmazonRootCA1 staging, firmware handoff. Prod deltas: prod IoT resources, **no
+  `activated_at` shortcut** (formal claim→activate), walkerId/QR.
+- **`docs/playbooks/rollator-firmware-flash.md`** — rollator flash playbook.
+
+## C58.3 — First real prod activation (GS0002000001) + the ack bug it surfaced
+
+`bringup-prod-unit.sh GS0002000001 rollator_platform` → fresh Thingy91X flashed
+(`prj_rollator_cloud`, serial baked, prod cert→sec_tag 201 **via `nrfutil`** —
+standalone `nrfjprog` is JLink-broken on this Mac, -256→-102, confirmed by test).
+Booted → prod AWS IoT (TLS via the prod cert) → phone claim (SMS-OTP) → activate →
+**real rollator session in prod** (active_min=1, dist=131 ft, no steps).
+
+**Then the app stalled on "getting set up"** — the **activate-ack handshake had never
+run E2E** (DT-1's ack was SIM-blocked) and had an **off-by-one cmd_id truncation**:
+- **`0dc3523`** — `MAX_CMD_ID_LEN` was 40 but `"act_<uuid>"` is 40 chars →
+  `strncpy(...,39)` dropped the last char; the persisted/echoed `last_cmd_id` (39
+  chars) never matched the cloud's 40-char cmd_id → `provisioned→active_monitoring`
+  never fired (every D2C activation would stall). Fix: `MAX_CMD_ID_LEN=41`
+  (`_reserved[15]` keeps the record 88 B), `main.c cmd_id[41]`. Verified live.
+- **`5324889`** — `handle_activate_cmd` relied on the *next hourly* heartbeat to echo
+  the ack → up to ~1 h lag on non-PREACT builds. Now gives `heartbeat_wake_sem` on
+  activate → immediate ack. (App copy `352a5af`: "~10 min"→"a few minutes".)
+
+## C58.4 — WS2 walker no-regression (per-type primary metric)
+
+The DT-4 steps→activeMinutes re-key of the 3 universal behavioral rules over-alerted
+low-mobility WALKERS. Fixed by construction (`ca6bceb`):
+`_shared/device_types.primary_activity_metric()` — walker→`steps` (= pre-DT-4, zero
+regression), rollator→`activeMinutes`; behavioral-detector keys all 3 rules on the
+device's primary metric. Deployed to prod. 46 behavioral + 96 device_types green.
+
+## C58.5 — Deployment build (pilot) + DT-3 shake-to-activate VALIDATED
+
+`prj_rollator_pilot` (`rol-0.1.0-ww`) = cloud + FIELD_MODE (dark) + LOW_POWER +
+SESSION_LED + **PREACT_LOWPOWER** (pre-activation gate). Spec:
+`docs/specs/2026-07-11-rollator-deployment-build.md` (firmware `3e30d25`). Built +
+flashed GS0002000001, then a **full deployment dry-run on real rollator hardware**:
+- **wipe** (end-assignment) → pre-activation → **flash dark pilot** → **shake** →
+  **BLUE pulse wake window** (the walker-tuned wake-on-motion threshold DOES fire on a
+  rollator shake) → **NO green pre-activation** (the pre-activation gate holds — the
+  fix for `prj_rollator_cloud` recording on any motion) → re-provision (activate cmd)
+  → **shake → green confirm → `active_monitoring`** (ack matched, near-instant).
+- DT-3's core risk (does the walker-tuned shake threshold work on a rollator) =
+  **YES** for a deliberate shake.
+
+## C58.6 — Remaining / follow-ups
+
+- **DT-3 fuller bench validation:** rolling/walking (session auto-start + whether
+  transit vibration false-triggers the wake window / transit back-off) + on-battery
+  discharge slope. Deliberate-shake threshold validated; rolling + false-trigger not.
+- **D2C wipe lifecycle edge case:** `end-assignment` (facility recycle) on a D2C
+  device left it `ready_to_provision` but **still owned** (a clean D2C reset would be
+  a *decommission* releasing the claim). Re-activation needed a re-provision, not a
+  re-claim. Worth a D2C-specific reset path.
+- **dev parity:** walkerId minting (`device-api`) + WS2 (`behavioral-detector`) are
+  prod-only; sync dev when convenient.
+- **prod hygiene:** GS0002000001 is `active_monitoring` on the pilot build (test
+  household `dtc_bc7f6e2cd956`). Clean up the test patient/session, or keep it as the
+  prod rollator test unit.

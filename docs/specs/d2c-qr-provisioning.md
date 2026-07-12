@@ -1,6 +1,6 @@
 # D2C QR / device-ID provisioning — design + recommendation
 
-> **Date:** 2026-07-08 | **Status:** 🔵 DESIGN (from a 6-agent research + options pass, coord §C56/§C57). Not implemented. Decides what each rollator's QR encodes and how labels are minted + married to units at manufacturing.
+> **Date:** 2026-07-08 (updated 2026-07-12) | **Status:** 🟡 PARTIALLY IMPLEMENTED — the load-bearing **walkerId mint moved into `internal_admin` bulk-create** (§4.2), now used by prod bring-up (coord §C58, portal `783f7fe`). Still deferred: printed short-code fallback + claim-binding (§2 #2/#3), the QR-render batch + label pipeline. Decides what each rollator's QR encodes and how labels are minted + married to units at manufacturing.
 > **Related:** [`d2c.md`](d2c.md) L6 (opaque walkerId) · [`d2c-phase1-walker-activation.md`](d2c-phase1-walker-activation.md) §2/§4/§5 · [`d2c-phone-only-signin.md`](d2c-phone-only-signin.md) §7 (caregiver bind) · coord §C56.3
 
 ## 1. How it works today (keep the encoding)
@@ -9,7 +9,7 @@ The QR encodes an **opaque, random UUIDv4 `walkerId`** in a `/setup/{id}` URL �
 
 ## 2. The gaps (what's missing for a physical fleet)
 
-1. **No minting pipeline.** `walkerId`s are hand-written UUIDs today; the QR PNG was made off-repo. The `internal_admin` bulk-create endpoint (`device-api/handler.py:~955`) writes serial/status/deviceType/certFingerprint/hardwareVariant **but no `walkerId`** — so there's no machine-guaranteed unique, auditable mint. **This is the load-bearing change.**
+1. ~~**No minting pipeline.**~~ **✅ DONE (coord §C58, `783f7fe`):** `internal_admin` bulk-create (`device-api/handler.py::_action_admin_create`) now CSPRNG-mints an opaque UUIDv4 `walkerId` per device into the sparse `by-walker-id` GSI (audited; returned as `devices:[{serialNumber,walkerId}]`; idempotent via the serial-level conditional put). `tools/bringup-prod-unit.sh` calls it (Option-A synthetic invoke) + renders the QR. Still open: the **short-code** (#2) + a batch QR-render/label step (§4).
 2. **No typed fallback code.** The shipped UI already says "check the code on your sticker" (`d2c_live_screens.dart:252`) — but no `shortCode` field exists in any schema. A scuffed QR on a curved frame + an older adult's old phone dead-ends.
 3. **Leaked-QR land-grab.** Claim has no possession proof beyond URL + phone, so a photographed sticker can be claimed by anyone before the buyer (WAF/rate-limit deferred).
 

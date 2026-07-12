@@ -67,6 +67,8 @@ Concretely: scan QR → sign up → SMS OTP → `POST /claim` → cap activates 
 
 **Launch gate (Q8):** must be live **before the first real rollator household patient** — else `no_activity_today` fires CRITICAL every morning for every rollator patient.
 
+**✅ Resolved (2026-07-12, coord §C58.4, portal `ca6bceb`) — by construction, not measurement.** No empirical walker corpus was available (only bench/synthetic data), so instead of tuning ratios: `_shared/device_types.primary_activity_metric()` keys each of the 3 universal rules on the device's PRIMARY metric — walker → `steps` (identical to pre-DT-4, **zero regression**), rollator → `activeMinutes`. The blunt "activeMinutes-for-all" re-key that this section describes is superseded. Deployed to prod; 46 behavioral + 96 device_types tests green.
+
 ---
 
 ## WS3 — SMS-OTP go-live (Twilio)
