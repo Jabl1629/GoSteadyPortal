@@ -25,40 +25,45 @@ class PhoneFormatError(ValueError):
     """Raised when a phone number cannot be normalized to E.164."""
 
 
-# Digits + a single leading "+" are meaningful; everything else
-# (spaces, dashes, dots, parens) is formatting noise.
-_NOISE_RE = re.compile(r"[\s\-\.\(\)]")
-
-
 def normalize_e164(phone: str) -> str:
     """
     Normalize user/operator phone input to E.164 (spec T6).
 
     Accepted forms (all hash-equal after normalization):
-      "+15125550100", "1 512 555 0100", "(512) 555-0100", "512-555-0100"
+      "+15125550100", "1 512 555 0100", "(512) 555-0100", "512-555-0100",
+      and — critically — "+5125550100" (a US 10-digit number typed WITH a
+      stray "+" but no country code).
 
-    Bare 10-digit and 1-prefixed 11-digit numbers are assumed US (+1) —
-    the pilot fleet is US-only. Any other country requires an explicit
-    "+<cc>". Raises PhoneFormatError on anything unparseable.
+    US-only pilot: any 10-digit number, or an 11-digit number starting with
+    1, is treated as US (+1) **regardless of a leading "+"**. This is the fix
+    for the prod incident where "+5165891580" (a US number missing its +1)
+    was trusted as country code +516 — Twilio then rejected the OTP send
+    (error 21408), and the fleet-bind vs claim hashes could disagree. Only a
+    number that is NOT US-shaped AND was typed with an explicit "+" is treated
+    as international. Raises PhoneFormatError on anything unparseable.
+
+    MUST stay behaviorally identical to the frontend `_normalizePhone`
+    (d2c_auth_service.dart) — the bind side (fleet) and the account/OTP side
+    (signup) both feed this canonical form, so a divergence re-opens the
+    mismatch this fixes.
     """
-    cleaned = _NOISE_RE.sub("", (phone or "").strip())
-    if not cleaned:
+    raw = (phone or "").strip()
+    had_plus = raw.startswith("+")
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
         raise PhoneFormatError("empty phone")
 
-    if cleaned.startswith("+"):
-        digits = cleaned[1:]
-        if not digits.isdigit() or not (8 <= len(digits) <= 15):
-            raise PhoneFormatError(f"not E.164: {len(digits)} digits after '+'")
+    # US rules win over a stray "+" (see docstring).
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
         return "+" + digits
-
-    if not cleaned.isdigit():
-        raise PhoneFormatError("phone contains non-digits")
-    if len(cleaned) == 10:
-        return "+1" + cleaned
-    if len(cleaned) == 11 and cleaned.startswith("1"):
-        return "+" + cleaned
+    # Explicit international: only when the caller actually typed "+".
+    if had_plus and 8 <= len(digits) <= 15:
+        return "+" + digits
     raise PhoneFormatError(
-        f"ambiguous {len(cleaned)}-digit number — include the country code (+…)"
+        f"ambiguous {len(digits)}-digit number — enter a 10-digit US number "
+        f"or a full +<country-code> number"
     )
 
 

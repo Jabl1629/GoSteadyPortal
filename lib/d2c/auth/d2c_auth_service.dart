@@ -351,14 +351,25 @@ class D2CAuthService extends AuthServiceInterface {
   /// E.164 normaliser: keeps a leading `+`, strips other non-digits, and
   /// prepends `+1` for a bare 10-digit US number. The pool requires a valid
   /// `phone_number` at sign-up + uses it as the sign-in identifier.
+  /// Canonicalize a typed phone to E.164. MUST match the backend
+  /// `_shared.claim_binding.normalize_e164` — the bind side (fleet) and this
+  /// signup/OTP side both feed the same canonical form, so any divergence
+  /// re-opens the claim phone-mismatch.
+  ///
+  /// US-only pilot: a 10-digit number (or 11 digits starting with 1) is US
+  /// (+1) **even when typed with a stray leading '+'**. That stray '+' is the
+  /// prod bug where "+5165891580" was read as country code +516 and Twilio
+  /// rejected the OTP; a real US number missing its +1 must still resolve to
+  /// +1…. Only a non-US-shaped number typed with '+' is treated as intl.
   String _normalizePhone(String raw) {
     final trimmed = raw.trim();
-    if (trimmed.startsWith('+')) {
-      return '+${trimmed.substring(1).replaceAll(RegExp(r'\D'), '')}';
-    }
     final digits = trimmed.replaceAll(RegExp(r'\D'), '');
     if (digits.length == 10) return '+1$digits';
-    return '+$digits';
+    if (digits.length == 11 && digits.startsWith('1')) return '+$digits';
+    if (trimmed.startsWith('+') && digits.length >= 8 && digits.length <= 15) {
+      return '+$digits';
+    }
+    return '+$digits'; // last resort — Cognito validates the final format
   }
 
   /// A throwaway password satisfying the pool policy (≥14, upper/lower/
