@@ -4,6 +4,7 @@ import { Construct } from 'constructs';
 import { GoSteadyEnvConfig } from '../config.js';
 import { PlatformHealthDashboard } from '../constructs/dashboards/platform-health.js';
 import { PerDeviceDashboard } from '../constructs/dashboards/per-device.js';
+import { FleetHealthDashboard } from '../constructs/dashboards/fleet-health.js';
 import { HandlerAlarms } from '../constructs/alarms/handler-alarms.js';
 import { InfrastructureAlarms } from '../constructs/alarms/infrastructure-alarms.js';
 import { DeviceAlarms } from '../constructs/alarms/device-alarms.js';
@@ -31,6 +32,7 @@ export interface ObservabilityStackProps extends cdk.StackProps {
 export class ObservabilityStack extends cdk.Stack {
   public readonly platformHealth: PlatformHealthDashboard;
   public readonly perDevice: PerDeviceDashboard;
+  public readonly fleetHealth: FleetHealthDashboard;
 
   constructor(scope: Construct, id: string, props: ObservabilityStackProps) {
     super(scope, id, props);
@@ -82,6 +84,12 @@ export class ObservabilityStack extends cdk.Stack {
       defaultSerial: 'GS9999999999',
     });
 
+    // ── Fleet-Health dashboard (device fleet ops tooling) ───────
+    // Passive all-device view for the pilot operator; SEARCH-based so new
+    // units appear without redeploy. Pairs with tools/fleet.py (active board
+    // + commands). Spec: docs/specs/device-fleet-ops-tooling.md.
+    this.fleetHealth = new FleetHealthDashboard(this, 'FleetHealth', { env });
+
     // ── Alarm catalog (Stage 4) ─────────────────────────────────
     // Reuse Phase 1.5's existing SNS topic (deployed by Security stack;
     // exported as `{env}-CostAlarmTopic`) — preserves the email
@@ -122,6 +130,12 @@ export class ObservabilityStack extends cdk.Stack {
         `https://console.aws.amazon.com/cloudwatch/home?region=${this.region}` +
         `#dashboards:name=gosteady-${env}-per-device`,
       exportName: `${env}-PerDeviceDashboardUrl`,
+    });
+    new cdk.CfnOutput(this, 'FleetHealthDashboardUrl', {
+      value:
+        `https://console.aws.amazon.com/cloudwatch/home?region=${this.region}` +
+        `#dashboards:name=gosteady-${env}-fleet-health`,
+      exportName: `${env}-FleetHealthDashboardUrl`,
     });
   }
 }

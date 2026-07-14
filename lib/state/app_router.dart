@@ -10,6 +10,7 @@ import '../d2c/screens/d2c_onboarding_screens.dart';
 import '../d2c/screens/d2c_state_screens.dart';
 import '../dev/me_smoke_screen.dart';
 import '../facility_demo/screens/facility_login_screen.dart';
+import '../screens/fleet_screen.dart';
 import '../screens/login_screen.dart';
 import 'build_mode.dart';
 
@@ -60,10 +61,18 @@ GoRouter buildAppRouter({
       ),
       GoRoute(
         path: '/',
-        redirect: (context, state) => '/census',
+        // Internal users have no patients/census of their own — land them on
+        // the fleet board, not the (customer-only) census, which 400s for
+        // internal-tier callers (MISSING_CLIENT_PARAM).
+        redirect: (context, state) =>
+            auth.currentUser?.isInternal == true ? '/fleet' : '/census',
       ),
       GoRoute(
         path: '/census',
+        // Guard: bounce internal users to /fleet so they never hit the
+        // customer patient-list error if they land here directly.
+        redirect: (context, state) =>
+            auth.currentUser?.isInternal == true ? '/fleet' : null,
         builder: (context, state) => facilityHomeBuilder(context),
       ),
       GoRoute(
@@ -80,6 +89,15 @@ GoRouter buildAppRouter({
         redirect: (context, state) =>
             buildMode.isLive ? null : '/not-found',
         builder: (context, state) => const MeSmokeScreen(),
+      ),
+      // Internal fleet board — internal_admin (write) + internal_support
+      // (read). Gated on the signed-in user's role (the first role-gated
+      // route in the app); the device-api enforces server-side too.
+      GoRoute(
+        path: '/fleet',
+        redirect: (context, state) =>
+            auth.currentUser?.isInternal == true ? null : '/not-found',
+        builder: (context, state) => const FleetScreen(),
       ),
       GoRoute(
         path: '/not-found',

@@ -50,8 +50,10 @@ from _shared.audit_catalog import (
     AUDIT_DEVICE_CLAIMED,
     AUDIT_DEVICE_CREATED,
     AUDIT_DEVICE_DECOMMISSIONED,
+    AUDIT_DEVICE_FLEET_READ,
     AUDIT_DEVICE_FORCE_RESET,
     AUDIT_DEVICE_OWNERSHIP_MOVED,
+    AUDIT_DEVICE_OWNERSHIP_RELEASED,
     AUDIT_DEVICE_PROVISION_ROLLBACK,
     AUDIT_DEVICE_RECOVERED,
     AUDIT_DEVICE_ACTIVATION_SENT,
@@ -215,6 +217,13 @@ def _shadow_telemetry(serial: str) -> dict[str, Any] | None:
         "watchdog_hits": "watchdogHits",
         "reset_reason": "resetReason",
         "ts": "lastSeen",
+        # Lifecycle-ack fields (fleet ops): the wipe-verified-before-reuse gate
+        # reads reported.wipe_complete; reportedActivatedAt + lastCmdId help the
+        # single-device diagnosis distinguish "cmd sent but not acked" from
+        # "acked". Additive — only present when the device has reported them.
+        "wipe_complete": "wipeComplete",
+        "activated_at": "reportedActivatedAt",
+        "last_cmd_id": "lastCmdId",
     }
     out = {camel: reported[snake] for snake, camel in field_map.items() if snake in reported}
     return out or None
@@ -800,6 +809,75 @@ def _action_recover(
                                     "owningFacilityId": device.get("owningFacilityId")}})
 
 
+def _action_release(
+    event: dict[str, Any], claims: dict[str, Any], serial: str
+) -> dict[str, Any]:
+    """
+    POST /api/v1/devices/{serial}/release — internal_admin: release ownership.
+
+    Nulls owningClientId/owningFacilityId so the device returns to the unowned
+    inventory pool and becomes claimable again by a NEW household via QR. This is
+    the explicit "un-claim" the ownership model otherwise lacks: end-assignment +
+    recycle deliberately KEEP ownership (a household doesn't lose its device by
+    pausing monitoring; a facility re-assigns internally), so rotating one
+    physical device between different D2C households needs this step (see
+    ARCHITECTURE §Ownership invariants). Heavily audited.
+
+    Precondition: the device must not be actively assigned — status ∈
+    {ready_to_provision, discontinued}. Callers wanting "end + release" end the
+    assignment first (→ discontinued), then release. The wipe-before-reuse
+    guarantee is preserved regardless: a new household can only claim once the
+    device reaches ready_to_provision, which only happens after the wipe-ack.
+    """
+    _validate_serial(serial)
+    require_role(claims, "internal_admin")
+    require_mfa(claims)
+
+    device = _get_device(serial)
+    prev_owner = device.get("owningClientId")
+    if not prev_owner:
+        raise ApiError(
+            code="NOT_OWNED",
+            message="Device has no owner to release",
+            status=409,
+            details={"serial": serial},
+        )
+    status = device.get("status", STATE_READY)
+    if status not in ("ready_to_provision", "discontinued"):
+        raise ApiError(
+            code="DEVICE_ASSIGNED",
+            message="End the assignment before releasing ownership",
+            status=409,
+            details={"currentStatus": status},
+        )
+
+    now_iso = _now_iso()
+    _devices.update_item(
+        Key={"serialNumber": serial},
+        UpdateExpression=(
+            "SET lastTransitionAt = :now REMOVE owningClientId, owningFacilityId"
+        ),
+        ExpressionAttributeValues={":now": now_iso},
+    )
+
+    actor = {"userId": claims["userId"], "role": claims["role"], "clientId": claims["clientId"]}
+    emit_audit(
+        event=AUDIT_DEVICE_OWNERSHIP_RELEASED,
+        actor=actor,
+        subject={"serialNumber": serial, "clientId": prev_owner},
+        action="update",
+        extra={
+            "previousOwningClientId": prev_owner,
+            "previousOwningFacilityId": device.get("owningFacilityId"),
+            "previousState": status,
+        },
+    )
+    return ok_response(
+        {"device": {"serialNumber": serial, "status": status,
+                    "owningClientId": None, "owningFacilityId": None}}
+    )
+
+
 def _action_force_reset(
     event: dict[str, Any], claims: dict[str, Any], serial: str
 ) -> dict[str, Any]:
@@ -1047,6 +1125,137 @@ def _action_admin_create(event: dict[str, Any], claims: dict[str, Any]) -> dict[
     )
 
 
+# ── Fleet ops (internal) ───────────────────────────────────────────────
+
+
+def _current_assignment(serial: str, device: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Active-assignment view for a device, or None.
+
+    `currentAssignmentSk` is set on provision and REMOVEd on end-assignment
+    (see _action_end_assignment), so its presence is the authoritative "has an
+    active assignment" signal — no need to scan/close-check assignment rows.
+    Best-effort: a read failure returns None rather than failing the fleet list.
+    """
+    sk = device.get("currentAssignmentSk")
+    if not sk:
+        return None
+    try:
+        res = _assignments.get_item(Key={"serialNumber": serial, "assignedAt": sk})
+    except ClientError:
+        logger.warning("fleet_assignment_read_failed", extra={"serial": serial})
+        return None
+    a = res.get("Item")
+    if not a:
+        return None
+    return {
+        "patientId": a.get("patientId"),
+        "facilityId": a.get("facilityId"),
+        "censusId": a.get("censusId"),
+        "startedAt": a.get("validFrom") or a.get("assignedAt"),
+    }
+
+
+def _fleet_row(
+    device: dict[str, Any],
+    telemetry: dict[str, Any] | None,
+    assignment: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Shape one Device Registry item (+ joined live state) into a fleet row.
+
+    Pure: all IO (Shadow get, assignment get) is done by the caller so this is
+    unit-testable. Extends _device_view's projection with the live telemetry,
+    current assignment, and the derived lifecycle flags a fleet operator needs
+    for diagnosis + readiness gates. `outstanding*Cmds` maps (cmd_id → issued_at
+    ISO) are surfaced raw so the CLI can compute "pending for Xh / stuck".
+    """
+    keep = (
+        "serialNumber", "status", "deviceType", "hardwareVariant",
+        "owningClientId", "owningFacilityId", "walkerId",
+        "activated_at", "firstHeartbeatAt", "lastTransitionAt",
+        "wipe_requested_at", "decommissionReason", "decommissionedAt",
+    )
+    row = {k: v for k, v in device.items() if k in keep}
+    # DT-0 D9: legacy records predate the attribute — read as walker_cap.
+    row.setdefault("deviceType", DEFAULT_TYPE)
+
+    outstanding_activation = device.get("outstandingActivationCmds") or {}
+    outstanding_wipe = device.get("outstandingWipeCmds") or {}
+    row["outstandingActivationCmds"] = outstanding_activation
+    row["outstandingWipeCmds"] = outstanding_wipe
+    # activationPending is only meaningful while still provisioned (stuck signal).
+    row["activationPending"] = bool(outstanding_activation) and row.get("status") == "provisioned"
+    row["wipePending"] = bool(outstanding_wipe)
+
+    if telemetry is not None:
+        row["telemetry"] = telemetry
+    if assignment is not None:
+        row["currentAssignment"] = assignment
+    return row
+
+
+def _action_fleet_list(event: dict[str, Any], claims: dict[str, Any]) -> dict[str, Any]:
+    """
+    GET /api/v1/admin/devices — internal fleet status board.
+
+    Internal-only (internal_support + internal_admin; both may VIEW the whole
+    fleet per the ARCHITECTURE authz matrix — writes stay gated per-action).
+    Scans the Device Registry (tiny at pilot scale), joins each row with its
+    live Shadow telemetry + current assignment, returns the fleet with derived
+    lifecycle flags. Powers the `fleet ls/status/check/ready` CLI; the
+    single-device diagnosis + readiness gates are derived client-side from
+    these rows. See docs/specs/device-fleet-ops-tooling.md.
+
+    Optional exact-match query filters: `?status=` and `?deviceType=` (applied
+    post-scan — the fleet is small enough that a FilterExpression buys nothing).
+    """
+    require_role(claims, "internal_support", "internal_admin")
+    require_mfa(claims)
+
+    qs = event.get("queryStringParameters") or {}
+    status_filter = qs.get("status")
+    type_filter = qs.get("deviceType")
+
+    items: list[dict[str, Any]] = []
+    scan_kwargs: dict[str, Any] = {}
+    while True:
+        res = _devices.scan(**scan_kwargs)
+        items.extend(res.get("Items", []))
+        lek = res.get("LastEvaluatedKey")
+        if not lek:
+            break
+        scan_kwargs["ExclusiveStartKey"] = lek
+
+    rows: list[dict[str, Any]] = []
+    for device in items:
+        if status_filter and device.get("status") != status_filter:
+            continue
+        if type_filter and (device.get("deviceType") or DEFAULT_TYPE) != type_filter:
+            continue
+        serial = device.get("serialNumber", "")
+        if not serial:
+            continue
+        telemetry = _shadow_telemetry(serial)
+        assignment = _current_assignment(serial, device)
+        rows.append(_fleet_row(device, telemetry, assignment))
+
+    # Stable board order: group by lifecycle status, then serial.
+    rows.sort(key=lambda r: (str(r.get("status", "")), str(r.get("serialNumber", ""))))
+
+    # Audit the cross-tenant internal read (count-only subject, no per-device
+    # PII) — mirrors patient.list.read (audit_catalog). The audit-forwarder
+    # auto-stamps internal_access + elevated severity from the actor role.
+    emit_audit(
+        event=AUDIT_DEVICE_FLEET_READ,
+        actor={"userId": claims.get("userId"), "role": claims.get("role"), "clientId": claims.get("clientId")},
+        subject={"count": len(rows)},
+        action="read",
+        extra={"statusFilter": status_filter, "deviceTypeFilter": type_filter},
+    )
+    return ok_response({"devices": rows, "count": len(rows)})
+
+
 # ── Output shaping ─────────────────────────────────────────────────────
 
 
@@ -1078,11 +1287,13 @@ def _route(api_event: dict[str, Any]) -> tuple[str, dict[str, str]]:
     # Match API Gateway routeKey patterns (e.g., "GET /api/v1/devices/{serial}")
     table = {
         ("GET", "GET /api/v1/devices/{serial}"): "get_device",
+        ("GET", "GET /api/v1/admin/devices"): "fleet_list",
         ("GET", "GET /api/v1/patients/{patientId}/devices"): "list_patient_devices",
         ("POST", "POST /api/v1/devices/{serial}/provision"): "provision",
         ("POST", "POST /api/v1/devices/{serial}/end-assignment"): "end_assignment",
         ("POST", "POST /api/v1/devices/{serial}/decommission"): "decommission",
         ("POST", "POST /api/v1/devices/{serial}/recover"): "recover",
+        ("POST", "POST /api/v1/devices/{serial}/release"): "release",
         ("POST", "POST /api/v1/devices/{serial}/force-reset"): "force_reset",
         ("POST", "POST /api/v1/devices/{serial}/move-facility"): "move_facility",
         ("POST", "POST /api/v1/devices/{serial}/move-client"): "move_client",
@@ -1122,6 +1333,8 @@ def handler(api_event: dict[str, Any], context: Any) -> dict[str, Any]:
 
         if action == "get_device":
             return _action_get_device(api_event, claims, params.get("serial", ""))
+        if action == "fleet_list":
+            return _action_fleet_list(api_event, claims)
         if action == "list_patient_devices":
             return _action_list_patient_devices(api_event, claims, params.get("patientId", ""))
         if action == "provision":
@@ -1132,6 +1345,8 @@ def handler(api_event: dict[str, Any], context: Any) -> dict[str, Any]:
             return _action_decommission(api_event, claims, params.get("serial", ""))
         if action == "recover":
             return _action_recover(api_event, claims, params.get("serial", ""))
+        if action == "release":
+            return _action_release(api_event, claims, params.get("serial", ""))
         if action == "force_reset":
             return _action_force_reset(api_event, claims, params.get("serial", ""))
         if action == "move_facility":

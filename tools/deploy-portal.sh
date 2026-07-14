@@ -66,10 +66,29 @@ fi
 API_URL="${API_URL%/}"
 echo "  API_BASE_URL=$API_URL"
 
+# Cognito pool + client for THIS env — the portal authenticates against these,
+# and the token's audience must match the same-env API authorizer. Hardcoding
+# dev values (as cognito_config.dart's defaults do) would make the prod portal
+# auth against the dev pool → users created in the prod pool can't sign in.
+AUTH_STACK="${STACK_PREFIX}-Auth"
+echo "▸ Resolving Cognito pool/client from ${AUTH_STACK}…"
+POOL_ID=$(aws cloudformation describe-stacks --stack-name "$AUTH_STACK" --region "$REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' --output text 2>/dev/null || true)
+CLIENT_ID=$(aws cloudformation describe-stacks --stack-name "$AUTH_STACK" --region "$REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' --output text 2>/dev/null || true)
+if [[ -z "$POOL_ID" || "$POOL_ID" == "None" || -z "$CLIENT_ID" || "$CLIENT_ID" == "None" ]]; then
+  echo "✘ Could not resolve UserPoolId/UserPoolClientId from $AUTH_STACK outputs." >&2
+  exit 1
+fi
+echo "  COGNITO_USER_POOL_ID=$POOL_ID"
+echo "  COGNITO_CLIENT_ID=$CLIENT_ID"
+
 echo "▸ Building Flutter portal (BUILD_MODE=live, --release)…"
 flutter build web -t lib/main.dart \
   --dart-define=BUILD_MODE=live \
   --dart-define=API_BASE_URL="$API_URL" \
+  --dart-define=COGNITO_USER_POOL_ID="$POOL_ID" \
+  --dart-define=COGNITO_CLIENT_ID="$CLIENT_ID" \
   --release
 
 if [[ $BUILD_ONLY -eq 1 ]]; then

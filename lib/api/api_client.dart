@@ -174,6 +174,81 @@ class ApiClient {
     );
   }
 
+  // ── Internal fleet ops (device-api /admin/devices + overrides) ──
+  // internal_support + internal_admin may read the fleet; writes are
+  // internal_admin (+ facility/client admins) per the device-api authz
+  // matrix. The server is the enforcement point; the UI gates for UX.
+
+  /// `GET /api/v1/admin/devices` — the whole fleet (registry + live Shadow
+  /// telemetry + current assignment + derived flags). Internal-only.
+  Future<FleetDevicesResponse> getAdminDevices({
+    String? status,
+    String? deviceType,
+  }) async {
+    final query = <String, String>{};
+    if (status != null && status.isNotEmpty) query['status'] = status;
+    if (deviceType != null && deviceType.isNotEmpty) {
+      query['deviceType'] = deviceType;
+    }
+    final body = await _get('/api/v1/admin/devices', query: query);
+    return FleetDevicesResponse.fromJson(body);
+  }
+
+  /// `POST /api/v1/devices/{serial}/force-reset` — admin override →
+  /// ready_to_provision (bypasses the wipe predicate; heavily audited).
+  /// Requires a `reason` (≥4 chars, enforced server-side).
+  Future<DeviceResponse> forceReset(String serial, String reason) async {
+    final body = await _request(
+      'POST',
+      '/api/v1/devices/$serial/force-reset',
+      body: {'reason': reason},
+    );
+    return DeviceResponse.fromJson(
+      (body['device'] as Map<String, dynamic>?) ?? const {},
+    );
+  }
+
+  /// `POST /api/v1/devices/{serial}/decommission` — retire a unit.
+  /// `reason` ∈ {lost, broken, retired, end_of_life}; `lost` is recoverable.
+  Future<DeviceResponse> decommissionDevice(String serial, String reason) async {
+    final body = await _request(
+      'POST',
+      '/api/v1/devices/$serial/decommission',
+      body: {'reason': reason},
+    );
+    return DeviceResponse.fromJson(
+      (body['device'] as Map<String, dynamic>?) ?? const {},
+    );
+  }
+
+  /// `POST /api/v1/devices/{serial}/recover` — un-retire a lost-decommissioned
+  /// unit back to ready_to_provision.
+  Future<DeviceResponse> recoverDevice(String serial) async {
+    final body = await _request(
+      'POST',
+      '/api/v1/devices/$serial/recover',
+      body: const <String, dynamic>{},
+    );
+    return DeviceResponse.fromJson(
+      (body['device'] as Map<String, dynamic>?) ?? const {},
+    );
+  }
+
+  /// `POST /api/v1/devices/{serial}/release` — internal_admin: release ownership
+  /// (owningClientId/Facility → null) so the device is claimable by a NEW
+  /// household via QR. For D2C rotation between households. Requires the device
+  /// to be unassigned (ready_to_provision / discontinued) — end first.
+  Future<DeviceResponse> releaseDevice(String serial) async {
+    final body = await _request(
+      'POST',
+      '/api/v1/devices/$serial/release',
+      body: const <String, dynamic>{},
+    );
+    return DeviceResponse.fromJson(
+      (body['device'] as Map<String, dynamic>?) ?? const {},
+    );
+  }
+
   /// `GET /api/v1/patients/{id}/devices` — the patient's monitoring-session
   /// history (every DeviceAssignments row), most-recent-first, projected by
   /// `device-api._assignment_view`. Backs the "Monitoring history" modal.

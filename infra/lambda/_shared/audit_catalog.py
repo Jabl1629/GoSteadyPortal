@@ -29,6 +29,7 @@ AUDIT_DEVICE_FORCE_RESET = "device.force_reset"
 AUDIT_DEVICE_DECOMMISSIONED = "device.decommissioned"
 AUDIT_DEVICE_RECOVERED = "device.recovered"
 AUDIT_DEVICE_OWNERSHIP_MOVED = "device.ownership_moved"
+AUDIT_DEVICE_OWNERSHIP_RELEASED = "device.ownership_released"  # internal_admin un-claim → owningClientId/Facility null; device becomes QR-claimable again (D2C rotation)
 AUDIT_DEVICE_SNIPPET_UPLOADED = "device.snippet_uploaded"
 # Phase 2A-DL additions (2026-05-17):
 AUDIT_DEVICE_PROVISION_ROLLBACK = "device.provision_rollback"  # L14 — provision rolled back on IoT publish failure
@@ -44,6 +45,8 @@ AUDIT_DEVICE_CMD_REPUBLISHED = "device.cmd_republished"  # Coordinator Lambda re
 AUDIT_DEVICE_CMD_SWEPT_STALE = "device.cmd_swept_stale"  # Coordinator Lambda removed a stale outstandingXxxCmds entry (>24h old)
 # Phase DT-0 (2026-07-01, docs/specs/phase-dt0-device-type-scaffold.md):
 AUDIT_DEVICE_TYPE_CHANGED = "device.type_changed"  # internal_admin re-typed a registry record (dev: CLI runbook; endpoint deferred to first-need)
+# Device fleet ops tooling (2026-07-12, docs/specs/device-fleet-ops-tooling.md):
+AUDIT_DEVICE_FLEET_READ = "device.fleet.read"  # internal cross-tenant fleet scan (GET /admin/devices); count-only subject, mirrors patient.list.read
 
 # ── Patient / activity / alert (Phase 1B-rev + Phase 2A) ──────────────
 AUDIT_PATIENT_ACTIVITY_CREATE = "patient.activity.create"

@@ -547,6 +547,97 @@ class DeviceResponse {
   }
 }
 
+// ── /api/v1/admin/devices (internal fleet board) ──────────────────
+
+/// One row of the internal fleet board (`GET /api/v1/admin/devices`,
+/// device-api `_fleet_row`). Registry lifecycle fields + a flattened live
+/// Shadow telemetry read + the current assignment's patient + the derived
+/// lifecycle flags a fleet operator needs. Internal-only; mirrors the
+/// `tools/fleet.py` row shape so the screen and CLI agree.
+class FleetDevice {
+  final String serialNumber;
+  final String? status;
+  final String? deviceType;
+  final String? walkerId;
+  final String? owningClientId;
+
+  // From the joined active assignment (null unless provisioned/monitoring).
+  final String? patientId;
+
+  // Flattened from the nested `telemetry` object (live Shadow read).
+  final double? batteryPct;
+  final DateTime? lastSeen;
+  final String? firmware;
+  final int? rsrpDbm;
+  final int? snrDb;
+  final String? wipeComplete; // reported.wipe_complete — the wipe-verified signal
+
+  // Derived lifecycle flags.
+  final bool activationPending;
+  final bool wipePending;
+  final String? decommissionReason;
+
+  const FleetDevice({
+    required this.serialNumber,
+    this.status,
+    this.deviceType,
+    this.walkerId,
+    this.owningClientId,
+    this.patientId,
+    this.batteryPct,
+    this.lastSeen,
+    this.firmware,
+    this.rsrpDbm,
+    this.snrDb,
+    this.wipeComplete,
+    this.activationPending = false,
+    this.wipePending = false,
+    this.decommissionReason,
+  });
+
+  factory FleetDevice.fromJson(Map<String, dynamic> json) {
+    final t = json['telemetry'] as Map<String, dynamic>?;
+    final a = json['currentAssignment'] as Map<String, dynamic>?;
+    return FleetDevice(
+      serialNumber: (json['serialNumber'] as String?) ?? '',
+      status: json['status'] as String?,
+      deviceType: (json['deviceType'] as String?) ?? 'walker_cap',
+      walkerId: json['walkerId'] as String?,
+      owningClientId: json['owningClientId'] as String?,
+      patientId: a?['patientId'] as String?,
+      batteryPct: _parseDouble(t?['batteryPct']),
+      lastSeen: _parseTs(t?['lastSeen']),
+      firmware: t?['firmware'] as String?,
+      rsrpDbm: _parseInt(t?['rsrpDbm']),
+      snrDb: _parseInt(t?['snrDb']),
+      wipeComplete: t?['wipeComplete']?.toString(),
+      activationPending: (json['activationPending'] as bool?) ?? false,
+      wipePending: (json['wipePending'] as bool?) ?? false,
+      decommissionReason: json['decommissionReason'] as String?,
+    );
+  }
+
+  /// True once the device has ever reported a Shadow (has live telemetry).
+  bool get hasConnected => lastSeen != null;
+}
+
+class FleetDevicesResponse {
+  final List<FleetDevice> devices;
+  final int count;
+
+  const FleetDevicesResponse({required this.devices, required this.count});
+
+  factory FleetDevicesResponse.fromJson(Map<String, dynamic> json) {
+    final devices = ((json['devices'] as List?) ?? const [])
+        .map((e) => FleetDevice.fromJson(e as Map<String, dynamic>))
+        .toList(growable: false);
+    return FleetDevicesResponse(
+      devices: devices,
+      count: _parseInt(json['count']) ?? devices.length,
+    );
+  }
+}
+
 // ── /api/v1/me (existing from 2B-0) ───────────────────────────────
 
 class MeResponse {

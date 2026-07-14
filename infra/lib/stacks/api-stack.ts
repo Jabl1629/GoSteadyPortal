@@ -308,12 +308,12 @@ export class ApiStack extends cdk.Stack {
     const identityKey = securityStack.identityKey;
     const auditKey = securityStack.auditKey;
 
-    // ── device-api Lambda (10 routes) ──────────────────────────────
+    // ── device-api Lambda (12 routes) ──────────────────────────────
     const deviceApi = new ProcessingLambda(this, 'DeviceApi', {
       config,
       functionName: `gosteady-${env}-device-api`,
       handlerDir: path.join(__dirname, '..', '..', 'lambda', 'device-api'),
-      description: 'Phase 2A-DL device-lifecycle handler (10 routes; state machine + audit)',
+      description: 'Phase 2A-DL device-lifecycle handler (12 routes incl. fleet-list + release; state machine + audit)',
       memoryMb: 256,
       timeoutSeconds: 15,
       powertoolsLayer,
@@ -349,11 +349,13 @@ export class ApiStack extends cdk.Stack {
     const deviceApiIntegration = new HttpLambdaIntegration('DeviceApiIntegration', deviceApi.function);
     const deviceRoutes: Array<[apigwv2.HttpMethod, string]> = [
       [apigwv2.HttpMethod.GET, '/api/v1/devices/{serial}'],
+      [apigwv2.HttpMethod.GET, '/api/v1/admin/devices'],
       [apigwv2.HttpMethod.GET, '/api/v1/patients/{patientId}/devices'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/provision'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/end-assignment'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/decommission'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/recover'],
+      [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/release'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/force-reset'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/move-facility'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/move-client'],
