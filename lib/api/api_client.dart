@@ -249,6 +249,29 @@ class ApiClient {
     );
   }
 
+  /// `POST /api/v1/devices/{serial}/claim-binding` — reserve an UNOWNED
+  /// device for a recipient's phone (claim-binding §5.3). `phone: null`
+  /// clears the binding.
+  Future<void> bindClaim(String serial, String? phone) async {
+    await _request(
+      'POST',
+      '/api/v1/devices/$serial/claim-binding',
+      body: <String, dynamic>{'phone': phone},
+    );
+  }
+
+  /// `POST /api/v1/devices/{serial}/release-and-bind` — atomic rotation
+  /// primitive (claim-binding §5.3/D8): release ownership AND bind the next
+  /// recipient in ONE conditional write, so the device is never observable
+  /// in the open-self-claim (unowned+unbound) state.
+  Future<void> releaseAndBind(String serial, String phone) async {
+    await _request(
+      'POST',
+      '/api/v1/devices/$serial/release-and-bind',
+      body: <String, dynamic>{'phone': phone},
+    );
+  }
+
   /// `GET /api/v1/patients/{id}/devices` — the patient's monitoring-session
   /// history (every DeviceAssignments row), most-recent-first, projected by
   /// `device-api._assignment_view`. Backs the "Monitoring history" modal.

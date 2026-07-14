@@ -18,6 +18,11 @@ library;
 /// leak existence (d2c.md L6), so the UI treats it the same as a dead link.
 enum PublicWalkerStatus {
   unclaimed('unclaimed'),
+
+  /// Unowned but claim-bound to a specific recipient's phone
+  /// (d2c-claim-binding.md §5.5). Claimable — but only that phone's
+  /// verified account will pass the claim check.
+  reserved('reserved'),
   claimed('claimed'),
   decommissioned('decommissioned'),
   unknown('unknown');
@@ -48,19 +53,28 @@ class PublicWalkerLookup {
   /// appropriate /setup landing copy (DT-4). Null → walker_cap (D9).
   final String? deviceType;
 
+  /// Masked intended-recipient phone (e.g. `"•••-1234"`), present only when
+  /// [status] is [PublicWalkerStatus.reserved]. Drives the "Set up this
+  /// walker for {mask}?" confirmation (claim-binding §5.5).
+  final String? recipientMask;
+
   const PublicWalkerLookup({
     required this.status,
     this.ownerMasked,
     this.deviceType,
+    this.recipientMask,
   });
 
-  bool get isClaimable => status == PublicWalkerStatus.unclaimed;
+  bool get isClaimable =>
+      status == PublicWalkerStatus.unclaimed ||
+      status == PublicWalkerStatus.reserved;
 
   factory PublicWalkerLookup.fromJson(Map<String, dynamic> json) {
     return PublicWalkerLookup(
       status: PublicWalkerStatus.fromWire(json['status']),
       ownerMasked: json['ownerMasked'] as String?,
       deviceType: json['deviceType'] as String?,
+      recipientMask: json['recipientMask'] as String?,
     );
   }
 }

@@ -123,31 +123,100 @@ class _FleetScreenState extends State<FleetScreen> {
   }
 
   Future<void> _onRelease(FleetDevice d) async {
+    // Demoted bare release (claim-binding §5.4): unowned + unbound = OPEN
+    // self-claim — the exact land-grab state the binding exists to prevent.
+    // Rotation should use _onRotate (atomic release-and-bind) instead.
     if (!await _confirm(
-        title: 'Release ownership of ${d.serialNumber}?',
-        body: 'Removes this device from its current household so a NEW household '
-            'can claim it via QR. Use to rotate a device to a different user. '
-            'Heavily audited.',
-        confirmLabel: 'Release')) return;
-    await _runAction('Released ${d.serialNumber} — now claimable by a new household',
+        title: 'Release ${d.serialNumber} with NO reservation?',
+        body: 'This device will become claimable by ANYONE with its QR '
+            '(open self-claim). To hand it to a specific next participant, '
+            'use "Rotate to next participant…" instead. Heavily audited.',
+        confirmLabel: 'Release as open')) return;
+    await _runAction(
+        'Released ${d.serialNumber} — OPEN self-claim (anyone with the QR)',
         () => _repo!.release(d.serialNumber));
   }
 
-  Future<void> _onEndAndRelease(FleetDevice d) async {
-    if (!await _confirm(
-        title: 'End + release ${d.serialNumber}?',
-        body: 'Ends the current assignment (fires the wipe), then releases ownership. '
-            'Once the device recycles, a NEW household can claim it via QR. Use to '
-            'rotate this device to a different user. Heavily audited.',
-        confirmLabel: 'End + release')) return;
-    // end → then release; the device ends up unowned + recycles to
-    // ready_to_provision on the wipe-ack, then is QR-claimable.
+  /// The §5.4 rotation flow: collect the next participant's phone FIRST,
+  /// then chain end-assignment (fires wipe) → discharge the outgoing
+  /// patient (stops the behavioral-alert tail, §5.8) → atomic
+  /// release-and-bind (§5.3/D8 — no open-claim window). The device becomes
+  /// claimable by the bound phone once the wipe-ack recycles it.
+  Future<void> _onRotate(FleetDevice d) async {
+    final assigned =
+        d.status == 'active_monitoring' || d.status == 'provisioned';
+    final outgoingPatient = d.patientId;
+    final phone = await _promptText(
+      title: 'Rotate ${d.serialNumber} to next participant',
+      label: 'next participant\'s phone',
+      hint: '+1 512 555 0100',
+      note: assigned
+          ? 'Chains: end assignment (fires wipe) → discharge the outgoing '
+              'patient → release + reserve for this phone, in one atomic '
+              'write. Claimable after the device acks the wipe '
+              '("wipe?" clears). Heavily audited.'
+          : 'Releases ownership and reserves the device for this phone in '
+              'one atomic write. Heavily audited.',
+    );
+    if (phone == null || phone.trim().isEmpty) return;
+
+    String? dischargeWarning;
     await _runAction(
-        'Ended + released ${d.serialNumber} — recycles, then claimable by a new household',
+        assigned
+            ? 'Rotated ${d.serialNumber} — reserved for the next participant; '
+                'claimable after wipe-ack'
+            : 'Rotated ${d.serialNumber} — reserved for the next participant',
         () async {
-      await _repo!.endAssignment(d.serialNumber);
-      await _repo!.release(d.serialNumber);
+      if (assigned) {
+        await _repo!.endAssignment(d.serialNumber);
+        if (outgoingPatient != null) {
+          try {
+            await _repo!.dischargePatient(outgoingPatient);
+          } catch (e) {
+            // Don't strand the rotation on the patient-side step — but the
+            // outgoing patient staying active means stale behavioral alerts
+            // keep firing at the prior participant (§5.8). Surface it.
+            dischargeWarning =
+                'Discharge of $outgoingPatient failed ($e) — discharge it '
+                'manually to stop stale alerts.';
+          }
+        }
+      }
+      await _repo!.releaseAndBind(d.serialNumber, phone.trim());
     });
+    if (dischargeWarning != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(dischargeWarning!),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppTheme.statusWarn,
+        duration: const Duration(seconds: 8),
+      ));
+    }
+  }
+
+  /// Reserve an already-unowned device for a participant (§5.3 bind).
+  Future<void> _onBind(FleetDevice d) async {
+    final phone = await _promptText(
+      title: 'Bind ${d.serialNumber} to participant',
+      label: 'participant\'s phone',
+      hint: '+1 512 555 0100',
+      note: 'Only a verified account with this phone number will be able to '
+          'claim the device. Audited.',
+    );
+    if (phone == null || phone.trim().isEmpty) return;
+    await _runAction('Bound ${d.serialNumber} — reserved for that phone',
+        () => _repo!.bindClaim(d.serialNumber, phone.trim()));
+  }
+
+  Future<void> _onClearBinding(FleetDevice d) async {
+    if (!await _confirm(
+        title: 'Clear the reservation on ${d.serialNumber}?',
+        body: 'Removes the ${d.claimBoundPhoneMask ?? 'bound phone'} '
+            'reservation. The device becomes claimable by ANYONE with its '
+            'QR (open self-claim). Audited.',
+        confirmLabel: 'Clear reservation')) return;
+    await _runAction('Cleared reservation on ${d.serialNumber} — now OPEN',
+        () => _repo!.bindClaim(d.serialNumber, null));
   }
 
   @override
@@ -198,7 +267,9 @@ class _FleetScreenState extends State<FleetScreen> {
             onDecommission: _onDecommission,
             onRecover: _onRecover,
             onRelease: _onRelease,
-            onEndAndRelease: _onEndAndRelease,
+            onRotate: _onRotate,
+            onBind: _onBind,
+            onClearBinding: _onClearBinding,
           );
         },
       ),
@@ -331,7 +402,7 @@ class _FleetTable extends StatelessWidget {
   final List<FleetDevice> devices;
   final bool canWrite;
   final _DeviceAction onProvision, onEnd, onReset, onDecommission, onRecover,
-      onRelease, onEndAndRelease;
+      onRelease, onRotate, onBind, onClearBinding;
 
   const _FleetTable({
     required this.devices,
@@ -342,7 +413,9 @@ class _FleetTable extends StatelessWidget {
     required this.onDecommission,
     required this.onRecover,
     required this.onRelease,
-    required this.onEndAndRelease,
+    required this.onRotate,
+    required this.onBind,
+    required this.onClearBinding,
   });
 
   @override
@@ -369,7 +442,9 @@ class _FleetTable extends StatelessWidget {
               onDecommission: onDecommission,
               onRecover: onRecover,
               onRelease: onRelease,
-              onEndAndRelease: onEndAndRelease,
+              onRotate: onRotate,
+              onBind: onBind,
+              onClearBinding: onClearBinding,
             ),
           ],
         ),
@@ -432,7 +507,7 @@ class _DataRow extends StatelessWidget {
   final FleetDevice device;
   final bool canWrite;
   final _DeviceAction onProvision, onEnd, onReset, onDecommission, onRecover,
-      onRelease, onEndAndRelease;
+      onRelease, onRotate, onBind, onClearBinding;
 
   const _DataRow({
     required this.device,
@@ -443,7 +518,9 @@ class _DataRow extends StatelessWidget {
     required this.onDecommission,
     required this.onRecover,
     required this.onRelease,
-    required this.onEndAndRelease,
+    required this.onRotate,
+    required this.onBind,
+    required this.onClearBinding,
   });
 
   @override
@@ -504,9 +581,11 @@ class _DataRow extends StatelessWidget {
       return Text('—', style: TextStyle(color: AppTheme.textSoft));
     }
     final assigned = d.status == 'active_monitoring' || d.status == 'provisioned';
-    // Owned but not actively assigned → can release ownership directly.
+    // Owned but not actively assigned → rotation is release-and-bind only.
     final ownedUnassigned = d.owningClientId != null &&
         (d.status == 'ready_to_provision' || d.status == 'discontinued');
+    final unowned = d.owningClientId == null && d.status != 'decommissioned';
+    final bound = d.claimBoundPhoneMask != null;
     final primary = _primaryButton(d);
     return Row(children: [
       if (primary != null) primary,
@@ -517,7 +596,9 @@ class _DataRow extends StatelessWidget {
           switch (v) {
             case 'provision': onProvision(d); break;
             case 'end': onEnd(d); break;
-            case 'end_release': onEndAndRelease(d); break;
+            case 'rotate': onRotate(d); break;
+            case 'bind': onBind(d); break;
+            case 'clear_binding': onClearBinding(d); break;
             case 'release': onRelease(d); break;
             case 'reset': onReset(d); break;
             case 'decommission': onDecommission(d); break;
@@ -527,14 +608,23 @@ class _DataRow extends StatelessWidget {
         itemBuilder: (_) => [
           const PopupMenuItem(value: 'provision', child: Text('Provision…')),
           const PopupMenuItem(value: 'end', child: Text('End assignment')),
-          // Rotation: end+release (assigned) or release (owned+idle) → returns
-          // the device to the unowned pool so a new household can claim it.
-          if (assigned)
+          // Rotation (claim-binding §5.4): phone collected FIRST, then
+          // end → discharge → atomic release-and-bind. The device is never
+          // observable as open self-claim.
+          if (assigned || ownedUnassigned)
             const PopupMenuItem(
-                value: 'end_release', child: Text('End + release (rotate)…')),
+                value: 'rotate',
+                child: Text('Rotate to next participant…')),
+          if (unowned && !bound)
+            const PopupMenuItem(
+                value: 'bind', child: Text('Bind to participant…')),
+          if (unowned && bound)
+            const PopupMenuItem(
+                value: 'clear_binding', child: Text('Clear reservation…')),
+          // Demoted: bare release = open self-claim (warned in the dialog).
           if (ownedUnassigned)
             const PopupMenuItem(
-                value: 'release', child: Text('Release ownership (rotate)…')),
+                value: 'release', child: Text('Release as open (no reservation)…')),
           const PopupMenuItem(value: 'reset', child: Text('Force-reset…')),
           const PopupMenuItem(value: 'recover', child: Text('Recover')),
           const PopupMenuDivider(),
@@ -578,12 +668,21 @@ class _StatusCell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Claim-binding row states (§5.4): the operator must always see which
+    // devices are reserved for whom, which are still wipe-pending, and
+    // which are OPEN self-claim (unowned + unbound — claimable by anyone).
+    final open = d.owningClientId == null &&
+        d.claimBoundPhoneMask == null &&
+        (d.status == 'ready_to_provision' || d.status == 'discontinued');
     return Wrap(
       spacing: 6,
       runSpacing: 4,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         _pill(_statusLabel(d.status), _statusColor(d.status)),
+        if (d.claimBoundPhoneMask != null)
+          _pill('reserved ${d.claimBoundPhoneMask}', AppTheme.sage),
+        if (open) _pill('open (unbound)', AppTheme.statusWarn, subtle: true),
         if (d.wipePending) _pill('wipe?', AppTheme.statusWarn, subtle: true),
         if (d.activationPending)
           _pill('activating', AppTheme.statusWarn, subtle: true),

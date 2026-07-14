@@ -49,7 +49,7 @@ class ResolveHousehold(unittest.TestCase):
 class ResolveIdentity(unittest.TestCase):
     def test_solo_self_claim_owner_is_walker(self):
         owner, walker, owner_is_walker = resolve_identity(
-            {"displayName": "Grandma Sue"}, {"raw": {"name": "Grandma Sue"}})
+            {"displayName": "Grandma Sue"}, {"name": "Grandma Sue"})
         self.assertTrue(owner_is_walker)
         self.assertEqual(owner, "Grandma Sue")
         self.assertEqual(walker, "Grandma Sue")
@@ -57,20 +57,20 @@ class ResolveIdentity(unittest.TestCase):
     def test_caregiver_setup_splits_owner_and_walker(self):
         owner, walker, owner_is_walker = resolve_identity(
             {"caregiverSetup": True, "ownerName": "Kate (daughter)", "walkerName": "Mom"},
-            {"raw": {"name": "Kate"}})
+            {"name": "Kate"})
         self.assertFalse(owner_is_walker)
         self.assertEqual(owner, "Kate (daughter)")
         self.assertEqual(walker, "Mom")
 
     def test_caregiver_setup_defaults_walker_name(self):
         owner, walker, owner_is_walker = resolve_identity(
-            {"caregiverSetup": True}, {"raw": {"name": "Kate"}})
+            {"caregiverSetup": True}, {"name": "Kate"})
         self.assertFalse(owner_is_walker)
         self.assertEqual(owner, "Kate")
         self.assertEqual(walker, "Walker user")
 
     def test_falls_back_to_jwt_name(self):
-        owner, walker, owner_is_walker = resolve_identity({}, {"raw": {"name": "Pat"}})
+        owner, walker, owner_is_walker = resolve_identity({}, {"name": "Pat"})
         self.assertEqual(owner, "Pat")
         self.assertEqual(walker, "Pat")
         self.assertTrue(owner_is_walker)

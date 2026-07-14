@@ -206,17 +206,34 @@ class _D2CSetupLandingScreenState extends State<D2CSetupLandingScreen> {
                 lookup.deviceType == 'rollator_platform' ? 'rollator' : 'walker';
             switch (lookup.status) {
               case PublicWalkerStatus.unclaimed:
+              case PublicWalkerStatus.reserved:
+                // Reserved (claim-binding §5.5): the device is held for a
+                // specific phone. Show WHO it's for + an explicit question,
+                // so a claim is never silent — the button IS the confirm.
+                final reserved =
+                    lookup.status == PublicWalkerStatus.reserved;
+                final mask = lookup.recipientMask ?? '';
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     _Message(
-                      icon: Icons.check_circle_outline,
-                      text: 'This $noun is ready to set up.',
+                      icon: reserved
+                          ? Icons.phone_iphone
+                          : Icons.check_circle_outline,
+                      text: reserved
+                          ? (mask.isEmpty
+                              ? 'This $noun is reserved. Set it up with the '
+                                  'phone number it was registered for?'
+                              : 'Set up this $noun for the phone ending in '
+                                  '$mask? You\'ll verify that number by text.')
+                          : 'This $noun is ready to set up.',
                     ),
                     const SizedBox(height: 20),
                     if (widget.signedIn)
                       _PrimaryButton(
-                        label: 'Claim this $noun',
+                        label: reserved
+                            ? 'Yes — set up this $noun'
+                            : 'Claim this $noun',
                         busy: _claiming,
                         onPressed: _claimNow,
                       )

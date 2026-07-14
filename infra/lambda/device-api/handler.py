@@ -47,6 +47,8 @@ from _shared.api_error import ApiError, error_response, ok_response
 from _shared.audit_catalog import (
     AUDIT_DEVICE_ASSIGNED,
     AUDIT_DEVICE_ASSIGNMENT_ENDED,
+    AUDIT_DEVICE_CLAIM_BINDING_CLEARED,
+    AUDIT_DEVICE_CLAIM_BOUND,
     AUDIT_DEVICE_CLAIMED,
     AUDIT_DEVICE_CREATED,
     AUDIT_DEVICE_DECOMMISSIONED,
@@ -58,6 +60,13 @@ from _shared.audit_catalog import (
     AUDIT_DEVICE_RECOVERED,
     AUDIT_DEVICE_ACTIVATION_SENT,
     AUDIT_DEVICE_WIPE_REQUESTED,
+)
+from _shared.claim_binding import (
+    PhoneFormatError,
+    get_pepper,
+    hmac_phone,
+    mask_phone,
+    normalize_e164,
 )
 from _shared.device_types import DEFAULT_TYPE, KNOWN_DEVICE_TYPES
 from _shared.observability import emit_audit, get_logger
@@ -384,6 +393,22 @@ def _action_provision(
             status=403,
         )
 
+    # §5.9 (spec D12): a bound unowned device is RESERVED for a pending D2C
+    # claim — the facility provision-by-serial path must not capture it (the
+    # GS0000000001 incident class). Applies to internal_admin too: the
+    # override is to explicitly clear the binding first (audited), not to
+    # provision through it.
+    if not existing_owner and device.get("claimBoundPhone"):
+        raise ApiError(
+            code="DEVICE_RESERVED",
+            message=(
+                "Device is reserved for a pending claim. Clear its claim "
+                "binding first if you really mean to provision it."
+            ),
+            status=409,
+            details={"claimBoundPhoneMask": device.get("claimBoundPhoneMask")},
+        )
+
     is_first_provision = not existing_owner
 
     cmd_id = f"act_{uuid.uuid4()}"
@@ -423,22 +448,37 @@ def _action_provision(
             ":sk": now_iso,
             ":now": now_iso,
         }
+        condition = "#status = :ready"
         if is_first_provision:
             update_expr_parts.extend(["owningClientId = :oc", "owningFacilityId = :of"])
             attr_values[":oc"] = target_client_id
             attr_values[":of"] = target_facility_id
+            # §5.9 race guard: a bind landing between the pre-check above and
+            # this write must win — never silently capture a just-reserved
+            # device.
+            condition += " AND attribute_not_exists(claimBoundPhone)"
 
         _devices.update_item(
             Key={"serialNumber": serial},
             UpdateExpression="SET " + ", ".join(update_expr_parts),
-            ConditionExpression="#status = :ready",
+            ConditionExpression=condition,
             ExpressionAttributeNames=attr_names,
             ExpressionAttributeValues=attr_values,
         )
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            # Lost the race; reread to give the caller a useful currentStatus
+            # Lost the race; reread to distinguish reserved from mid-cycle.
             fresh = _get_device(serial)
+            if not fresh.get("owningClientId") and fresh.get("claimBoundPhone"):
+                raise ApiError(
+                    code="DEVICE_RESERVED",
+                    message=(
+                        "Device is reserved for a pending claim. Clear its "
+                        "claim binding first if you really mean to provision it."
+                    ),
+                    status=409,
+                    details={"claimBoundPhoneMask": fresh.get("claimBoundPhoneMask")},
+                )
             raise ApiError(
                 code="DEVICE_UNAVAILABLE",
                 message="Device just provisioned by another user — refresh and try again",
@@ -852,10 +892,15 @@ def _action_release(
         )
 
     now_iso = _now_iso()
+    # ownerHint is the PRIOR household's masked contact — stale after release;
+    # remove it alongside ownership so it can never be served for the next
+    # owner. NOTE (§5.4): a bare release leaves the device OPEN self-claim
+    # (unowned + unbound). The fleet UI warns before offering it; rotation
+    # flows should use release-and-bind below instead.
     _devices.update_item(
         Key={"serialNumber": serial},
         UpdateExpression=(
-            "SET lastTransitionAt = :now REMOVE owningClientId, owningFacilityId"
+            "SET lastTransitionAt = :now REMOVE owningClientId, owningFacilityId, ownerHint"
         ),
         ExpressionAttributeValues={":now": now_iso},
     )
@@ -875,6 +920,182 @@ def _action_release(
     return ok_response(
         {"device": {"serialNumber": serial, "status": status,
                     "owningClientId": None, "owningFacilityId": None}}
+    )
+
+
+def _normalized_binding_from_body(body: dict[str, Any]) -> tuple[str, str]:
+    """Validate + normalize body['phone'] → (hmac_hex, mask). 400 on garbage."""
+    phone = body.get("phone")
+    if not phone or not isinstance(phone, str):
+        raise ApiError(code="INVALID_REQUEST", message="`phone` required", status=400)
+    try:
+        e164 = normalize_e164(phone)
+    except PhoneFormatError as exc:
+        raise ApiError(
+            code="INVALID_REQUEST",
+            message=f"Phone not understood: {exc}",
+            status=400,
+        )
+    return hmac_phone(get_pepper(), e164), mask_phone(e164)
+
+
+def _action_claim_binding(
+    event: dict[str, Any], claims: dict[str, Any], serial: str
+) -> dict[str, Any]:
+    """
+    POST /api/v1/devices/{serial}/claim-binding  { "phone": "+1512…" | null }
+
+    The operator/fulfillment setter for `claimBoundPhone` (spec §5.3 — the
+    exact path the order pipeline will call later). Stores the peppered HMAC
+    + display mask; never the raw phone. Precondition for SETTING: device is
+    UNOWNED (D4 — bind fresh/released stock; an owned device 409s: release
+    first, or use release-and-bind). `phone: null` clears unconditionally.
+    """
+    _validate_serial(serial)
+    require_role(claims, "internal_admin")
+    require_mfa(claims)
+
+    body = _parse_body(event)
+    device = _get_device(serial)
+    actor = {"userId": claims["userId"], "role": claims["role"], "clientId": claims["clientId"]}
+    now_iso = _now_iso()
+
+    if body.get("phone") is None:
+        _devices.update_item(
+            Key={"serialNumber": serial},
+            UpdateExpression="SET lastTransitionAt = :now REMOVE claimBoundPhone, claimBoundPhoneMask",
+            ExpressionAttributeValues={":now": now_iso},
+        )
+        emit_audit(
+            event=AUDIT_DEVICE_CLAIM_BINDING_CLEARED,
+            actor=actor,
+            subject={"serialNumber": serial},
+            action="update",
+            extra={"previousMask": device.get("claimBoundPhoneMask")},
+        )
+        return ok_response(
+            {"device": {"serialNumber": serial, "claimBinding": "cleared"}}
+        )
+
+    bound_hash, bound_mask = _normalized_binding_from_body(body)
+    try:
+        _devices.update_item(
+            Key={"serialNumber": serial},
+            UpdateExpression=(
+                "SET claimBoundPhone = :h, claimBoundPhoneMask = :m, lastTransitionAt = :now"
+            ),
+            ConditionExpression="attribute_not_exists(owningClientId)",
+            ExpressionAttributeValues={":h": bound_hash, ":m": bound_mask, ":now": now_iso},
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise ApiError(
+                code="DEVICE_OWNED",
+                message="Device is owned — release it first (or use release-and-bind)",
+                status=409,
+                details={"owningClientId": device.get("owningClientId")},
+            )
+        raise
+
+    emit_audit(
+        event=AUDIT_DEVICE_CLAIM_BOUND,
+        actor=actor,
+        subject={"serialNumber": serial},
+        action="update",
+        extra={"maskedPhone": bound_mask},
+    )
+    return ok_response(
+        {"device": {"serialNumber": serial, "claimBinding": "set",
+                    "claimBoundPhoneMask": bound_mask}}
+    )
+
+
+def _action_release_and_bind(
+    event: dict[str, Any], claims: dict[str, Any], serial: str
+) -> dict[str, Any]:
+    """
+    POST /api/v1/devices/{serial}/release-and-bind  { "phone": "+1512…" }
+
+    Rotation primitive (spec §5.3 / D8): release ownership AND bind the next
+    recipient in ONE conditional write, so there is no observable
+    unowned-and-unbound window (the open-self-claim race v1's
+    release→prompt→bind ordering created). Condition: currently owned AND
+    status ∈ {ready_to_provision, discontinued} (same lifecycle rule as
+    release — an assigned device must be end-assignmented first).
+    """
+    _validate_serial(serial)
+    require_role(claims, "internal_admin")
+    require_mfa(claims)
+
+    body = _parse_body(event)
+    bound_hash, bound_mask = _normalized_binding_from_body(body)
+
+    device = _get_device(serial)
+    prev_owner = device.get("owningClientId")
+    prev_facility = device.get("owningFacilityId")
+    prev_status = device.get("status", STATE_READY)
+    now_iso = _now_iso()
+
+    try:
+        _devices.update_item(
+            Key={"serialNumber": serial},
+            UpdateExpression=(
+                "SET claimBoundPhone = :h, claimBoundPhoneMask = :m, lastTransitionAt = :now "
+                "REMOVE owningClientId, owningFacilityId, ownerHint"
+            ),
+            ConditionExpression=(
+                "attribute_exists(owningClientId) AND #status IN (:ready, :disc)"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":h": bound_hash,
+                ":m": bound_mask,
+                ":now": now_iso,
+                ":ready": "ready_to_provision",
+                ":disc": "discontinued",
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            fresh = _get_device(serial)
+            if not fresh.get("owningClientId"):
+                raise ApiError(
+                    code="NOT_OWNED",
+                    message="Device has no owner — use claim-binding to bind it",
+                    status=409,
+                )
+            raise ApiError(
+                code="DEVICE_ASSIGNED",
+                message="End the assignment before rotating ownership",
+                status=409,
+                details={"currentStatus": fresh.get("status")},
+            )
+        raise
+
+    actor = {"userId": claims["userId"], "role": claims["role"], "clientId": claims["clientId"]}
+    emit_audit(
+        event=AUDIT_DEVICE_OWNERSHIP_RELEASED,
+        actor=actor,
+        subject={"serialNumber": serial, "clientId": prev_owner},
+        action="update",
+        extra={
+            "previousOwningClientId": prev_owner,
+            "previousOwningFacilityId": prev_facility,
+            "previousState": prev_status,
+            "atomicRebind": True,
+        },
+    )
+    emit_audit(
+        event=AUDIT_DEVICE_CLAIM_BOUND,
+        actor=actor,
+        subject={"serialNumber": serial},
+        action="update",
+        extra={"maskedPhone": bound_mask, "atomicRebind": True},
+    )
+    return ok_response(
+        {"device": {"serialNumber": serial, "status": prev_status,
+                    "owningClientId": None, "owningFacilityId": None,
+                    "claimBinding": "set", "claimBoundPhoneMask": bound_mask}}
     )
 
 
@@ -1175,6 +1396,9 @@ def _fleet_row(
         "owningClientId", "owningFacilityId", "walkerId",
         "activated_at", "firstHeartbeatAt", "lastTransitionAt",
         "wipe_requested_at", "decommissionReason", "decommissionedAt",
+        # §5.4: the fleet row shows which devices are reserved for whom —
+        # the stored display mask only, never the HMAC.
+        "claimBoundPhoneMask",
     )
     row = {k: v for k, v in device.items() if k in keep}
     # DT-0 D9: legacy records predate the attribute — read as walker_cap.
@@ -1265,7 +1489,7 @@ def _device_view(item: dict[str, Any]) -> dict[str, Any]:
         "serialNumber", "status", "owningClientId", "owningFacilityId",
         "decommissionReason", "decommissionedAt", "decommissionedBy",
         "firmwareVersion", "activated_at", "firstHeartbeatAt", "lastTransitionAt",
-        "deviceType", "hardwareVariant",
+        "deviceType", "hardwareVariant", "claimBoundPhoneMask",
     )
     view = {k: v for k, v in item.items() if k in keep}
     # DT-0 D9: legacy records predate the attribute — read as walker_cap.
@@ -1294,6 +1518,8 @@ def _route(api_event: dict[str, Any]) -> tuple[str, dict[str, str]]:
         ("POST", "POST /api/v1/devices/{serial}/decommission"): "decommission",
         ("POST", "POST /api/v1/devices/{serial}/recover"): "recover",
         ("POST", "POST /api/v1/devices/{serial}/release"): "release",
+        ("POST", "POST /api/v1/devices/{serial}/claim-binding"): "claim_binding",
+        ("POST", "POST /api/v1/devices/{serial}/release-and-bind"): "release_and_bind",
         ("POST", "POST /api/v1/devices/{serial}/force-reset"): "force_reset",
         ("POST", "POST /api/v1/devices/{serial}/move-facility"): "move_facility",
         ("POST", "POST /api/v1/devices/{serial}/move-client"): "move_client",
@@ -1347,6 +1573,10 @@ def handler(api_event: dict[str, Any], context: Any) -> dict[str, Any]:
             return _action_recover(api_event, claims, params.get("serial", ""))
         if action == "release":
             return _action_release(api_event, claims, params.get("serial", ""))
+        if action == "claim_binding":
+            return _action_claim_binding(api_event, claims, params.get("serial", ""))
+        if action == "release_and_bind":
+            return _action_release_and_bind(api_event, claims, params.get("serial", ""))
         if action == "force_reset":
             return _action_force_reset(api_event, claims, params.get("serial", ""))
         if action == "move_facility":

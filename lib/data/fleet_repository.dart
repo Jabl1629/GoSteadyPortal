@@ -18,7 +18,21 @@ abstract class FleetRepository {
   Future<void> recover(String serial);
 
   /// Release ownership → device is claimable by a new household (D2C rotation).
+  /// NOTE: a bare release leaves the device OPEN self-claim (unowned+unbound);
+  /// rotation flows should use [releaseAndBind] instead (claim-binding §5.4).
   Future<void> release(String serial);
+
+  /// Reserve an UNOWNED device for a recipient phone (claim-binding §5.3).
+  /// `phone: null` clears the binding.
+  Future<void> bindClaim(String serial, String? phone);
+
+  /// Atomic release + bind-to-next-recipient — the rotation primitive
+  /// (claim-binding §5.3/D8). Requires owned + unassigned.
+  Future<void> releaseAndBind(String serial, String phone);
+
+  /// Discharge the outgoing household's patient at rotation (claim-binding
+  /// §5.8/D13) — stops behavioral alerts firing at the prior participant.
+  Future<void> dischargePatient(String patientId);
 }
 
 /// Live impl over the authenticated [ApiClient].
@@ -50,6 +64,18 @@ class LiveFleetRepository implements FleetRepository {
 
   @override
   Future<void> release(String serial) => _api.releaseDevice(serial);
+
+  @override
+  Future<void> bindClaim(String serial, String? phone) =>
+      _api.bindClaim(serial, phone);
+
+  @override
+  Future<void> releaseAndBind(String serial, String phone) =>
+      _api.releaseAndBind(serial, phone);
+
+  @override
+  Future<void> dischargePatient(String patientId) =>
+      _api.dischargePatient(patientId, reason: 'rotation');
 }
 
 /// In-memory mock for demo mode (no backend). Holds a small fleet and applies
@@ -195,5 +221,45 @@ class MockFleetRepository implements FleetRepository {
       batteryPct: d.batteryPct, lastSeen: d.lastSeen, firmware: d.firmware,
       rsrpDbm: d.rsrpDbm, snrDb: d.snrDb, wipeComplete: d.wipeComplete,
     ));
+  }
+
+  @override
+  Future<void> bindClaim(String serial, String? phone) async {
+    final d = _base(serial);
+    _replace(serial, FleetDevice(
+      serialNumber: d.serialNumber, status: d.status,
+      deviceType: d.deviceType, walkerId: d.walkerId,
+      owningClientId: d.owningClientId, patientId: d.patientId,
+      batteryPct: d.batteryPct, lastSeen: d.lastSeen, firmware: d.firmware,
+      rsrpDbm: d.rsrpDbm, snrDb: d.snrDb, wipeComplete: d.wipeComplete,
+      wipePending: d.wipePending,
+      claimBoundPhoneMask: phone == null ? null : _mask(phone),
+    ));
+  }
+
+  static String _mask(String phone) {
+    final digits = phone.replaceAll(RegExp(r'\D'), '');
+    return '•••-${digits.substring(digits.length >= 4 ? digits.length - 4 : 0)}';
+  }
+
+  @override
+  Future<void> releaseAndBind(String serial, String phone) async {
+    final d = _base(serial);
+    _replace(serial, FleetDevice(
+      serialNumber: d.serialNumber, status: d.status,
+      deviceType: d.deviceType, walkerId: d.walkerId,
+      owningClientId: null, // released…
+      batteryPct: d.batteryPct, lastSeen: d.lastSeen, firmware: d.firmware,
+      rsrpDbm: d.rsrpDbm, snrDb: d.snrDb, wipeComplete: d.wipeComplete,
+      wipePending: d.wipePending,
+      // …and reserved for the next participant in the same gesture.
+      claimBoundPhoneMask: _mask(phone),
+    ));
+  }
+
+  @override
+  Future<void> dischargePatient(String patientId) async {
+    // Demo mode: nothing to update on the device row — the patient
+    // linkage clears via endAssignment.
   }
 }

@@ -184,6 +184,20 @@ export class D2CAuthStack extends cdk.Stack {
         requireSymbols: true,
       },
       mfa: cognito.Mfa.OFF, // SMS-OTP custom auth IS the factor; no separate MFA
+      // Claim-binding hardening (d2c-claim-binding.md §5.10 / D11) — why
+      // there is deliberately NO pool-level guard on phone_number updates:
+      //   1. writeAttributes exclusion is invalid — Cognito requires
+      //      required-at-signup attributes (phone is required AND the
+      //      sign-up username) to be client-writable.
+      //   2. keepOriginal ({attributesRequireVerificationBeforeUpdate})
+      //      is invalid on THIS pool — Cognito requires the attribute in
+      //      AutoVerifiedAttributes, and autoVerify is intentionally OFF
+      //      (no pool SMS sender; Twilio lives in custom-auth). Deploy-
+      //      verified 2026-07-14 (D2C-Auth rollback).
+      // The operative defense is the claim handler's FAIL-CLOSED
+      // phone_number_verified check (§5.2c): a self-service phone flip
+      // yields phone_number_verified=false → every bound claim 403s —
+      // and it breaks the flipper's own phone-alias sign-in besides.
       lambdaTriggers: {
         preSignUp: preSignUpLambda, // auto-confirm + auto-verify phone (no code)
         defineAuthChallenge: customAuthLambda,

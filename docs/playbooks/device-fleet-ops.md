@@ -8,6 +8,11 @@
 > `fleet.py` calls the **audited `device-api` endpoints** — it never writes
 > DDB/IoT directly, so every action lands in the audit trail and respects the
 > lifecycle state machine.
+>
+> **Rotating units between demo/pilot participants?** See the dedicated
+> [`d2c-demo-rotation.md`](d2c-demo-rotation.md) playbook — it covers reserving
+> each unit to its participant's phone (`fleet bind` / `rotate`) so a claim
+> always lands on the intended person.
 
 ---
 

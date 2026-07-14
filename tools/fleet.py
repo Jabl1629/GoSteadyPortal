@@ -626,10 +626,78 @@ def cmd_end(client: _Client, args: argparse.Namespace) -> int:
 
 
 def cmd_release(client: _Client, args: argparse.Namespace) -> int:
-    _confirm("release ownership of", args.serial, hard=False, assume_yes=args.yes)
+    # A bare release leaves the device OPEN self-claim (unowned + unbound) —
+    # claimable by ANYONE with the QR. Rotation should use `rotate` instead.
+    _confirm("release (OPEN — no reservation) ownership of", args.serial,
+             hard=False, assume_yes=args.yes)
     client.request("POST", f"/api/v1/devices/{args.serial}/release", {})
-    print(f"✓ released ownership of {args.serial} — now claimable by a new household via QR")
+    print(f"⚠ released {args.serial} as OPEN self-claim — anyone with the QR can "
+          f"claim it. Use `fleet bind {args.serial} --phone …` to reserve it, or "
+          f"`fleet rotate` next time.")
     return 0
+
+
+def cmd_bind(client: _Client, args: argparse.Namespace) -> int:
+    """Reserve an UNOWNED device for a participant's phone (claim-binding §5.3)."""
+    phone = None if args.clear else args.phone
+    client.request("POST", f"/api/v1/devices/{args.serial}/claim-binding",
+                   {"phone": phone})
+    if args.clear:
+        print(f"✓ cleared reservation on {args.serial} — now OPEN self-claim")
+    else:
+        print(f"✓ reserved {args.serial} for {_mask_phone(phone)} — only that "
+              f"phone's verified account can claim it")
+    return 0
+
+
+def cmd_rotate(client: _Client, args: argparse.Namespace) -> int:
+    """
+    Hand a device to the next participant (claim-binding §5.4). Chains, in order:
+      end-assignment (fires wipe) → [discharge outgoing patient] → atomic
+      release-and-bind to the next phone. The device is never observable as
+      open self-claim, and becomes claimable by the bound phone once it acks
+      the wipe (watch `fleet ready {serial}` / the "wipe?" flag clears).
+    """
+    _confirm(f"rotate {args.serial} to {_mask_phone(args.phone)}",
+             args.serial, hard=False, assume_yes=args.yes)
+    # 1. Is it currently assigned? Snapshot the device first.
+    dev = client.request("GET", f"/api/v1/devices/{args.serial}", None).get("device", {})
+    status = dev.get("status")
+    assigned = status in ("provisioned", "active_monitoring")
+    if assigned:
+        res = client.request("POST", f"/api/v1/devices/{args.serial}/end-assignment",
+                             {"reason": "rotation"})
+        wipe = (res.get("wipe") or {})
+        print(f"  • ended assignment → discontinued; wipe {wipe.get('wipe_id','?')} sent")
+        # 2. Discharge the outgoing patient so stale behavioral alerts stop
+        #    firing at the prior participant (§5.8). Best-effort.
+        if args.patient:
+            try:
+                client.request("POST", f"/api/v1/patients/{args.patient}/discharge",
+                               {"reason": "rotation"})
+                print(f"  • discharged outgoing patient {args.patient}")
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ could not discharge {args.patient} ({e}) — discharge it "
+                      f"manually to stop stale alerts")
+        else:
+            print("  ⚠ no --patient given: the outgoing patient stays ACTIVE and may "
+                  "keep firing alerts. Pass --patient <id> (see `fleet status`).")
+    # 3. Atomic release-and-bind (release accepts discontinued).
+    client.request("POST", f"/api/v1/devices/{args.serial}/release-and-bind",
+                   {"phone": args.phone})
+    print(f"✓ rotated {args.serial} → reserved for {_mask_phone(args.phone)}.")
+    if assigned:
+        print(f"  Claimable once it acks the wipe — check `fleet ready {args.serial}`.")
+    else:
+        print("  Claimable now (device was already idle).")
+    return 0
+
+
+def _mask_phone(phone: "str | None") -> str:
+    if not phone:
+        return "(cleared)"
+    digits = "".join(c for c in phone if c.isdigit())
+    return "•••-" + digits[-4:] if len(digits) >= 4 else phone
 
 
 def cmd_reset(client: _Client, args: argparse.Namespace) -> int:
@@ -706,10 +774,26 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_end)
 
-    s = sub.add_parser("release", help="release ownership → device claimable by a new household")
+    s = sub.add_parser("release",
+                       help="release ownership as OPEN self-claim (anyone can claim — prefer `rotate`)")
     s.add_argument("serial")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_release)
+
+    s = sub.add_parser("bind",
+                       help="reserve an UNOWNED device for a participant's phone")
+    s.add_argument("serial")
+    s.add_argument("--phone", help="recipient phone (E.164, e.g. +15125550100)")
+    s.add_argument("--clear", action="store_true", help="clear the reservation instead")
+    s.set_defaults(fn=cmd_bind)
+
+    s = sub.add_parser("rotate",
+                       help="hand a device to the next participant (end→discharge→release+bind, atomic)")
+    s.add_argument("serial")
+    s.add_argument("--phone", required=True, help="next participant phone (E.164)")
+    s.add_argument("--patient", help="outgoing patientId to discharge (from `fleet status`)")
+    s.add_argument("--yes", action="store_true")
+    s.set_defaults(fn=cmd_rotate)
 
     s = sub.add_parser("reset", help="force-reset a stuck device (admin override)")
     s.add_argument("serial")

@@ -47,6 +47,12 @@ from _shared.audit_catalog import (
     AUDIT_DEVICE_CLAIMED,
     AUDIT_DEVICE_PROVISION_ROLLBACK,
 )
+from _shared.claim_binding import (
+    PhoneFormatError,
+    get_pepper,
+    hmac_phone,
+    normalize_e164,
+)
 from _shared.device_types import DEFAULT_TYPE as DEFAULT_DEVICE_TYPE
 from _shared.observability import emit_audit, get_logger
 
@@ -78,6 +84,9 @@ STATE_DECOMMISSIONED = "decommissioned"
 # a shared module for a Phase-1 feature).
 AUDIT_D2C_HOUSEHOLD_CREATED = "d2c.household_created"
 AUDIT_D2C_DEVICE_CLAIMED = "d2c.device_claimed"
+# Claim-binding rejections (spec §7): count-only, never the raw phone.
+AUDIT_D2C_CLAIM_REJECTED_PHONE_MISMATCH = "d2c.claim_rejected_phone_mismatch"
+AUDIT_D2C_CLAIM_REJECTED_DEVICE_OWNED = "d2c.claim_rejected_device_owned"
 
 # Pure claim helpers (household anchor + identity split + contact masking) live
 # in claim_logic.py so they're unit-testable without boto3/powertools.
@@ -129,25 +138,72 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
 
     # Idempotent: if this user's household already owns it, return the patient.
     if device.get("owningClientId") == client_id:
-        existing = _patient_for_client(client_id)
+        existing = _active_patient_for_client(client_id) or _patient_for_client(client_id)
         if existing:
             return ok_response({"patient": _patient_view(existing), "alreadyClaimed": True})
+
+    # §5.2b ownership gate (spec D6): a device owned by ANOTHER household is
+    # never claimable, regardless of lifecycle status. The normal post-recycle
+    # state is ready_to_provision WITH ownership retained (DL4/L2), so without
+    # this gate a missed `release` would let a new household claim into a
+    # split-ownership state. Release is mandatory-by-mechanism.
+    owning = device.get("owningClientId")
+    if owning and owning != client_id:
+        emit_audit(event=AUDIT_D2C_CLAIM_REJECTED_DEVICE_OWNED,
+                   actor={"userId": sub, "role": "household_owner", "clientId": client_id},
+                   subject={"serialNumber": serial},
+                   action="event",
+                   extra={"currentStatus": status},
+                   request_id=_request_id(event))
+        raise ApiError(code="DEVICE_OWNED",
+                       message="This walker isn't available. Contact support.",
+                       status=409)
 
     if status == STATE_DECOMMISSIONED:
         raise ApiError(code="DEVICE_DECOMMISSIONED",
                        message="This device is no longer active", status=409)
     if status != STATE_READY:
-        # Owned by someone else / mid-cycle → pre-claim race.
+        # Mid-cycle (e.g. discontinued awaiting wipe-ack) → not claimable yet.
         raise ApiError(code="DEVICE_UNAVAILABLE",
                        message="This device is already set up", status=409)
+
+    # §5.2c binding check (spec D11): fail CLOSED. If the device is bound,
+    # the caller must present a present-and-VERIFIED phone_number whose
+    # peppered HMAC matches. Missing / unverified / malformed / mismatched
+    # all return the same neutral 403 (no oracle); audit distinguishes.
+    bound_hash = device.get("claimBoundPhone")
+    if bound_hash:
+        reject_reason = None
+        phone = claims.get("phoneNumber") or ""
+        if not phone:
+            reject_reason = "phone_absent"
+        elif not claims.get("phoneNumberVerified"):
+            reject_reason = "phone_unverified"
+        else:
+            try:
+                caller_hash = hmac_phone(get_pepper(), normalize_e164(phone))
+            except PhoneFormatError:
+                reject_reason = "phone_invalid_format"
+            else:
+                if caller_hash != bound_hash:
+                    reject_reason = "phone_mismatch"
+        if reject_reason:
+            emit_audit(event=AUDIT_D2C_CLAIM_REJECTED_PHONE_MISMATCH,
+                       actor={"userId": sub, "role": "household_owner", "clientId": client_id},
+                       subject={"serialNumber": serial},
+                       action="event",
+                       extra={"reason": reject_reason},
+                       request_id=_request_id(event))
+            raise ApiError(code="CLAIM_PHONE_MISMATCH",
+                           message="This walker is reserved for a different phone number.",
+                           status=403)
 
     # Identity split (bake-in #2): owner (this Cognito user) and walker (the
     # Patient) are the same for solo self-claim (default) but MAY differ when a
     # caregiver sets up for someone else. Phase-1 UI does solo only; the data
     # writes support the split so the caregiver flow is additive later.
     owner_name, walker_name, owner_is_walker = resolve_identity(body, claims)
-    raw = claims.get("raw", {}) or {}
-    owner_hint = mask_contact(phone=raw.get("phone_number", ""),
+    owner_hint = mask_contact(phone=claims.get("phoneNumber", ""),
                               email=claims.get("email", ""))
 
     facility_id = f"fac_{household_id[:12]}"
@@ -158,29 +214,40 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
     # 1. Household (Organizations): client + synthetic facility + census.
     _ensure_household(client_id, facility_id, census_id, owner_name)
 
-    # 2. Patient row (the walker). `cognitoUserId` is set ONLY when the owner
-    #    IS the walker (solo); a caregiver-owned walker is account-less (the
-    #    key is omitted — Patients.cognitoUserId is optional by design).
-    patient_id = f"pat_d2c_{uuid.uuid4().hex[:16]}"
+    # 2. Patient row (the walker). §5.7 dedupe (spec T8): a returning user's
+    #    household may already hold an ACTIVE walker patient (e.g. they claim
+    #    a second device, or an operator skipped the rotation discharge). In
+    #    that case REUSE it — never mint a duplicate active patient in the
+    #    household (V1 shape: 1 household = 1 active walker patient).
+    #    `cognitoUserId` is set ONLY when the owner IS the walker (solo); a
+    #    caregiver-owned walker is account-less (the key is omitted —
+    #    Patients.cognitoUserId is optional by design).
     now_iso = _now_iso()
-    patient_item = {
-        "patientId": patient_id,
-        "clientId": client_id,
-        "facilityId": facility_id,
-        "censusId": census_id,
-        "displayName": walker_name,
-        "status": "active",
-        # by-client-status + by-census-status GSI sort key. MUST be
-        # `<status>_<patientId>` (underscore) to match the readers'
-        # `begins_with("active_")` filter — the DT-4 WS4 fix (§C41.3).
-        "status_patientId": f"active_{patient_id}",
-        "isWalkerUser": True,
-        "createdAt": now_iso,
-        "createdBy": sub,
-    }
-    if owner_is_walker:
-        patient_item["cognitoUserId"] = sub
-    _patients.put_item(Item=patient_item)
+    existing_active = _active_patient_for_client(client_id)
+    created_patient = existing_active is None
+    if existing_active:
+        patient_item = existing_active
+        patient_id = existing_active["patientId"]
+    else:
+        patient_id = f"pat_d2c_{uuid.uuid4().hex[:16]}"
+        patient_item = {
+            "patientId": patient_id,
+            "clientId": client_id,
+            "facilityId": facility_id,
+            "censusId": census_id,
+            "displayName": walker_name,
+            "status": "active",
+            # by-client-status + by-census-status GSI sort key. MUST be
+            # `<status>_<patientId>` (underscore) to match the readers'
+            # `begins_with("active_")` filter — the DT-4 WS4 fix (§C41.3).
+            "status_patientId": f"active_{patient_id}",
+            "isWalkerUser": True,
+            "createdAt": now_iso,
+            "createdBy": sub,
+        }
+        if owner_is_walker:
+            patient_item["cognitoUserId"] = sub
+        _patients.put_item(Item=patient_item)
 
     # 3. RoleAssignments row (household Admin). `isWalkerUser` marks whether
     #    THIS account user is the walker (true=solo, false=caregiver). scoped*
@@ -194,14 +261,15 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
         "role_userId": f"household_owner#{sub}",
         "isWalkerUser": owner_is_walker,
         "email": claims.get("email", ""),
-        "phone": raw.get("phone_number", ""),
+        "phone": claims.get("phoneNumber", ""),
         "validFrom": now_iso,
         "assignedBy": sub,
     })
 
     # 4. Provision the device (inline chain). On failure, roll back the
-    #    patient row so a retry starts clean (household + roleassignment
-    #    are idempotent so they're safe to leave).
+    #    patient row IF this claim created it (a reused pre-existing active
+    #    patient must survive — §5.7); household + roleassignment are
+    #    idempotent so they're safe to leave.
     try:
         _provision_inline(
             serial=serial,
@@ -214,11 +282,12 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
             owner_hint=owner_hint,
         )
     except ApiError:
-        try:
-            _patients.delete_item(Key={"patientId": patient_id})
-        except ClientError:
-            logger.exception("rollback_patient_delete_failed",
-                             extra={"patientId": patient_id})
+        if created_patient:
+            try:
+                _patients.delete_item(Key={"patientId": patient_id})
+            except ClientError:
+                logger.exception("rollback_patient_delete_failed",
+                                 extra={"patientId": patient_id})
         raise
 
     emit_audit(event=AUDIT_D2C_HOUSEHOLD_CREATED, actor=actor,
@@ -247,15 +316,31 @@ def _public_lookup(event: dict[str, Any]) -> dict[str, Any]:
     status = device.get("status", STATE_READY)
     if status == STATE_DECOMMISSIONED:
         return ok_response({"status": "decommissioned", "deviceType": device_type})
-    if status == STATE_READY and not device.get("owningClientId"):
-        return ok_response({"status": "unclaimed", "deviceType": device_type})
-    return ok_response(
-        {
-            "status": "claimed",
-            "deviceType": device_type,
-            "ownerMasked": _masked_owner(device),
-        }
-    )
+    if device.get("owningClientId"):
+        # Owned (any lifecycle state) → claimed, with the owner's masked hint.
+        return ok_response(
+            {
+                "status": "claimed",
+                "deviceType": device_type,
+                "ownerMasked": _masked_owner(device),
+            }
+        )
+    # Unowned + bound → "reserved" (§5.5): the /setup landing renders
+    # "Set up this walker for {recipientMask}?" pre-claim. The masked tail
+    # is exposed to anyone holding the walkerId — accepted tradeoff (D9).
+    if device.get("claimBoundPhone"):
+        return ok_response(
+            {
+                "status": "reserved",
+                "deviceType": device_type,
+                "recipientMask": device.get("claimBoundPhoneMask") or "",
+            }
+        )
+    # Unowned + unbound. Includes a mid-rotation released-but-still-wiping
+    # device (discontinued): render as unclaimed — claim itself still 409s
+    # until wipe-ack recycles it to ready. (Previously this fell into the
+    # "claimed" branch and served the PRIOR owner's stale hint.)
+    return ok_response({"status": "unclaimed", "deviceType": device_type})
 
 
 # ── Inline provision chain (Option B — mirrors device-api/patient-mgmt) ─
@@ -280,6 +365,14 @@ def _provision_inline(
     is_first_provision = not device.get("owningClientId")
     cmd_id = f"act_{uuid.uuid4()}"
     now_iso = _now_iso()
+    # §5.2d (spec D10): the binding clear rides INSIDE the step-1b conditional
+    # write (atomic with the ownership snap) and is restored by the rollback,
+    # so a step-2/3 failure can never burn the binding into open self-claim.
+    prior_binding = (
+        (device.get("claimBoundPhone"), device.get("claimBoundPhoneMask"))
+        if device.get("claimBoundPhone")
+        else None
+    )
 
     # Step 1a: ensure outstandingActivationCmds map exists.
     _devices.update_item(
@@ -311,11 +404,21 @@ def _provision_inline(
         attr_values[":of"] = facility_id
         attr_values[":oh"] = owner_hint
 
+    # The binding this claim was checked against must be UNCHANGED at write
+    # time (a concurrent re-bind between check and write must lose, not be
+    # silently cleared); an unbound device must still be unbound.
+    if prior_binding:
+        binding_cond = " AND claimBoundPhone = :boundv"
+        attr_values[":boundv"] = prior_binding[0]
+    else:
+        binding_cond = " AND attribute_not_exists(claimBoundPhone)"
+
     try:
         _devices.update_item(
             Key={"serialNumber": serial},
-            UpdateExpression="SET " + ", ".join(set_parts),
-            ConditionExpression="#status = :ready",
+            UpdateExpression="SET " + ", ".join(set_parts)
+            + " REMOVE claimBoundPhone, claimBoundPhoneMask",
+            ConditionExpression="#status = :ready" + binding_cond,
             ExpressionAttributeNames=attr_names,
             ExpressionAttributeValues=attr_values,
         )
@@ -346,7 +449,7 @@ def _provision_inline(
             "assignedBy": actor["userId"],
         })
     except ClientError:
-        _rollback_device_step1(serial, cmd_id, is_first_provision)
+        _rollback_device_step1(serial, cmd_id, is_first_provision, prior_binding)
         emit_audit(event=AUDIT_DEVICE_PROVISION_ROLLBACK, actor=actor,
                    subject={"serialNumber": serial, "patientId": patient_id, "clientId": client_id},
                    action="create", extra={"reason": "assignments_put_failed", "cmd_id": cmd_id})
@@ -360,7 +463,7 @@ def _provision_inline(
         shadow_payload = json.dumps({"state": {"desired": {"activated_at": now_iso}}})
         iot_data.update_thing_shadow(thingName=serial, payload=shadow_payload.encode())
     except ClientError as exc:
-        _rollback_device_step1(serial, cmd_id, is_first_provision)
+        _rollback_device_step1(serial, cmd_id, is_first_provision, prior_binding)
         try:
             _assignments.delete_item(Key={"serialNumber": serial, "assignedAt": now_iso})
         except ClientError:
@@ -385,18 +488,36 @@ def _provision_inline(
     return {"cmd_id": cmd_id, "assigned_at": now_iso}
 
 
-def _rollback_device_step1(serial: str, cmd_id: str, was_first_provision: bool) -> None:
-    """Reverse the Devices conditional update from provision step 1b."""
+def _rollback_device_step1(
+    serial: str,
+    cmd_id: str,
+    was_first_provision: bool,
+    prior_binding: tuple[str, str | None] | None = None,
+) -> None:
+    """Reverse the Devices conditional update from provision step 1b.
+
+    §5.2d (spec D10): step 1b consumed the claim binding atomically, so the
+    rollback must RESTORE it — otherwise a step-2/3 failure leaves the device
+    unowned AND unbound (silent open self-claim, the exact state the binding
+    exists to prevent).
+    """
     try:
         set_parts = ["#status = :ready", "lastTransitionAt = :now"]
         remove_parts = ["outstandingActivationCmds.#cid", "currentAssignmentSk"]
+        attr_values: dict[str, Any] = {":ready": STATE_READY, ":now": _now_iso()}
         if was_first_provision:
             remove_parts.extend(["owningClientId", "owningFacilityId", "ownerHint"])
+        if prior_binding:
+            set_parts.append("claimBoundPhone = :bhash")
+            attr_values[":bhash"] = prior_binding[0]
+            if prior_binding[1]:
+                set_parts.append("claimBoundPhoneMask = :bmask")
+                attr_values[":bmask"] = prior_binding[1]
         _devices.update_item(
             Key={"serialNumber": serial},
             UpdateExpression="SET " + ", ".join(set_parts) + " REMOVE " + ", ".join(remove_parts),
             ExpressionAttributeNames={"#status": "status", "#cid": cmd_id},
-            ExpressionAttributeValues={":ready": STATE_READY, ":now": _now_iso()},
+            ExpressionAttributeValues=attr_values,
         )
     except ClientError:
         logger.exception("rollback_device_step1_failed",
@@ -454,6 +575,25 @@ def _patient_for_client(client_id: str) -> dict[str, Any] | None:
         IndexName="by-client-status",
         KeyConditionExpression="clientId = :c",
         ExpressionAttributeValues={":c": client_id},
+        Limit=1,
+    )
+    items = res.get("Items", [])
+    return items[0] if items else None
+
+
+def _active_patient_for_client(client_id: str) -> dict[str, Any] | None:
+    """The household's ACTIVE walker patient, or None (§5.7 dedupe).
+
+    The by-client-status GSI sort key is `status_patientId`
+    (`<status>_<patientId>`), so `begins_with("active_")` selects exactly
+    the active rows — same predicate the dashboard readers use (§C41.3).
+    """
+    res = _patients.query(
+        IndexName="by-client-status",
+        KeyConditionExpression=(
+            "clientId = :c AND begins_with(status_patientId, :ap)"
+        ),
+        ExpressionAttributeValues={":c": client_id, ":ap": "active_"},
         Limit=1,
     )
     items = res.get("Items", [])

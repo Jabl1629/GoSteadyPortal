@@ -10,6 +10,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { DynamoEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as path from 'path';
 import { Construct } from 'constructs';
@@ -308,12 +309,25 @@ export class ApiStack extends cdk.Stack {
     const identityKey = securityStack.identityKey;
     const auditKey = securityStack.auditKey;
 
-    // ── device-api Lambda (12 routes) ──────────────────────────────
+    // ── Claim-binding pepper (d2c-claim-binding.md §5.1/§7) ────────
+    // Server-side HMAC key for `claimBoundPhone`. Read by d2c-claim
+    // (claim-time enforcement) + device-api (operator bind /
+    // release-and-bind). Never logged, never returned by any API.
+    const claimBindingPepper = new secretsmanager.Secret(this, 'ClaimBindingPepper', {
+      secretName: `gosteady/${env}/claim-binding-pepper`,
+      description: 'HMAC pepper for D2C claim-binding (claimBoundPhone)',
+      generateSecretString: {
+        passwordLength: 64,
+        excludePunctuation: true,
+      },
+    });
+
+    // ── device-api Lambda (14 routes) ──────────────────────────────
     const deviceApi = new ProcessingLambda(this, 'DeviceApi', {
       config,
       functionName: `gosteady-${env}-device-api`,
       handlerDir: path.join(__dirname, '..', '..', 'lambda', 'device-api'),
-      description: 'Phase 2A-DL device-lifecycle handler (12 routes incl. fleet-list + release; state machine + audit)',
+      description: 'Phase 2A-DL device-lifecycle handler (14 routes incl. fleet-list + release + claim-binding; state machine + audit)',
       memoryMb: 256,
       timeoutSeconds: 15,
       powertoolsLayer,
@@ -324,6 +338,7 @@ export class ApiStack extends cdk.Stack {
         ASSIGNMENTS_TABLE: dataStack.deviceAssignmentsTable.tableName,
         PATIENTS_TABLE: dataStack.patientsTable.tableName,
         ACTIVATION_ACK_WINDOW_HOURS: String(config.activationAckWindowHours),
+        CLAIM_BINDING_PEPPER_SECRET_ARN: claimBindingPepper.secretArn,
       },
     });
     dataStack.deviceTable.grantReadWriteData(deviceApi.function);
@@ -331,6 +346,7 @@ export class ApiStack extends cdk.Stack {
     dataStack.patientsTable.grantReadData(deviceApi.function);
     identityKey.grantEncryptDecrypt(deviceApi.function);
     auditKey.grantEncryptDecrypt(deviceApi.function);
+    claimBindingPepper.grantRead(deviceApi.function);
     // IoT publish for activate cmd + Shadow update for desired.activated_at
     deviceApi.function.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
@@ -356,6 +372,8 @@ export class ApiStack extends cdk.Stack {
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/decommission'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/recover'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/release'],
+      [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/claim-binding'],
+      [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/release-and-bind'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/force-reset'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/move-facility'],
       [apigwv2.HttpMethod.POST, '/api/v1/devices/{serial}/move-client'],
@@ -1009,6 +1027,7 @@ export class ApiStack extends cdk.Stack {
         PATIENTS_TABLE: dataStack.patientsTable.tableName,
         ORGANIZATIONS_TABLE: dataStack.organizationsTable.tableName,
         ROLE_ASSIGNMENTS_TABLE: authStack.roleAssignmentsTable.tableName,
+        CLAIM_BINDING_PEPPER_SECRET_ARN: claimBindingPepper.secretArn,
       },
     });
     // RW: claim creates Patient + Organizations + RoleAssignments rows and
@@ -1021,6 +1040,7 @@ export class ApiStack extends cdk.Stack {
     dataStack.patientsTable.grantReadWriteData(d2cClaim.function);
     dataStack.organizationsTable.grantReadWriteData(d2cClaim.function);
     authStack.roleAssignmentsTable.grantReadWriteData(d2cClaim.function);
+    claimBindingPepper.grantRead(d2cClaim.function);
     // KMS — Patients / Organizations / DeviceAssignments / RoleAssignments
     // are CMK-encrypted (0A-rev + 0B-rev); claim reads + writes them.
     identityKey.grantEncryptDecrypt(d2cClaim.function);

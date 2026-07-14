@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -46,6 +47,7 @@ from _shared import emit_audit, get_logger, get_metrics
 from _shared.audit_catalog import (
     AUDIT_DEVICE_CMD_REPUBLISHED,
     AUDIT_DEVICE_CMD_SWEPT_STALE,
+    AUDIT_DEVICE_WIPE_REISSUED,
 )
 from aws_lambda_powertools.metrics import MetricUnit
 
@@ -109,6 +111,49 @@ def _sweep_entry(serial: str, map_attr: str, cmd_id: str) -> None:
         )
 
 
+def _reissue_wipe(serial: str, now_iso: str) -> str | None:
+    """
+    Mint + publish a FRESH wipe cmd for a still-`discontinued` device with no
+    live outstanding wipe (claim-binding spec §5.6 un-strand).
+
+    Without this, a device that missed its 24h ack window (off in a bag
+    between demo participants) was stranded: the stale entry got swept, no
+    path re-issued a wipe from `discontinued`, and the device could never
+    reach ready_to_provision — the next participant's claim 409'd forever.
+
+    Mirrors end-assignment's write pattern: ensure-map + entry write, Shadow
+    desired.wipe_requested (the durable channel firmware re-checks on every
+    wake), then the immediate-push publish. Returns the new wipe_id, or None
+    if any step failed (next connect retries).
+    """
+    wipe_id = f"wipe_{uuid.uuid4()}"
+    try:
+        _device_tbl.update_item(
+            Key={"serialNumber": serial},
+            UpdateExpression=(
+                "SET outstandingWipeCmds = if_not_exists(outstandingWipeCmds, :empty), "
+                "wipe_requested_at = :now"
+            ),
+            ExpressionAttributeValues={":empty": {}, ":now": now_iso},
+        )
+        _device_tbl.update_item(
+            Key={"serialNumber": serial},
+            UpdateExpression="SET outstandingWipeCmds.#cid = :now",
+            ExpressionAttributeNames={"#cid": wipe_id},
+            ExpressionAttributeValues={":now": now_iso},
+        )
+        shadow = json.dumps({"state": {"desired": {"wipe_requested": wipe_id}}})
+        _iot_data.update_thing_shadow(thingName=serial, payload=shadow.encode())
+        _publish_cmd(serial, "wipe", wipe_id, now_iso)
+    except ClientError as e:
+        logger.exception(
+            "coordinator_wipe_reissue_failed",
+            extra={"serial": serial, "wipe_id": wipe_id, "error": str(e)},
+        )
+        return None
+    return wipe_id
+
+
 @logger.inject_lambda_context(log_event=False, correlation_id_path="clientId")
 @metrics.log_metrics(capture_cold_start_metric=True)
 def handler(event: dict, _context) -> dict:
@@ -163,6 +208,10 @@ def handler(event: dict, _context) -> dict:
 
     republished: list[dict[str, Any]] = []
     swept: list[dict[str, Any]] = []
+    # §5.6: a live (in-window) wipe entry means the normal republish path is
+    # still working on it. Only when a discontinued device has NO live wipe
+    # left after sweeping do we mint a fresh one below.
+    live_wipe_remaining = False
 
     for map_attr, cmd_kind in (
         ("outstandingActivationCmds", "activate"),
@@ -195,7 +244,12 @@ def handler(event: dict, _context) -> dict:
                 _sweep_entry(serial, map_attr, cmd_id)
                 continue
 
-            # Within window — re-publish.
+            # Within window — the entry stays live whether or not the
+            # re-publish below succeeds (the map still holds it).
+            if cmd_kind == "wipe":
+                live_wipe_remaining = True
+
+            # Re-publish.
             try:
                 _publish_cmd(serial, cmd_kind, cmd_id, now_iso)
             except ClientError as e:
@@ -219,6 +273,28 @@ def handler(event: dict, _context) -> dict:
                 "issued_at": str(issued_iso),
                 "age_seconds": round(age_seconds, 2),
             })
+
+    # §5.6 un-strand: still awaiting a wipe (status=discontinued) but no live
+    # wipe cmd outstanding — either just swept above, or stranded empty by an
+    # earlier sweep. Mint + publish a fresh wipe so the recycle can complete.
+    reissued_wipe_id: str | None = None
+    if item.get("status") == "discontinued" and not live_wipe_remaining:
+        reissued_wipe_id = _reissue_wipe(serial, now_iso)
+        if reissued_wipe_id:
+            emit_audit(
+                AUDIT_DEVICE_WIPE_REISSUED,
+                subject={"deviceSerial": serial},
+                action="event",
+                extra={
+                    "wipe_id": reissued_wipe_id,
+                    "sweptThisConnect": [s["cmd_id"] for s in swept if s["cmd_kind"] == "wipe"],
+                },
+            )
+    metrics.add_metric(
+        name="device_wipe_reissued_count",
+        unit=MetricUnit.Count,
+        value=1 if reissued_wipe_id else 0,
+    )
 
     # ── Metrics ──────────────────────────────────────────────────
     metrics.add_metric(
@@ -275,4 +351,5 @@ def handler(event: dict, _context) -> dict:
         "serial": serial,
         "republished": republished,
         "swept": swept,
+        "reissuedWipeId": reissued_wipe_id,
     }

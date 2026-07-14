@@ -38,13 +38,17 @@ def resolve_identity(body: dict[str, Any], claims: dict[str, Any]) -> tuple[str,
     caregiver sets up for someone else (`caregiverSetup=true`).
     """
     caregiver_setup = bool(body.get("caregiverSetup"))
-    raw = claims.get("raw", {}) or {}
+    # `name` is surfaced by extract_claims from the ID token's standard OIDC
+    # claim (fullname is a required D2C pool attribute). The old
+    # claims["raw"]["name"] read was dead code — extract_claims never
+    # produced a "raw" key (claim-binding spec L6 correction).
+    token_name = (claims.get("name") or "").strip()
     display = (body.get("displayName") or "").strip()
-    owner_name = (body.get("ownerName") or display or raw.get("name") or "Account holder").strip()
+    owner_name = (body.get("ownerName") or display or token_name or "Account holder").strip()
     if caregiver_setup:
         walker_name = (body.get("walkerName") or display or "Walker user").strip()
     else:
-        walker_name = (body.get("walkerName") or display or raw.get("name") or owner_name).strip()
+        walker_name = (body.get("walkerName") or display or token_name or owner_name).strip()
     return owner_name, walker_name, (not caregiver_setup)
 
 

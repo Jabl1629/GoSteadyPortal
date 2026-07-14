@@ -577,6 +577,11 @@ class FleetDevice {
   final bool wipePending;
   final String? decommissionReason;
 
+  /// Masked intended-recipient phone (`•••-1234`) when the device is
+  /// claim-bound (reserved) — d2c-claim-binding.md §5.4. Never the raw
+  /// phone or the HMAC.
+  final String? claimBoundPhoneMask;
+
   const FleetDevice({
     required this.serialNumber,
     this.status,
@@ -593,6 +598,7 @@ class FleetDevice {
     this.activationPending = false,
     this.wipePending = false,
     this.decommissionReason,
+    this.claimBoundPhoneMask,
   });
 
   factory FleetDevice.fromJson(Map<String, dynamic> json) {
@@ -614,6 +620,7 @@ class FleetDevice {
       activationPending: (json['activationPending'] as bool?) ?? false,
       wipePending: (json['wipePending'] as bool?) ?? false,
       decommissionReason: json['decommissionReason'] as String?,
+      claimBoundPhoneMask: json['claimBoundPhoneMask'] as String?,
     );
   }
 

@@ -268,6 +268,16 @@ export class ProcessingStack extends cdk.Stack {
         resources: [`arn:aws:iot:${region}:${account}:topic/gs/*/cmd`],
       }),
     );
+    // Wipe re-issue (claim-binding §5.6) sets desired.wipe_requested on the
+    // Shadow — the durable channel firmware re-checks on every wake. Needs
+    // the data-plane UpdateThingShadow the republish path never used.
+    this.connectionCoordinator.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'UpdateAnyDeviceShadow',
+        actions: ['iot:UpdateThingShadow'],
+        resources: [`arn:aws:iot:${region}:${account}:thing/*`],
+      }),
+    );
 
     // IoT Topic Rule: filter on `connected` lifecycle events.
     // Topic pattern $aws/events/presence/connected/+ — `+` matches the

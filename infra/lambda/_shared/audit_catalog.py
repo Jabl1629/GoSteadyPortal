@@ -47,6 +47,10 @@ AUDIT_DEVICE_CMD_SWEPT_STALE = "device.cmd_swept_stale"  # Coordinator Lambda re
 AUDIT_DEVICE_TYPE_CHANGED = "device.type_changed"  # internal_admin re-typed a registry record (dev: CLI runbook; endpoint deferred to first-need)
 # Device fleet ops tooling (2026-07-12, docs/specs/device-fleet-ops-tooling.md):
 AUDIT_DEVICE_FLEET_READ = "device.fleet.read"  # internal cross-tenant fleet scan (GET /admin/devices); count-only subject, mirrors patient.list.read
+# D2C claim-binding + rotation (2026-07-13, docs/specs/d2c-claim-binding.md §7):
+AUDIT_DEVICE_CLAIM_BOUND = "device.claim_bound"  # claimBoundPhone set (operator bind / release-and-bind); extra carries the MASKED phone only
+AUDIT_DEVICE_CLAIM_BINDING_CLEARED = "device.claim_binding_cleared"  # claimBoundPhone explicitly cleared (bind {phone: null})
+AUDIT_DEVICE_WIPE_REISSUED = "device.wipe_reissued"  # Coordinator minted a FRESH wipe cmd for a still-discontinued device whose prior wipe was swept (§5.6 un-strand)
 
 # ── Patient / activity / alert (Phase 1B-rev + Phase 2A) ──────────────
 AUDIT_PATIENT_ACTIVITY_CREATE = "patient.activity.create"

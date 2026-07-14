@@ -503,6 +503,20 @@ def _provision_inline(
     existing_owner = device.get("owningClientId")
     is_first_provision = not existing_owner
 
+    # §5.9 (claim-binding spec D12): a bound unowned device is RESERVED for a
+    # pending D2C claim — the facility provision path must not capture it.
+    # The override is to explicitly clear the binding first (audited).
+    if is_first_provision and device.get("claimBoundPhone"):
+        raise ApiError(
+            code="DEVICE_RESERVED",
+            message=(
+                "Device is reserved for a pending claim. Clear its claim "
+                "binding first if you really mean to provision it."
+            ),
+            status=409,
+            details={"claimBoundPhoneMask": device.get("claimBoundPhoneMask")},
+        )
+
     cmd_id = f"act_{uuid.uuid4()}"
     now_iso = _now_iso()
 
@@ -527,16 +541,20 @@ def _provision_inline(
         ":sk": now_iso,
         ":now": now_iso,
     }
+    condition = "#status = :ready"
     if is_first_provision:
         update_expr_parts.extend(["owningClientId = :oc", "owningFacilityId = :of"])
         attr_values[":oc"] = target_client_id
         attr_values[":of"] = target_facility_id
+        # §5.9 race guard: a bind landing between the pre-check above and
+        # this write must win, not be silently captured.
+        condition += " AND attribute_not_exists(claimBoundPhone)"
 
     try:
         _devices.update_item(
             Key={"serialNumber": serial},
             UpdateExpression="SET " + ", ".join(update_expr_parts),
-            ConditionExpression="#status = :ready",
+            ConditionExpression=condition,
             ExpressionAttributeNames=attr_names,
             ExpressionAttributeValues=attr_values,
         )
@@ -544,6 +562,16 @@ def _provision_inline(
         if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
             # Lost a race — fresh device state for the caller.
             fresh = _get_device_or_404(serial)
+            if not fresh.get("owningClientId") and fresh.get("claimBoundPhone"):
+                raise ApiError(
+                    code="DEVICE_RESERVED",
+                    message=(
+                        "Device is reserved for a pending claim. Clear its "
+                        "claim binding first if you really mean to provision it."
+                    ),
+                    status=409,
+                    details={"claimBoundPhoneMask": fresh.get("claimBoundPhoneMask")},
+                )
             raise ApiError(
                 code="DEVICE_NOT_AVAILABLE",
                 message="Device just provisioned by another caller — refresh and try again",

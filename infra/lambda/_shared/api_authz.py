@@ -83,6 +83,16 @@ def extract_claims(event: dict[str, Any]) -> dict[str, Any]:
         "censuses": [c.strip() for c in censuses_raw.split(",") if c.strip()],
         "mfaEnrolled": claims.get("custom:mfa_enrolled", "false") == "true",
         "iat": iat,
+        # D2C claim-binding (spec §5.2a): the D2C app authenticates with the
+        # Cognito ID token, so the standard OIDC phone/name claims are present
+        # for D2C-pool callers (phone_number is a required attribute there).
+        # Facility-pool tokens simply yield empty strings. phone_number_verified
+        # arrives as the string "true"/"false" through the API GW authorizer;
+        # tolerate a real boolean too.
+        "name": claims.get("name", ""),
+        "phoneNumber": claims.get("phone_number", ""),
+        "phoneNumberVerified": str(claims.get("phone_number_verified", "false")).lower()
+        == "true",
     }
 
 
