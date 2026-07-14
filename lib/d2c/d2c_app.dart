@@ -89,6 +89,7 @@ GoRouter buildD2CRouter({
         builder: (context, state) => D2CSignUpScreen(
           auth: d2cAuth!,
           walkerId: state.uri.queryParameters['walkerId'],
+          repository: repository,
         ),
       ),
       GoRoute(

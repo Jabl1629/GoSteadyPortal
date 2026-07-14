@@ -302,10 +302,20 @@ class _Message extends StatelessWidget {
 // ════════════════════════════════════════════════════════════════════
 
 class D2CSignUpScreen extends StatefulWidget {
-  const D2CSignUpScreen({super.key, required this.auth, this.walkerId});
+  const D2CSignUpScreen({
+    super.key,
+    required this.auth,
+    this.walkerId,
+    this.repository,
+  });
 
   final D2CAuthService auth;
   final String? walkerId;
+
+  /// Optional — when arriving from a reserved-device QR, used to look up the
+  /// masked recipient so the form can guide the user to the reserved number
+  /// (claim-binding §5.5). Absent in previews / non-reserved flows.
+  final D2CRepository? repository;
 
   @override
   State<D2CSignUpScreen> createState() => _D2CSignUpScreenState();
@@ -316,6 +326,29 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
   final _email = TextEditingController();
   final _phone = TextEditingController();
   bool _busy = false;
+  String? _reservedMask; // •••-1234 when this walker is reserved for a phone
+
+  @override
+  void initState() {
+    super.initState();
+    _maybeLoadReservation();
+  }
+
+  Future<void> _maybeLoadReservation() async {
+    final repo = widget.repository;
+    final wid = widget.walkerId;
+    if (repo == null || wid == null || wid.isEmpty) return;
+    try {
+      final lookup = await repo.lookupWalker(wid);
+      if (!mounted) return;
+      if (lookup.status == PublicWalkerStatus.reserved &&
+          (lookup.recipientMask ?? '').isNotEmpty) {
+        setState(() => _reservedMask = lookup.recipientMask);
+      }
+    } catch (_) {
+      // Best-effort guidance; a lookup hiccup just omits the hint.
+    }
+  }
 
   @override
   void dispose() {
@@ -365,6 +398,33 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
             style: TextStyle(color: AppTheme.textSoft, height: 1.4),
           ),
         ),
+        // Reserved-device guidance (claim-binding §5.5): this walker is held
+        // for a specific phone — using a different one won't be able to claim
+        // it, so steer the user to the reserved number.
+        if (_reservedMask != null)
+          Container(
+            margin: const EdgeInsets.only(bottom: 16),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppTheme.sage.withOpacity(0.10),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppTheme.sage.withOpacity(0.35)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.phone_iphone, size: 18, color: AppTheme.sage),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'This walker is reserved for the phone ending in '
+                    '$_reservedMask. Sign up with that number.',
+                    style: const TextStyle(
+                        color: AppTheme.textDark, height: 1.35, fontSize: 13.5),
+                  ),
+                ),
+              ],
+            ),
+          ),
         _field(_name, label: 'Your name'),
         _field(_phone, label: 'Mobile phone', keyboard: TextInputType.phone),
         _field(_email, label: 'Email (optional)', keyboard: TextInputType.emailAddress),
