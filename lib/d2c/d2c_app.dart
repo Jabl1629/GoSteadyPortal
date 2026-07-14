@@ -90,6 +90,9 @@ GoRouter buildD2CRouter({
           auth: d2cAuth!,
           walkerId: state.uri.queryParameters['walkerId'],
           repository: repository,
+          // Phone collected on the reserved landing, passed via router `extra`
+          // (never the URL — no PII in query strings). Null on retail / reload.
+          prefilledPhone: state.extra is String ? state.extra as String : null,
         ),
       ),
       GoRoute(

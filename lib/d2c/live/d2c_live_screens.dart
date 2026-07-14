@@ -160,11 +160,18 @@ class D2CSetupLandingScreen extends StatefulWidget {
 class _D2CSetupLandingScreenState extends State<D2CSetupLandingScreen> {
   late Future<PublicWalkerLookup> _future;
   bool _claiming = false;
+  final _phone = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     _future = widget.repository.lookupWalker(widget.walkerId);
+  }
+
+  @override
+  void dispose() {
+    _phone.dispose();
+    super.dispose();
   }
 
   Future<void> _claimNow() async {
@@ -178,6 +185,31 @@ class _D2CSetupLandingScreenState extends State<D2CSetupLandingScreen> {
         _snack(context, _errText(e));
       }
     }
+  }
+
+  /// Reserved flow: the phone is collected HERE (where the reserved mask is
+  /// known) so the account page is name + email only — the participant never
+  /// enters a phone that could differ from the bound one (§5.5). Validates
+  /// the entered number's last-4 against the mask for immediate feedback,
+  /// then carries the raw number to /sign-up via router `extra` (never the
+  /// URL — no PII in query strings). The full E.164 canonicalization + the
+  /// authoritative match happen downstream (signUp normalizes; claim enforces).
+  void _continueReserved(String noun, String mask) {
+    final typed = _phone.text.replaceAll(RegExp(r'\D'), '');
+    final maskDigits = mask.replaceAll(RegExp(r'\D'), '');
+    if (typed.length < 10) {
+      _snack(context, 'Enter your 10-digit mobile number.');
+      return;
+    }
+    if (maskDigits.isNotEmpty && !typed.endsWith(maskDigits)) {
+      _snack(context,
+          'This $noun is reserved for a phone ending in $mask. Use that number.');
+      return;
+    }
+    context.go(
+      '/sign-up?walkerId=${Uri.encodeComponent(widget.walkerId)}',
+      extra: _phone.text.trim(),
+    );
   }
 
   @override
@@ -223,19 +255,37 @@ class _D2CSetupLandingScreenState extends State<D2CSetupLandingScreen> {
                       text: reserved
                           ? (mask.isEmpty
                               ? 'This $noun is reserved. Set it up with the '
-                                  'phone number it was registered for?'
-                              : 'Set up this $noun for the phone ending in '
-                                  '$mask? You\'ll verify that number by text.')
+                                  'phone number it was registered for.'
+                              : 'This $noun is reserved for the phone ending in '
+                                  '$mask. Enter that number to set it up — '
+                                  "we'll text a code to verify it.")
                           : 'This $noun is ready to set up.',
                     ),
                     const SizedBox(height: 20),
                     if (widget.signedIn)
+                      // Already signed in → claim directly (their verified
+                      // phone is enforced against the binding server-side).
                       _PrimaryButton(
                         label: reserved
                             ? 'Yes — set up this $noun'
                             : 'Claim this $noun',
                         busy: _claiming,
                         onPressed: _claimNow,
+                      )
+                    else if (reserved)
+                      // Reserved + new user: collect the phone HERE so the
+                      // account page is name + email only (§5.5).
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _field(_phone,
+                              label: 'Your mobile number',
+                              keyboard: TextInputType.phone),
+                          _PrimaryButton(
+                            label: 'Continue',
+                            onPressed: () => _continueReserved(noun, mask),
+                          ),
+                        ],
                       )
                     else
                       _PrimaryButton(
@@ -307,6 +357,7 @@ class D2CSignUpScreen extends StatefulWidget {
     required this.auth,
     this.walkerId,
     this.repository,
+    this.prefilledPhone,
   });
 
   final D2CAuthService auth;
@@ -316,6 +367,13 @@ class D2CSignUpScreen extends StatefulWidget {
   /// masked recipient so the form can guide the user to the reserved number
   /// (claim-binding §5.5). Absent in previews / non-reserved flows.
   final D2CRepository? repository;
+
+  /// The phone already collected on the reserved landing (§5.5). When set,
+  /// this page is name + optional email ONLY — no phone field — so the user
+  /// can't enter a number that differs from the reserved one. When null
+  /// (retail, or a reload that dropped router state), the phone field is
+  /// shown as a graceful fallback.
+  final String? prefilledPhone;
 
   @override
   State<D2CSignUpScreen> createState() => _D2CSignUpScreenState();
@@ -331,7 +389,10 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
   @override
   void initState() {
     super.initState();
-    _maybeLoadReservation();
+    // When the phone was already collected on the reserved landing we know
+    // the reservation — no lookup needed. Only retail / reload-fallback
+    // (phone field shown) benefits from the guidance hint.
+    if ((widget.prefilledPhone ?? '').trim().isEmpty) _maybeLoadReservation();
   }
 
   Future<void> _maybeLoadReservation() async {
@@ -359,20 +420,30 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
   }
 
   Future<void> _submit() async {
-    if (_name.text.trim().isEmpty || _phone.text.trim().isEmpty) {
-      _snack(context, 'Please enter your name and mobile phone.');
+    // Reserved flow: phone came from the landing (no field here). Retail flow:
+    // phone is on this page.
+    final phone = ((widget.prefilledPhone ?? '').trim().isNotEmpty
+            ? widget.prefilledPhone!
+            : _phone.text)
+        .trim();
+    if (_name.text.trim().isEmpty) {
+      _snack(context, 'Please enter your name.');
+      return;
+    }
+    if (phone.isEmpty) {
+      _snack(context, 'Please enter your mobile phone.');
       return;
     }
     setState(() => _busy = true);
     try {
       await widget.auth.signUp(
         name: _name.text,
-        phone: _phone.text,
+        phone: phone,
         email: _email.text.trim().isEmpty ? null : _email.text,
       );
       // The pool auto-confirms the account — straight to SMS-OTP, no email
       // confirmation step (phone-first, d2c-phone-only-signin.md).
-      final challenge = await widget.auth.startSignIn(_phone.text);
+      final challenge = await widget.auth.startSignIn(phone);
       if (!mounted) return;
       final q = StringBuffer('phoneHint=${Uri.encodeComponent(challenge.phoneHint)}');
       if (widget.walkerId != null) q.write('&walkerId=${Uri.encodeComponent(widget.walkerId!)}');
@@ -387,50 +458,78 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final prefill = (widget.prefilledPhone ?? '').trim();
+    final hasPrefill = prefill.isNotEmpty;
+    final prefillDigits = prefill.replaceAll(RegExp(r'\D'), '');
+    final prefillTail = prefillDigits.length >= 4
+        ? prefillDigits.substring(prefillDigits.length - 4)
+        : prefillDigits;
     return _OnboardScaffold(
       title: 'Create your account',
       onBack: () => context.go('/sign-in'),
       children: [
-        const Padding(
-          padding: EdgeInsets.only(bottom: 18),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 18),
           child: Text(
-            "We'll text a code to verify your phone. Standard message rates apply; reply STOP to opt out.",
-            style: TextStyle(color: AppTheme.textSoft, height: 1.4),
+            hasPrefill
+                ? "We'll text a code to verify your phone. Just your name to "
+                    "finish. Standard message rates apply; reply STOP to opt out."
+                : "We'll text a code to verify your phone. Standard message "
+                    "rates apply; reply STOP to opt out.",
+            style: const TextStyle(color: AppTheme.textSoft, height: 1.4),
           ),
         ),
-        // Reserved-device guidance (claim-binding §5.5): this walker is held
-        // for a specific phone — using a different one won't be able to claim
-        // it, so steer the user to the reserved number.
-        if (_reservedMask != null)
-          Container(
-            margin: const EdgeInsets.only(bottom: 16),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: AppTheme.sage.withOpacity(0.10),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: AppTheme.sage.withOpacity(0.35)),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.phone_iphone, size: 18, color: AppTheme.sage),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'This walker is reserved for the phone ending in '
-                    '$_reservedMask. Sign up with that number.',
-                    style: const TextStyle(
-                        color: AppTheme.textDark, height: 1.35, fontSize: 13.5),
-                  ),
-                ),
-              ],
-            ),
-          ),
+        // Reserved flow: the phone was collected + last-4-checked on the
+        // landing (§5.5), so this page is name + email ONLY — no phone field,
+        // so the account can't be created against a different number. Confirm
+        // which number we'll use.
+        if (hasPrefill)
+          _InfoBanner(
+              'Setting up for the phone ending in •••-$prefillTail.'),
+        // Retail / reload fallback (phone field shown): guide toward the
+        // reserved number if we know it.
+        if (!hasPrefill && _reservedMask != null)
+          _InfoBanner(
+              'This walker is reserved for the phone ending in $_reservedMask. '
+              'Sign up with that number.'),
         _field(_name, label: 'Your name'),
-        _field(_phone, label: 'Mobile phone', keyboard: TextInputType.phone),
-        _field(_email, label: 'Email (optional)', keyboard: TextInputType.emailAddress),
+        if (!hasPrefill)
+          _field(_phone, label: 'Mobile phone', keyboard: TextInputType.phone),
+        _field(_email,
+            label: 'Email (optional)', keyboard: TextInputType.emailAddress),
         const SizedBox(height: 6),
         _PrimaryButton(label: 'Continue', busy: _busy, onPressed: _submit),
       ],
+    );
+  }
+}
+
+/// Small sage info banner (reused by the signup guidance / confirmation).
+class _InfoBanner extends StatelessWidget {
+  const _InfoBanner(this.text);
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.sage.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.sage.withOpacity(0.35)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.phone_iphone, size: 18, color: AppTheme.sage),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(text,
+                style: const TextStyle(
+                    color: AppTheme.textDark, height: 1.35, fontSize: 13.5)),
+          ),
+        ],
+      ),
     );
   }
 }
