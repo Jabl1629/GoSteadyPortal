@@ -195,6 +195,7 @@ class D2CDashboardSnapshot {
     required this.careNote,
     required this.device,
     this.isPreActivation = false,
+    this.hasWalker = true,
     this.deviceType = 'walker_cap',
   });
 
@@ -217,6 +218,12 @@ class D2CDashboardSnapshot {
   /// Device bound + shipped but never checked in. Drives the distinct
   /// "walker is on the way" first-run hero instead of the activity view.
   final bool isPreActivation;
+
+  /// Whether this household currently has a walker at all. False when the
+  /// device was never claimed or was rotated to another household — drives
+  /// the "no walker connected" empty state instead of the pre-activation
+  /// hero (which wrongly implied a walker was on its way).
+  final bool hasWalker;
 }
 
 // ─────────────────────────────────────────────────────────────────────

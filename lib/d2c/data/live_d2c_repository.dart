@@ -228,9 +228,13 @@ class LiveD2CRepository implements D2CRepository {
       lastSeenMinAgo: lastSeenMinAgo ?? 0,
     );
 
-    final isPreActivation = dev == null ||
-        dev.status == 'provisioned' ||
-        dev.status == 'ready_to_provision';
+    // A device-less household (no current device — never claimed, or the
+    // device was rotated to another household) has NO walker; it is NOT
+    // "getting set up". Only a present-but-not-yet-active device is
+    // pre-activation (claimed, awaiting its first check-in).
+    final hasWalker = dev != null;
+    final isPreActivation = dev != null &&
+        (dev.status == 'provisioned' || dev.status == 'ready_to_provision');
 
     // ── Viewer + walker ──
     final u = _auth.currentUser;
@@ -272,6 +276,7 @@ class LiveD2CRepository implements D2CRepository {
       careNote: careNote,
       device: device,
       isPreActivation: isPreActivation,
+      hasWalker: hasWalker,
     );
   }
 

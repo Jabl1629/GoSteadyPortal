@@ -44,6 +44,25 @@ class D2CDashboardScreen extends StatelessWidget {
     // active-minutes (no steps). Drives the stat row, trend chart, context
     // line, greeting, and recent-walks rendering below.
     final view = deviceTypeView(snapshot.deviceType);
+    // No walker on this account (never claimed, or the device was rotated to
+    // another household) → a distinct empty state, NOT the "getting set up"
+    // hero (which wrongly implied a walker was on its way).
+    if (!snapshot.hasWalker) {
+      return Scaffold(
+        backgroundColor: AppTheme.warmWhite,
+        appBar: _buildAppBar(context),
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 640),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 96),
+              child: const _NoWalkerView(),
+            ),
+          ),
+        ),
+        bottomNavigationBar: const D2CBottomNav(active: D2CTab.activity),
+      );
+    }
     if (snapshot.isPreActivation) {
       return Scaffold(
         backgroundColor: AppTheme.warmWhite,
@@ -159,6 +178,62 @@ class D2CDashboardScreen extends StatelessWidget {
           icon: const Icon(Icons.settings_outlined, color: AppTheme.textSoft),
         ),
         const SizedBox(width: 4),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// No-walker empty state — account has no device (never claimed, or the
+// device was rotated to another household)
+// ─────────────────────────────────────────────────────────────────────
+
+class _NoWalkerView extends StatelessWidget {
+  const _NoWalkerView();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 24),
+        Center(
+          child: Container(
+            width: 84,
+            height: 84,
+            decoration: BoxDecoration(
+              color: AppTheme.sage.withOpacity(0.10),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.qr_code_scanner_rounded,
+              size: 40,
+              color: AppTheme.sage,
+            ),
+          ),
+        ),
+        const SizedBox(height: 24),
+        Text(
+          'No walker connected',
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                fontSize: 24,
+                height: 1.2,
+              ),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          "There's no walker on this account right now. To set one up, scan "
+          "the QR code on your GoSteady walker — it'll take you through the "
+          "rest. If someone set it up for you, check with them.",
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: AppTheme.textSoft,
+            fontSize: 15,
+            height: 1.5,
+          ),
+        ),
+        const SizedBox(height: 24),
       ],
     );
   }
