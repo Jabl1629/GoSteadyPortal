@@ -207,15 +207,25 @@ class LiveD2CRepository implements D2CRepository {
 
     // ── Device health (battery/signal are data gaps — see class doc) ──
     final dev = patient.currentDevice;
-    final connected = dev != null && dev.status == 'active';
     final lastSeenMinAgo = dev?.lastSeen == null
-        ? 0
+        ? null
         : now.difference(dev!.lastSeen!.toLocal()).inMinutes.clamp(0, 1 << 30);
+    // "Connected" = device is live (`active_monitoring`) AND has phoned home
+    // within the offline window. The lifecycle state is `active_monitoring`,
+    // NOT `active` — the old `== 'active'` check never matched, so this card
+    // always read "Device offline · Lost signal" for a perfectly healthy
+    // device. Heartbeats are hourly, so we mirror the behavioral-detector
+    // `device_offline` threshold (2h) — that way a healthy device stays green
+    // between heartbeats, and the dot agrees with the offline alert.
+    const offlineThresholdMin = 120;
+    final connected = dev?.status == 'active_monitoring' &&
+        lastSeenMinAgo != null &&
+        lastSeenMinAgo <= offlineThresholdMin;
     final device = DeviceHealth(
       connected: connected,
       batteryPct: _batteryFromAlerts(openAlertRows) ?? 1.0,
       signalLabel: connected ? 'Good' : 'Lost',
-      lastSeenMinAgo: lastSeenMinAgo,
+      lastSeenMinAgo: lastSeenMinAgo ?? 0,
     );
 
     final isPreActivation = dev == null ||
@@ -371,12 +381,16 @@ class LiveD2CRepository implements D2CRepository {
         return Icons.battery_alert_outlined;
       case 'offline':
       case 'device_offline':
+      case 'device_silent':
         return Icons.wifi_off_outlined;
       case 'no_activity':
+      case 'no_activity_today':
       case 'low_activity':
+      case 'below_typical_activity':
         return Icons.directions_walk_outlined;
       case 'decline':
       case 'declining':
+      case 'declining_trend':
         return Icons.trending_down;
       case 'fall':
       case 'impact':
@@ -394,12 +408,17 @@ class LiveD2CRepository implements D2CRepository {
       case 'offline':
       case 'device_offline':
         return 'Device is offline';
+      case 'device_silent':
+        return 'Device has gone quiet';
       case 'no_activity':
+      case 'no_activity_today':
         return 'No activity yet';
       case 'low_activity':
+      case 'below_typical_activity':
         return 'Quieter than usual';
       case 'decline':
       case 'declining':
+      case 'declining_trend':
         return 'Activity is trending down';
       case 'fall':
       case 'impact':
@@ -420,7 +439,19 @@ class LiveD2CRepository implements D2CRepository {
         return 'Replace the AA batteries in the next day or two.';
       case 'offline':
       case 'device_offline':
-        return "The cap hasn't checked in recently.";
+        return "The device hasn't checked in for a couple of hours.";
+      case 'device_silent':
+        return "The device hasn't sent an update in over a day.";
+      case 'no_activity':
+      case 'no_activity_today':
+        return 'No walking recorded yet today.';
+      case 'low_activity':
+      case 'below_typical_activity':
+        return 'Less walking than a typical day.';
+      case 'decline':
+      case 'declining':
+      case 'declining_trend':
+        return 'Walking has been decreasing over recent days.';
       default:
         return '';
     }
