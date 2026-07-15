@@ -34,7 +34,7 @@ Tracking what changes from the original [`phase-0b-data.md`](phase-0b-data.md):
 | L3 | PAY_PER_REQUEST billing for both envs at MVP scale | Phase 0B original | No capacity planning needed; switch to provisioned when usage patterns clear |
 | L4 | Hierarchy: Client → Facility → Census → Patient | Architecture T1 | Mirrors industry RBAC (PointClickCare, MatrixCare, etc.); retrofitting hierarchy after launch is a quarter-long migration |
 | L5 | Client is the hard tenancy boundary | Architecture T2 | One client per customer user; `_internal` carve-out for GoSteady staff |
-| L6 | D2C users get a synthetic single-household client (`dtc_{userId}`) | Architecture T3 | Same authz codepath as facility customers; no fork |
+| L6 | D2C users get a synthetic single-household client (`dtc_{householdId}` — stable householdId anchor, not the sub; superseded 2026-07-08, coord §C56.1) | Architecture T3 | Same authz codepath as facility customers; no fork |
 | L7 | Telemetry rows store hierarchy snapshot at write time (history follows patient) | Architecture T4 | Audit truth: "Mrs. Jones walked 200 steps in memory care on March 15" stays true after she moves to skilled nursing |
 | L8 | Device ownership and patient assignment are separate entities | Architecture T5 | Devices are owned by Client/Facility (inventory); assignments are per-patient transient |
 | L9 | Patient-centric PK on Activity Series and Alert History | Architecture S1 | Patient mobility is the dominant access pattern; `patientId` is stable across census moves |

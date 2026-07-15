@@ -1,5 +1,14 @@
 # D2C Phase 1 — Walker-user claim + activation + monitoring
 
+> ⚠️ **Superseded anchor (2026-07-08):** this doc predates the phone-first
+> cutover and writes the household client as `dtc_{sub}` / `fac_{sub[:12]}`
+> throughout. The shipped model anchors on a
+> **stable `dtc_{householdId}`**, not the Cognito sub (coord §C56.1;
+> [`d2c-phone-only-signin.md`](d2c-phone-only-signin.md) §7,
+> [`d2c-claim-binding.md`](d2c-claim-binding.md) L1). Read `dtc_{sub}` below as
+> `dtc_{householdId}`; the claim rewrites the claimer's `RoleAssignments`/
+> `clientId` pointer per claim (ARCHITECTURE §4 D2C Modeling).
+>
 > **Status:** Draft — 2026-05-28
 > **Scope:** The thinnest end-to-end D2C slice: a new walker user claims a
 > brand-new device and sees their own walking activity. No caregivers, one

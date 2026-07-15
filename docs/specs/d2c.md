@@ -51,7 +51,9 @@ Source: `~/Documents/gosteady_onboarding.pdf` (Account Model & Onboarding).
 
 - **L1 — Reuse the existing role machinery, relabel in UI.** D2C maps onto
   the deployed tenancy model: each household is a synthetic
-  `dtc_{primaryUserId}` client (ARCHITECTURE §4 D2C modeling). `Admin` =
+  `dtc_{householdId}` client (anchored on a stable householdId, not the
+  Cognito sub — superseded 2026-07-08, coord §C56.1; ARCHITECTURE §4 D2C
+  modeling). `Admin` =
   the existing `household_owner` role (UI label "Admin"); plain Member =
   `family_viewer` (UI label "Member"). **Relax** the implicit one-
   `household_owner`-per-client rule to allow N Admins. Add one boolean
