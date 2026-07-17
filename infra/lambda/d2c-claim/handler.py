@@ -87,6 +87,9 @@ AUDIT_D2C_DEVICE_CLAIMED = "d2c.device_claimed"
 # Claim-binding rejections (spec §7): count-only, never the raw phone.
 AUDIT_D2C_CLAIM_REJECTED_PHONE_MISMATCH = "d2c.claim_rejected_phone_mismatch"
 AUDIT_D2C_CLAIM_REJECTED_DEVICE_OWNED = "d2c.claim_rejected_device_owned"
+# Care Circle guard (d2c-care-circle.md §5.6): a family_viewer's claim must
+# not hijack the household they're a member of.
+AUDIT_D2C_CLAIM_REJECTED_MEMBER = "d2c.claim_rejected_member_account"
 
 # Pure claim helpers (household anchor + identity split + contact masking) live
 # in claim_logic.py so they're unit-testable without boto3/powertools.
@@ -137,10 +140,33 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
     client_id, household_id, _is_new = resolve_household(existing_role, sub)
 
     # Idempotent: if this user's household already owns it, return the patient.
+    # (Runs BEFORE the Care Circle guard on purpose — a Member re-scanning
+    # their own household's claimed device gets this benign no-write response,
+    # not a 409.)
     if device.get("owningClientId") == client_id:
         existing = _active_patient_for_client(client_id) or _patient_for_client(client_id)
         if existing:
             return ok_response({"patient": _patient_view(existing), "alreadyClaimed": True})
+
+    # Care Circle guard (d2c-care-circle.md §5.6 / D2): a Member's claim must
+    # not resolve into the household they merely VIEW — resolve_household
+    # returns that household, the §5.7 dedupe would attach the device to ITS
+    # patient, and the role-row overwrite below would promote the member to
+    # owner of someone else's household. V1 posture: members can't claim;
+    # V2's memberships model turns this into "add an owner membership."
+    if existing_role and existing_role.get("role") == "family_viewer":
+        emit_audit(event=AUDIT_D2C_CLAIM_REJECTED_MEMBER,
+                   actor={"userId": sub, "role": "family_viewer",
+                          "clientId": client_id},
+                   subject={"serialNumber": serial},
+                   action="event",
+                   request_id=_request_id(event))
+        raise ApiError(
+            code="MEMBER_CANNOT_CLAIM",
+            message=("Your account is part of another Care Circle. "
+                     "Contact support to set up your own walker."),
+            status=409,
+        )
 
     # §5.2b ownership gate (spec D6): a device owned by ANOTHER household is
     # never claimable, regardless of lifecycle status. The normal post-recycle
@@ -260,6 +286,9 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
         "role": "household_owner",
         "role_userId": f"household_owner#{sub}",
         "isWalkerUser": owner_is_walker,
+        # Roster rendering (d2c-care-circle.md §5.4) — owner rows carry a
+        # display name like invited-member rows do.
+        "displayName": owner_name,
         "email": claims.get("email", ""),
         "phone": claims.get("phoneNumber", ""),
         "validFrom": now_iso,

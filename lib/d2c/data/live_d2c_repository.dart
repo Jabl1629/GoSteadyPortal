@@ -237,21 +237,28 @@ class LiveD2CRepository implements D2CRepository {
         (dev.status == 'provisioned' || dev.status == 'ready_to_provision');
 
     // ── Viewer + walker ──
+    // A family_viewer is a Care Circle member looking at someone ELSE's
+    // walker (d2c-care-circle.md) — drives the "Susan's activity" (vs
+    // "your activity") copy. household_owner keeps the Phase-1 solo
+    // walker-user-as-admin default. (A caregiver-owner is still framed as
+    // the walker — pre-existing limitation until custom:isWalkerUser is
+    // threaded through UserClaims.)
     final u = _auth.currentUser;
+    final viewerIsMember = u?.role == UserRole.familyViewer;
     final viewer = CareCircleMember(
       userId: u?.userId ?? '',
       displayName: u?.displayName ?? 'You',
-      relationship: 'Self',
+      relationship: viewerIsMember ? 'Member' : 'Self',
       email: u?.email ?? '',
       isAdmin: u?.role == UserRole.householdOwner,
-      isWalkerUser: true, // Phase-1 solo walker-user-as-admin (see class doc)
+      isWalkerUser: !viewerIsMember,
       isViewer: true,
     );
     final walker = Walker(
       id: patient.patientId,
       displayName: patient.displayName,
       firstName: patient.displayName.trim().split(RegExp(r'\s+')).first,
-      relationshipToViewer: 'You',
+      relationshipToViewer: viewerIsMember ? '' : 'You',
       deviceSerial: dev?.serialNumber ?? '',
     );
 
@@ -305,6 +312,110 @@ class LiveD2CRepository implements D2CRepository {
         ),
     ]..sort((a, b) => a.date.compareTo(b.date));
     return out;
+  }
+
+  // ── Care Circle (d2c-care-circle.md §5.9) ──────────────────────
+
+  @override
+  Future<CareCircleData> careCircle() async {
+    final roster = await _api.getCareCircle();
+    final members = [
+      for (final m in roster.members)
+        CareCircleMember(
+          userId: m.userId ?? '',
+          displayName: m.displayName,
+          relationship: m.relationship,
+          email: '',
+          contactMask: m.contactMask,
+          isAdmin: m.role == 'household_owner',
+          isWalkerUser: m.isWalkerUser,
+          isViewer: m.isViewer,
+          // lastActiveAt isn't tracked in V1; null renders as the
+          // contact mask / walker copy in the card subtitle.
+          lastActiveAt: null,
+        ),
+    ];
+    final self = members.where((m) => m.isViewer).toList();
+    final walkerEntries = members.where((m) => m.isWalkerUser).toList();
+    return CareCircleData(
+      members: members,
+      invites: [for (final i in roster.pendingInvites) _inviteView(i)],
+      requests: const [], // walk-up access requests are 5b (deferred)
+      walkerName: walkerEntries.isEmpty
+          ? 'your walker'
+          : walkerEntries.first.displayName.trim().split(RegExp(r'\s+')).first,
+      viewerIsAdmin: self.isNotEmpty
+          ? self.first.isAdmin
+          : _auth.currentUser?.role == UserRole.householdOwner,
+      viewerUserId: _auth.currentUser?.userId ?? '',
+    );
+  }
+
+  @override
+  Future<PendingInvite> sendInvite({
+    required String name,
+    required String phone,
+    String relationship = '',
+    bool asAdmin = false,
+    bool isWalkerUser = false,
+  }) async {
+    final created = await _api.sendCareInvite(
+      name: name,
+      phone: phone,
+      relationship: relationship,
+      asAdmin: asAdmin,
+      isWalkerUser: isWalkerUser,
+    );
+    return _inviteView(created);
+  }
+
+  @override
+  Future<void> resendInvite(String inviteId) => _api.resendCareInvite(inviteId);
+
+  @override
+  Future<void> revokeInvite(String inviteId) => _api.revokeCareInvite(inviteId);
+
+  @override
+  Future<void> setMemberAdmin(String userId, {required bool admin}) =>
+      _api.setCareMemberRole(userId, admin: admin);
+
+  @override
+  Future<void> removeMember(String userId) => _api.removeCareMember(userId);
+
+  @override
+  Future<List<JoinableInvite>> pendingInvitesForMe() =>
+      _api.getPendingInvitesForMe();
+
+  @override
+  Future<AcceptInviteResult> acceptInvite(String inviteId) async {
+    final result = await _api.acceptCareInvite(inviteId);
+    // The membership row is persisted server-side; refresh the token so
+    // custom:clientId/custom:role reflect the joined household before the
+    // dashboard reads — same pattern as post-claim (§C56).
+    await _auth.refreshClaims();
+    return result;
+  }
+
+  @override
+  Future<void> ackAlert(String patientId, String alertId, {String? notes}) =>
+      _api.ackAlert(patientId, alertId, notes: notes);
+
+  PendingInvite _inviteView(RosterInvite i) {
+    final now = DateTime.now();
+    final expiresIn = i.expiresAt == null
+        ? 0
+        : i.expiresAt!.difference(now).inDays.clamp(0, 365);
+    return PendingInvite(
+      id: i.inviteId,
+      name: i.displayName,
+      email: '',
+      contactMask: i.contactMask,
+      relationship: i.relationship,
+      invitedByName: '',
+      sentAt: i.createdAt ?? now,
+      asAdmin: i.role == 'household_owner',
+      expiresInDays: expiresIn,
+    );
   }
 
   // ── Internals ─────────────────────────────────────────────────

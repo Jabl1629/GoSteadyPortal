@@ -29,6 +29,48 @@ abstract class D2CRepository {
 
   /// Daily history for the 30/90-day History view.
   Future<List<HistoryDay>> history(String patientId, {required int days});
+
+  // ── Care Circle (d2c-care-circle.md §5.9) ──────────────────────
+
+  /// The household roster + pending invites + viewer standing.
+  Future<CareCircleData> careCircle();
+
+  /// Admin sends a phone-first SMS invite; returns the created pending
+  /// invite for optimistic list insertion.
+  Future<PendingInvite> sendInvite({
+    required String name,
+    required String phone,
+    String relationship = '',
+    bool asAdmin = false,
+    bool isWalkerUser = false,
+  });
+
+  /// Admin re-sends the invite SMS (re-arms the 14-day expiry).
+  Future<void> resendInvite(String inviteId);
+
+  /// Admin revokes a pending invite.
+  Future<void> revokeInvite(String inviteId);
+
+  /// Admin promotes/demotes a member. The server enforces the
+  /// last-Admin guard.
+  Future<void> setMemberAdmin(String userId, {required bool admin});
+
+  /// Admin removes a member — or a member removes THEMSELVES (leave).
+  /// Access ends on the member's next API call.
+  Future<void> removeMember(String userId);
+
+  /// Live invites addressed to the signed-in caller's verified phone
+  /// (the organic path: got the text, signed up without tapping the link).
+  Future<List<JoinableInvite>> pendingInvitesForMe();
+
+  /// Accept an invite (server matches the caller's VERIFIED phone).
+  /// The live implementation refreshes the token afterwards so
+  /// `custom:clientId`/`custom:role` reflect the joined household.
+  Future<AcceptInviteResult> acceptInvite(String inviteId);
+
+  /// Acknowledge an open alert ("I called Mom") — 2A-AA first-write-wins,
+  /// permitted for members per d2c-care-circle.md D3.
+  Future<void> ackAlert(String patientId, String alertId, {String? notes});
 }
 
 /// Mock repository for the demo build — delegates to the static
@@ -66,4 +108,107 @@ class D2CMockRepository implements D2CRepository {
     required int days,
   }) async =>
       D2CMockData.history(days: days);
+
+  // ── Care Circle (in-memory mock state so demo mutations stick) ──
+
+  static List<CareCircleMember>? _members;
+  static List<PendingInvite>? _invites;
+  static List<AccessRequest>? _requests;
+
+  static void _seed() {
+    _members ??= List.of(D2CMockData.careCircle());
+    _invites ??= List.of(D2CMockData.pendingInvites());
+    _requests ??= List.of(D2CMockData.accessRequests());
+  }
+
+  @override
+  Future<CareCircleData> careCircle() async {
+    _seed();
+    return CareCircleData(
+      members: List.unmodifiable(_members!),
+      invites: List.unmodifiable(_invites!),
+      requests: List.unmodifiable(_requests!),
+      walkerName: 'Susan',
+      viewerIsAdmin: true,
+      viewerUserId: 'user_sarah',
+    );
+  }
+
+  @override
+  Future<PendingInvite> sendInvite({
+    required String name,
+    required String phone,
+    String relationship = '',
+    bool asAdmin = false,
+    bool isWalkerUser = false,
+  }) async {
+    _seed();
+    final digits = phone.replaceAll(RegExp(r'\D'), '');
+    final tail = digits.length >= 4 ? digits.substring(digits.length - 4) : digits;
+    final invite = PendingInvite(
+      id: 'inv_mock_${DateTime.now().millisecondsSinceEpoch}',
+      name: name,
+      email: '',
+      contactMask: '•••-$tail',
+      relationship: relationship,
+      invitedByName: 'Sarah',
+      sentAt: DateTime.now(),
+      asAdmin: asAdmin,
+      expiresInDays: 14,
+    );
+    _invites!.add(invite);
+    return invite;
+  }
+
+  @override
+  Future<void> resendInvite(String inviteId) async {}
+
+  @override
+  Future<void> revokeInvite(String inviteId) async {
+    _seed();
+    _invites!.removeWhere((i) => i.id == inviteId);
+  }
+
+  @override
+  Future<void> setMemberAdmin(String userId, {required bool admin}) async {
+    _seed();
+    final idx = _members!.indexWhere((m) => m.userId == userId);
+    if (idx < 0) return;
+    final m = _members![idx];
+    _members![idx] = CareCircleMember(
+      userId: m.userId,
+      displayName: m.displayName,
+      relationship: m.relationship,
+      email: m.email,
+      phoneE164: m.phoneE164,
+      contactMask: m.contactMask,
+      isAdmin: admin,
+      isWalkerUser: m.isWalkerUser,
+      isViewer: m.isViewer,
+      lastActiveAt: m.lastActiveAt,
+    );
+  }
+
+  @override
+  Future<void> removeMember(String userId) async {
+    _seed();
+    _members!.removeWhere((m) => m.userId == userId);
+  }
+
+  @override
+  Future<List<JoinableInvite>> pendingInvitesForMe() async => const [];
+
+  @override
+  Future<AcceptInviteResult> acceptInvite(String inviteId) async =>
+      const AcceptInviteResult(
+        clientId: 'dtc_mock',
+        householdName: "Susan's household",
+        walkerName: 'Susan',
+        role: 'family_viewer',
+        isWalkerUser: false,
+        alreadyMember: false,
+      );
+
+  @override
+  Future<void> ackAlert(String patientId, String alertId, {String? notes}) async {}
 }

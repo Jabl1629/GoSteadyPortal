@@ -102,6 +102,166 @@ class ClaimResponse {
   }
 }
 
+// ── Care Circle (d2c-care-circle.md §5.2) ──────────────────────────
+
+/// `GET /api/v1/household/members` — the roster. `pendingInvites` is
+/// present only for Admin callers (the server omits it for plain members).
+class CareCircleRoster {
+  final List<RosterMember> members;
+  final List<RosterInvite> pendingInvites;
+
+  const CareCircleRoster({required this.members, required this.pendingInvites});
+
+  factory CareCircleRoster.fromJson(Map<String, dynamic> json) {
+    final rawMembers = (json['members'] as List<dynamic>?) ?? const [];
+    final rawInvites = (json['pendingInvites'] as List<dynamic>?) ?? const [];
+    return CareCircleRoster(
+      members: rawMembers
+          .map((e) => RosterMember.fromJson(e as Map<String, dynamic>))
+          .toList(growable: false),
+      pendingInvites: rawInvites
+          .map((e) => RosterInvite.fromJson(e as Map<String, dynamic>))
+          .toList(growable: false),
+    );
+  }
+}
+
+/// One confirmed member row. `userId` is null for the synthesized
+/// account-less walker entry (D10). Raw phone never crosses the API —
+/// only `contactMask` (•••-1234).
+class RosterMember {
+  final String? userId;
+  final String displayName;
+  final String relationship;
+  final String? role; // household_owner | family_viewer | null (walker entry)
+  final bool isWalkerUser;
+  final String contactMask;
+  final String? joinedAt;
+  final bool isViewer; // true for the signed-in caller's own row
+
+  const RosterMember({
+    required this.userId,
+    required this.displayName,
+    required this.relationship,
+    required this.role,
+    required this.isWalkerUser,
+    required this.contactMask,
+    required this.joinedAt,
+    required this.isViewer,
+  });
+
+  factory RosterMember.fromJson(Map<String, dynamic> json) => RosterMember(
+        userId: json['userId'] as String?,
+        displayName: (json['displayName'] as String?) ?? '',
+        relationship: (json['relationship'] as String?) ?? '',
+        role: json['role'] as String?,
+        isWalkerUser: (json['isWalkerUser'] as bool?) ?? false,
+        contactMask: (json['contactMask'] as String?) ?? '',
+        joinedAt: json['joinedAt'] as String?,
+        isViewer: (json['isViewer'] as bool?) ?? false,
+      );
+}
+
+/// One pending invite in the Admin roster view (and the send response).
+class RosterInvite {
+  final String inviteId;
+  final String displayName;
+  final String relationship;
+  final String contactMask;
+  final String role;
+  final bool isWalkerUser;
+  final DateTime? createdAt;
+  final DateTime? expiresAt;
+
+  const RosterInvite({
+    required this.inviteId,
+    required this.displayName,
+    required this.relationship,
+    required this.contactMask,
+    required this.role,
+    required this.isWalkerUser,
+    required this.createdAt,
+    required this.expiresAt,
+  });
+
+  factory RosterInvite.fromJson(Map<String, dynamic> json) => RosterInvite(
+        inviteId: (json['inviteId'] as String?) ?? '',
+        displayName: (json['displayName'] as String?) ?? '',
+        relationship: (json['relationship'] as String?) ?? '',
+        contactMask: (json['contactMask'] as String?) ?? '',
+        role: (json['role'] as String?) ?? 'family_viewer',
+        isWalkerUser: (json['isWalkerUser'] as bool?) ?? false,
+        createdAt: DateTime.tryParse((json['createdAt'] as String?) ?? ''),
+        expiresAt: DateTime.tryParse((json['expiresAt'] as String?) ?? ''),
+      );
+}
+
+/// `GET /api/v1/invites/pending` — a live invite addressed to the CALLER's
+/// verified phone, described from the invitee's side (which household
+/// they'd be joining).
+class JoinableInvite {
+  final String inviteId;
+  final String householdName;
+  final String walkerName;
+  final String inviterName;
+  final String role;
+  final bool isWalkerUser;
+  final DateTime? expiresAt;
+
+  const JoinableInvite({
+    required this.inviteId,
+    required this.householdName,
+    required this.walkerName,
+    required this.inviterName,
+    required this.role,
+    required this.isWalkerUser,
+    required this.expiresAt,
+  });
+
+  factory JoinableInvite.fromJson(Map<String, dynamic> json) => JoinableInvite(
+        inviteId: (json['inviteId'] as String?) ?? '',
+        householdName: (json['householdName'] as String?) ?? '',
+        walkerName: (json['walkerName'] as String?) ?? '',
+        inviterName: (json['inviterName'] as String?) ?? '',
+        role: (json['role'] as String?) ?? 'family_viewer',
+        isWalkerUser: (json['isWalkerUser'] as bool?) ?? false,
+        expiresAt: DateTime.tryParse((json['expiresAt'] as String?) ?? ''),
+      );
+}
+
+/// `POST /api/v1/invites/accept` result. After a fresh join the caller
+/// must `refreshClaims()` so the next token carries the household —
+/// `LiveD2CRepository.acceptInvite` does this automatically.
+class AcceptInviteResult {
+  final String clientId;
+  final String householdName;
+  final String walkerName;
+  final String role;
+  final bool isWalkerUser;
+  final bool alreadyMember;
+
+  const AcceptInviteResult({
+    required this.clientId,
+    required this.householdName,
+    required this.walkerName,
+    required this.role,
+    required this.isWalkerUser,
+    required this.alreadyMember,
+  });
+
+  factory AcceptInviteResult.fromJson(Map<String, dynamic> json) {
+    final h = (json['household'] as Map<String, dynamic>?) ?? const {};
+    return AcceptInviteResult(
+      clientId: (h['clientId'] as String?) ?? '',
+      householdName: (h['householdName'] as String?) ?? '',
+      walkerName: (h['walkerName'] as String?) ?? '',
+      role: (h['role'] as String?) ?? 'family_viewer',
+      isWalkerUser: (h['isWalkerUser'] as bool?) ?? false,
+      alreadyMember: (json['alreadyMember'] as bool?) ?? false,
+    );
+  }
+}
+
 /// The patient row created (or returned) by the claim. A subset of the
 /// 2A-RD `PatientFull` shape, plus the D2C-only `isWalkerUser` flag. The
 /// portal uses `patientId` to immediately fetch the full detail + render

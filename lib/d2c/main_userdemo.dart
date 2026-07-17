@@ -6,6 +6,7 @@ import '../auth/mock_auth_service.dart';
 import '../theme/app_theme.dart';
 import 'd2c_preview.dart';
 import 'd2c_routes.dart';
+import 'data/d2c_repository.dart';
 import 'screens/d2c_account_screens.dart';
 import 'screens/d2c_care_team_screen.dart';
 import 'screens/d2c_history_screen.dart';
@@ -102,7 +103,10 @@ GoRouter _buildRouter(MockAuthService auth) {
       // ── Care Team (Admin view — the solo walker-user-is-Admin case) ─
       GoRoute(
         path: D2CRoutes.careTeam,
-        builder: (_, __) => const D2CCareTeamScreen(viewerIsAdmin: true),
+        builder: (_, __) => const D2CCareTeamScreen(
+          repository: D2CMockRepository(),
+          viewerIsAdmin: true,
+        ),
       ),
 
       // ── Account + drill-downs ─────────────────────────────────────

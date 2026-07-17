@@ -45,6 +45,9 @@ export class D2CAuthStack extends cdk.Stack {
   public readonly userPool: cognito.UserPool;
   /** D2C-Portal public App Client. */
   public readonly portalClient: cognito.UserPoolClient;
+  /** Twilio creds secret — shared by the OTP sender here and the Care
+   *  Circle invite SMS (api-stack's care-circle Lambda). */
+  public readonly twilioSecret: secretsmanager.ISecret;
 
   constructor(scope: Construct, id: string, props: D2CAuthStackProps) {
     super(scope, id, props);
@@ -65,13 +68,14 @@ export class D2CAuthStack extends cdk.Stack {
     // source control, CloudFormation, or chat. See
     // docs/playbooks/d2c-twilio-setup.md. The custom-auth Lambda reads it at
     // runtime; until populated, the OTP flow fails closed.
-    const twilioSecret = new secretsmanager.Secret(this, 'D2CTwilioSecret', {
+    const twilioSecret: secretsmanager.Secret = new secretsmanager.Secret(this, 'D2CTwilioSecret', {
       secretName: `gosteady/${p}/twilio`,
       description:
         'Twilio creds for D2C SMS OTP — JSON {account_sid, auth_token, from}. ' +
         'Populate out-of-band; see docs/playbooks/d2c-twilio-setup.md.',
       removalPolicy: removal,
     });
+    this.twilioSecret = twilioSecret;
 
     // ── Custom-auth trigger Lambda (SMS-OTP via Twilio) ───────────────
     const customAuthLambda = new lambda.Function(this, 'D2CCustomAuth', {

@@ -1117,6 +1117,102 @@ export class ApiStack extends cdk.Stack {
     });
     d2cClaimErrorsAlarm.addAlarmAction(snsAction);
 
+    // ════════════════════════════════════════════════════════════════
+    // Care Circle — D2C invites + membership + roster
+    // ════════════════════════════════════════════════════════════════
+    //
+    // Spec: docs/specs/d2c-care-circle.md. All routes bind the D2C pool
+    // authorizer. Mutations are ROW-authoritative — the handler re-reads
+    // the caller's RoleAssignments row per request — so demote/remove take
+    // effect immediately, not at token refresh (same instant-revoke posture
+    // as linked_patient_ids on the read path).
+    const careCircle = new ProcessingLambda(this, 'CareCircle', {
+      config,
+      functionName: `gosteady-${env}-care-circle`,
+      handlerDir: path.join(__dirname, '..', '..', 'lambda', 'care-circle'),
+      description: 'D2C Care Circle — phone-first invites, membership, roster',
+      memoryMb: config.patientMgmtMemoryMb,
+      timeoutSeconds: config.patientMgmtTimeoutSeconds,
+      powertoolsLayer,
+      tracingActive: true,
+      environment: {
+        ENVIRONMENT: env,
+        CARE_INVITES_TABLE: authStack.careInvitesTable.tableName,
+        ROLE_ASSIGNMENTS_TABLE: authStack.roleAssignmentsTable.tableName,
+        PATIENTS_TABLE: dataStack.patientsTable.tableName,
+        ORGANIZATIONS_TABLE: dataStack.organizationsTable.tableName,
+        CLAIM_BINDING_PEPPER_SECRET_ARN: claimBindingPepper.secretArn,
+        TWILIO_SECRET_ARN: d2cAuthStack.twilioSecret.secretArn,
+        D2C_APP_BASE_URL: `https://${config.d2cAppDomain}`,
+      },
+    });
+    // RW: invites CRUD + membership rows (accept/promote/remove). Patients
+    // is RW for exactly one conditional write — linking an account-less
+    // walker's Patient.cognitoUserId on an isWalkerUser accept (spec D11).
+    // Pepper: invite contactHash uses the same HMAC pepper as claim-binding
+    // (spec D7). Twilio: the invite SMS sender (shared secret with the OTP
+    // custom-auth Lambda in the D2C-Auth stack).
+    authStack.careInvitesTable.grantReadWriteData(careCircle.function);
+    authStack.roleAssignmentsTable.grantReadWriteData(careCircle.function);
+    dataStack.patientsTable.grantReadWriteData(careCircle.function);
+    dataStack.organizationsTable.grantReadData(careCircle.function);
+    claimBindingPepper.grantRead(careCircle.function);
+    d2cAuthStack.twilioSecret.grantRead(careCircle.function);
+    identityKey.grantEncryptDecrypt(careCircle.function);
+    auditKey.grantEncryptDecrypt(careCircle.function);
+
+    const careCircleIntegration = new HttpLambdaIntegration(
+      'CareCircleIntegration',
+      careCircle.function,
+    );
+    const careCircleRoutes: Array<[apigwv2.HttpMethod, string]> = [
+      [apigwv2.HttpMethod.POST, '/api/v1/household/invites'],
+      [apigwv2.HttpMethod.POST, '/api/v1/household/invites/{inviteId}/resend'],
+      [apigwv2.HttpMethod.DELETE, '/api/v1/household/invites/{inviteId}'],
+      [apigwv2.HttpMethod.GET, '/api/v1/household/members'],
+      [apigwv2.HttpMethod.PATCH, '/api/v1/household/members/{userId}'],
+      [apigwv2.HttpMethod.DELETE, '/api/v1/household/members/{userId}'],
+      [apigwv2.HttpMethod.GET, '/api/v1/invites/pending'],
+      [apigwv2.HttpMethod.POST, '/api/v1/invites/accept'],
+    ];
+    for (const [method, routePath] of careCircleRoutes) {
+      this.httpApi.addRoutes({
+        path: routePath,
+        methods: [method],
+        integration: careCircleIntegration,
+        authorizer: d2cAuthorizer,
+      });
+    }
+
+    // Member alert-ack (d2c-care-circle.md §5.7): the facility-authorizer
+    // ack route is unreachable for D2C-pool JWTs, so the same action is
+    // re-registered under the /d2c/ prefix — exactly the dashboard-reads
+    // pattern above. alert-actions normalizes the prefix before dispatch.
+    this.httpApi.addRoutes({
+      path: '/api/v1/d2c/alerts/{patientId}/{timestamp}',
+      methods: [apigwv2.HttpMethod.PATCH],
+      integration: alertActionsIntegration,
+      authorizer: d2cAuthorizer,
+    });
+
+    // care-circle alarm (mirror the per-handler pattern).
+    const careCircleErrorsAlarm = new cloudwatch.Alarm(this, 'CareCircleErrors', {
+      alarmName: `gosteady-${env}-care-circle-errors`,
+      alarmDescription:
+        'care-circle Lambda Errors > 0 in 5 min — uncaught exception in the ' +
+        'Care Circle invites/membership handler. Check ' +
+        '/aws/lambda/gosteady-{env}-care-circle.',
+      metric: careCircle.function.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    careCircleErrorsAlarm.addAlarmAction(snsAction);
+
     // ── 2A-DL outputs ──────────────────────────────────────────────
     new cdk.CfnOutput(this, 'DeviceApiName', {
       value: deviceApi.function.functionName,
@@ -1149,6 +1245,11 @@ export class ApiStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'D2CClaimName', {
       value: d2cClaim.function.functionName,
       exportName: `${env}-D2CClaimName`,
+    });
+    // ── Care Circle outputs ────────────────────────────────────────
+    new cdk.CfnOutput(this, 'CareCircleName', {
+      value: careCircle.function.functionName,
+      exportName: `${env}-CareCircleName`,
     });
 
     // ── Outputs (existing 2A-0) ───────────────────────────────────

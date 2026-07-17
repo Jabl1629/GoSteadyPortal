@@ -7,6 +7,7 @@ import 'auth/d2c_auth_service.dart';
 import 'd2c_routes.dart';
 import 'data/d2c_repository.dart';
 import 'live/d2c_live_screens.dart';
+import 'screens/d2c_care_team_screen.dart';
 
 /// Root of the live D2C consumer app (entry: `lib/main_d2c.dart`).
 /// Self-contained — its own [GoRouter], distinct from the facility
@@ -53,6 +54,7 @@ GoRouter buildD2CRouter({
 }) {
   bool isPublic(String loc) =>
       loc.startsWith('/setup') ||
+      loc.startsWith('/join') ||
       loc == '/sign-in' ||
       loc == '/sign-up' ||
       loc == '/otp';
@@ -83,12 +85,25 @@ GoRouter buildD2CRouter({
           signedIn: auth.isSignedIn,
         ),
       ),
+      // Care Circle invite landing (d2c-care-circle.md §5.9). Public: the
+      // screen routes signed-out users into phone-first onboarding carrying
+      // the invite id; membership is only granted server-side on a
+      // verified-phone match, so the link itself is just a pointer.
+      GoRoute(
+        path: '/join/:inviteId',
+        builder: (context, state) => D2CJoinScreen(
+          inviteId: state.pathParameters['inviteId'] ?? '',
+          repository: repository,
+          signedIn: auth.isSignedIn,
+        ),
+      ),
       GoRoute(
         path: '/sign-up',
         redirect: requireD2CAuth,
         builder: (context, state) => D2CSignUpScreen(
           auth: d2cAuth!,
           walkerId: state.uri.queryParameters['walkerId'],
+          joinInviteId: state.uri.queryParameters['join'],
           repository: repository,
           // Phone collected on the reserved landing, passed via router `extra`
           // (never the URL — no PII in query strings). Null on retail / reload.
@@ -98,7 +113,10 @@ GoRouter buildD2CRouter({
       GoRoute(
         path: '/sign-in',
         redirect: requireD2CAuth,
-        builder: (context, state) => D2CSignInScreen(auth: d2cAuth!),
+        builder: (context, state) => D2CSignInScreen(
+          auth: d2cAuth!,
+          joinInviteId: state.uri.queryParameters['join'],
+        ),
       ),
       GoRoute(
         path: '/otp',
@@ -108,6 +126,7 @@ GoRouter buildD2CRouter({
           repository: repository,
           phoneHint: state.uri.queryParameters['phoneHint'] ?? '',
           walkerId: state.uri.queryParameters['walkerId'],
+          joinInviteId: state.uri.queryParameters['join'],
         ),
       ),
       GoRoute(
@@ -120,7 +139,8 @@ GoRouter buildD2CRouter({
       ),
       GoRoute(
         path: D2CRoutes.careTeam,
-        builder: (context, state) => const D2CCareTeamPlaceholder(),
+        builder: (context, state) =>
+            D2CCareTeamScreen(repository: repository),
       ),
       GoRoute(
         path: D2CRoutes.account,

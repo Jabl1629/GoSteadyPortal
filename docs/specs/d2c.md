@@ -114,7 +114,7 @@ build for D2C; everything else is deployed.**
 | **Twilio integration + SMS-dispatch Lambda** | 🔲 new | 2 |
 | **Notification-preferences storage + endpoints** | 🔲 new | 2 |
 | **D2C deactivate/return-device UI affordance** | 🔲 new | 3 |
-| **Care Circle: invites, access-requests, member mgmt (tables + endpoints + UI)** | 🔲 new | 5 |
+| **Care Circle: invites, member mgmt, member view (5a+5d)** | ✅ shipped dev+prod 2026-07-17 ([`d2c-care-circle.md`](d2c-care-circle.md)); 5b access-requests + 5c member SMS still 🔲 | 5 |
 
 > **Firmware impact: none through Phase 4.** Activation, heartbeat ack, and
 > wipe-ack recycle all use contracts already shipped (ARCHITECTURE §4, §7;
@@ -216,9 +216,18 @@ user sees only their own data; the previous owner retains their historical
 data but no access to the device. Confirms ownership reassignment + tenant
 isolation on one physical unit.
 
-### Phase 5 — Caregivers (Care Circle), phased 🔲
+### Phase 5 — Caregivers (Care Circle), phased 🟢 (5a+5d shipped; 5b+5c deferred)
 **Goal:** Add multi-member functionality. Sub-phased because it's the
 largest, least-proven surface.
+
+> **2026-07-14 — detail superseded by [`d2c-care-circle.md`](d2c-care-circle.md)**
+> (design locked). Invites are **phone-first SMS** with a verified-phone
+> HMAC match at accept — the email/magic-link sketch in 5a below predates
+> the phone-first pool cutover (coord §C56; SMS-OTP is the sole auth
+> factor, so email cannot onboard anyone). **2026-07-17: 5a + 5d shipped
+> dev + prod; operator live-phone E2E passed** (invite SMS → join →
+> member dashboard). 5b (QR access-requests) + 5c (member SMS alerts,
+> rides the Phase-2 pipeline) remain deferred.
 
 - **5a — Invite + claim (caregiver).** Admin invites by name+email; magic-
   link claim; caregiver joins as Member. New: invites table +

@@ -2,48 +2,93 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../api/api_exception.dart';
 import '../../theme/app_theme.dart';
+import '../d2c_routes.dart';
 import '../data/d2c_mock_data.dart';
+import '../data/d2c_repository.dart';
 import '../widgets/d2c_bottom_nav.dart';
 
-/// Care Team (Care Circle) management screen.
+/// Care Team (Care Circle) management screen — repository-driven
+/// (d2c-care-circle.md §5.9). The live build wires the deployed
+/// care-circle endpoints; the demo/preview builds pass
+/// [D2CMockRepository], which keeps in-memory state.
 ///
 /// Shows the household's Members + their roles, pending invites, and
-/// (Admin-only) pending walk-up access requests. Admins get write
-/// affordances (invite, promote/demote, remove, approve/deny); plain
-/// Members see a read-only roster.
+/// (Admin-only) pending walk-up access requests (5b — mock-only until
+/// that ships). Admins get write affordances (invite, promote/demote,
+/// remove); plain Members see a read-only roster + Leave.
 ///
-/// `viewerIsAdmin` controls the whole write surface. The walker user is
-/// rendered as a Member even when they have no account (no email/last-
-/// active) — the architecture treats "walker user without account" as a
-/// first-class state.
+/// The walker user is rendered as a Member even when they have no
+/// account — "walker user without account" is a first-class state (L2).
 class D2CCareTeamScreen extends StatefulWidget {
-  const D2CCareTeamScreen({super.key, this.viewerIsAdmin = true});
+  const D2CCareTeamScreen({
+    super.key,
+    required this.repository,
+    this.viewerIsAdmin,
+  });
 
-  final bool viewerIsAdmin;
+  final D2CRepository repository;
+
+  /// Preview-hub override for the write surface; null (live) derives it
+  /// from the roster response.
+  final bool? viewerIsAdmin;
 
   @override
   State<D2CCareTeamScreen> createState() => _D2CCareTeamScreenState();
 }
 
 class _D2CCareTeamScreenState extends State<D2CCareTeamScreen> {
-  late List<CareCircleMember> _members;
-  late List<PendingInvite> _invites;
-  late List<AccessRequest> _requests;
+  CareCircleData? _data;
+  Object? _error;
+  bool _loading = true;
+
+  List<CareCircleMember> _members = const [];
+  List<PendingInvite> _invites = const [];
+  List<AccessRequest> _requests = const [];
 
   @override
   void initState() {
     super.initState();
-    _members = D2CMockData.careCircle();
-    _invites = D2CMockData.pendingInvites();
-    _requests = D2CMockData.accessRequests();
+    _load();
   }
 
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final data = await widget.repository.careCircle();
+      if (!mounted) return;
+      setState(() {
+        _data = data;
+        _members = List.of(data.members);
+        _invites = List.of(data.invites);
+        _requests = List.of(data.requests);
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e;
+        _loading = false;
+      });
+    }
+  }
+
+  bool get _isAdmin => widget.viewerIsAdmin ?? _data?.viewerIsAdmin ?? false;
+  String get _walkerName => _data?.walkerName ?? 'your walker';
   int get _adminCount => _members.where((m) => m.isAdmin).length;
+
+  String _errMsg(Object e) =>
+      e is ApiException ? e.message : 'Something went wrong. Please try again.';
 
   @override
   Widget build(BuildContext context) {
-    final isAdmin = widget.viewerIsAdmin;
+    final isAdmin = _isAdmin;
+    final viewer = _members.where((m) => m.isViewer).toList();
+    final canLeave = viewer.isNotEmpty && !isAdmin;
     return Scaffold(
       backgroundColor: AppTheme.warmWhite,
       appBar: AppBar(
@@ -65,67 +110,76 @@ class _D2CCareTeamScreenState extends State<D2CCareTeamScreen> {
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 640),
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
-            children: [
-              Text(
-                "Everyone who can see Susan's activity. "
-                '${_members.length} ${_members.length == 1 ? "person" : "people"}'
-                '${_invites.isNotEmpty ? " · ${_invites.length} pending" : ""}.',
-                style: const TextStyle(
-                  color: AppTheme.textSoft,
-                  fontSize: 14,
-                  height: 1.4,
-                ),
-              ),
-              const SizedBox(height: 20),
+          child: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : _error != null
+                  ? _ErrorRetry(message: _errMsg(_error!), onRetry: _load)
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
+                      children: [
+                        Text(
+                          "Everyone who can see $_walkerName's activity. "
+                          '${_members.length} ${_members.length == 1 ? "person" : "people"}'
+                          '${_invites.isNotEmpty ? " · ${_invites.length} pending" : ""}.',
+                          style: const TextStyle(
+                            color: AppTheme.textSoft,
+                            fontSize: 14,
+                            height: 1.4,
+                          ),
+                        ),
+                        const SizedBox(height: 20),
 
-              // Access requests (Admin only) — surfaced first; they're
-              // time-sensitive.
-              if (isAdmin && _requests.isNotEmpty) ...[
-                const _SectionLabel('Requests to join'),
-                const SizedBox(height: 10),
-                for (final r in _requests)
-                  _AccessRequestCard(
-                    request: r,
-                    onApprove: () => _decideRequest(r, approved: true),
-                    onDeny: () => _decideRequest(r, approved: false),
-                  ),
-                const SizedBox(height: 24),
-              ],
+                        // Access requests (Admin only) — surfaced first;
+                        // they're time-sensitive. (5b: mock-only for now.)
+                        if (isAdmin && _requests.isNotEmpty) ...[
+                          const _SectionLabel('Requests to join'),
+                          const SizedBox(height: 10),
+                          for (final r in _requests)
+                            _AccessRequestCard(
+                              request: r,
+                              onApprove: () => _decideRequest(r, approved: true),
+                              onDeny: () => _decideRequest(r, approved: false),
+                            ),
+                          const SizedBox(height: 24),
+                        ],
 
-              // Members
-              const _SectionLabel('Members'),
-              const SizedBox(height: 10),
-              for (final m in _members)
-                _MemberCard(
-                  member: m,
-                  canManage: isAdmin && !m.isViewer,
-                  onTap: isAdmin && !m.isViewer
-                      ? () => _openMemberSheet(m)
-                      : null,
-                ),
+                        // Members
+                        const _SectionLabel('Members'),
+                        const SizedBox(height: 10),
+                        for (final m in _members)
+                          _MemberCard(
+                            member: m,
+                            canManage:
+                                isAdmin && !m.isViewer && m.userId.isNotEmpty,
+                            onTap: isAdmin && !m.isViewer && m.userId.isNotEmpty
+                                ? () => _openMemberSheet(m)
+                                : null,
+                          ),
 
-              // Pending invites
-              if (_invites.isNotEmpty) ...[
-                const SizedBox(height: 24),
-                const _SectionLabel('Invited'),
-                const SizedBox(height: 10),
-                for (final inv in _invites)
-                  _InviteCard(
-                    invite: inv,
-                    canManage: isAdmin,
-                    onResend: () => _toast('Invite resent to ${inv.email}'),
-                    onCancel: () => setState(() => _invites.remove(inv)),
-                  ),
-              ],
+                        // Pending invites
+                        if (_invites.isNotEmpty) ...[
+                          const SizedBox(height: 24),
+                          const _SectionLabel('Invited'),
+                          const SizedBox(height: 10),
+                          for (final inv in _invites)
+                            _InviteCard(
+                              invite: inv,
+                              canManage: isAdmin,
+                              onResend: () => _resendInvite(inv),
+                              onCancel: () => _cancelInvite(inv),
+                            ),
+                        ],
 
-              if (isAdmin) ...[
-                const SizedBox(height: 28),
-                _InviteButton(onTap: _openInviteSheet),
-              ],
-            ],
-          ),
+                        if (isAdmin) ...[
+                          const SizedBox(height: 28),
+                          _InviteButton(onTap: _openInviteSheet),
+                        ],
+                        if (canLeave) ...[
+                          const SizedBox(height: 28),
+                          _LeaveButton(onTap: _leaveCareTeam),
+                        ],
+                      ],
+                    ),
         ),
       ),
     );
@@ -149,15 +203,47 @@ class _D2CCareTeamScreenState extends State<D2CCareTeamScreen> {
         : "${r.name}'s request was declined");
   }
 
+  Future<void> _resendInvite(PendingInvite inv) async {
+    try {
+      await widget.repository.resendInvite(inv.id);
+      _toast('Invite resent to ${inv.name}');
+    } catch (e) {
+      if (mounted) _toast(_errMsg(e));
+    }
+  }
+
+  Future<void> _cancelInvite(PendingInvite inv) async {
+    try {
+      await widget.repository.revokeInvite(inv.id);
+      if (!mounted) return;
+      setState(() => _invites.remove(inv));
+      _toast('Invite canceled');
+    } catch (e) {
+      if (mounted) _toast(_errMsg(e));
+    }
+  }
+
   Future<void> _openInviteSheet() async {
-    final result = await showModalBottomSheet<_InviteResult>(
+    final req = await showModalBottomSheet<_InviteRequest>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => const _InviteSheet(),
+      builder: (_) => _InviteSheet(walkerName: _walkerName),
     );
-    if (result != null) {
-      _toast('Invite sent to ${result.email}');
+    if (req == null) return;
+    try {
+      final created = await widget.repository.sendInvite(
+        name: req.name,
+        phone: req.phone,
+        relationship: req.relationship,
+        asAdmin: req.asAdmin,
+        isWalkerUser: req.isWalkerUser,
+      );
+      if (!mounted) return;
+      setState(() => _invites = [..._invites, created]);
+      _toast("Invite texted to ${req.name}");
+    } catch (e) {
+      if (mounted) _toast(_errMsg(e));
     }
   }
 
@@ -174,15 +260,116 @@ class _D2CCareTeamScreenState extends State<D2CCareTeamScreen> {
     if (action == null) return;
     switch (action) {
       case _MemberAction.toggleAdmin:
-        _toast(m.isAdmin
-            ? '${m.displayName} is no longer an admin'
-            : '${m.displayName} is now an admin');
+        try {
+          await widget.repository.setMemberAdmin(m.userId, admin: !m.isAdmin);
+          if (!mounted) return;
+          _toast(m.isAdmin
+              ? '${m.displayName} is no longer an admin'
+              : '${m.displayName} is now an admin');
+          await _load();
+        } catch (e) {
+          if (mounted) _toast(_errMsg(e));
+        }
         break;
       case _MemberAction.remove:
-        setState(() => _members.remove(m));
-        _toast('${m.displayName} removed from the Care Team');
+        try {
+          await widget.repository.removeMember(m.userId);
+          if (!mounted) return;
+          setState(() => _members.remove(m));
+          _toast('${m.displayName} removed from the Care Team');
+        } catch (e) {
+          if (mounted) _toast(_errMsg(e));
+        }
         break;
     }
+  }
+
+  Future<void> _leaveCareTeam() async {
+    final viewerId = _data?.viewerUserId ?? '';
+    if (viewerId.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Leave this Care Team?'),
+        content: Text(
+          "You'll no longer see $_walkerName's activity or alerts. "
+          'An Admin can invite you back any time.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Stay'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppTheme.statusAlert),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Leave'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await widget.repository.removeMember(viewerId);
+      if (!mounted) return;
+      _toast('You left the Care Team');
+      context.go(D2CRoutes.dashboard);
+    } catch (e) {
+      if (mounted) _toast(_errMsg(e));
+    }
+  }
+}
+
+class _ErrorRetry extends StatelessWidget {
+  const _ErrorRetry({required this.message, required this.onRetry});
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.error_outline, size: 44, color: AppTheme.textSoft),
+            const SizedBox(height: 12),
+            Text(message,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppTheme.textDark)),
+            const SizedBox(height: 16),
+            ElevatedButton(onPressed: onRetry, child: const Text('Retry')),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LeaveButton extends StatelessWidget {
+  const _LeaveButton({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        onPressed: onTap,
+        icon: const Icon(Icons.logout_rounded, size: 18),
+        label: const Text('Leave Care Team',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppTheme.statusAlert,
+          side: BorderSide(color: AppTheme.statusAlert.withOpacity(0.5)),
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(100),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -202,11 +389,15 @@ class _MemberCard extends StatelessWidget {
   final VoidCallback? onTap;
 
   String _lastActive() {
-    if (member.isWalkerUser && member.lastActiveAt == null) {
+    if (member.isWalkerUser && member.lastActiveAt == null && member.userId.isEmpty) {
       return 'The walker — no account needed';
     }
     final t = member.lastActiveAt;
-    if (t == null) return 'Hasn\'t signed in yet';
+    if (t == null) {
+      // Live roster: last-active isn't tracked in V1 — show the masked
+      // contact instead of a misleading "hasn't signed in yet".
+      return member.contactMask.isNotEmpty ? member.contactMask : 'Member';
+    }
     final d = DateTime.now().difference(t);
     if (d.inMinutes < 60) return 'Active just now';
     if (d.inHours < 24) return 'Active ${d.inHours}h ago';
@@ -562,13 +753,26 @@ class _InviteButton extends StatelessWidget {
 // Invite bottom sheet
 // ─────────────────────────────────────────────────────────────────────
 
-class _InviteResult {
-  const _InviteResult(this.email);
-  final String email;
+class _InviteRequest {
+  const _InviteRequest({
+    required this.name,
+    required this.phone,
+    required this.relationship,
+    required this.asAdmin,
+    required this.isWalkerUser,
+  });
+
+  final String name;
+  final String phone;
+  final String relationship;
+  final bool asAdmin;
+  final bool isWalkerUser;
 }
 
 class _InviteSheet extends StatefulWidget {
-  const _InviteSheet();
+  const _InviteSheet({required this.walkerName});
+
+  final String walkerName;
 
   @override
   State<_InviteSheet> createState() => _InviteSheetState();
@@ -577,28 +781,39 @@ class _InviteSheet extends StatefulWidget {
 class _InviteSheetState extends State<_InviteSheet> {
   final _formKey = GlobalKey<FormState>();
   final _name = TextEditingController();
-  final _email = TextEditingController();
+  final _phone = TextEditingController();
   final _relationship = TextEditingController();
   bool _asAdmin = false;
+  bool _isWalkerUser = false;
 
   @override
   void dispose() {
     _name.dispose();
-    _email.dispose();
+    _phone.dispose();
     _relationship.dispose();
     super.dispose();
   }
 
   void _submit() {
     if (!_formKey.currentState!.validate()) return;
-    Navigator.of(context).pop(_InviteResult(_email.text.trim()));
+    Navigator.of(context).pop(_InviteRequest(
+      name: _name.text.trim(),
+      phone: _phone.text.trim(),
+      relationship: _relationship.text.trim(),
+      asAdmin: _asAdmin,
+      isWalkerUser: _isWalkerUser,
+    ));
   }
 
   @override
   Widget build(BuildContext context) {
     return _SheetScaffold(
       title: 'Invite someone',
-      subtitle: "They'll get a text and email link to join Susan's Care Team.",
+      // Phone-first (d2c-care-circle.md D1): the invite is a text, and
+      // joining requires verifying that same number — a forwarded link
+      // grants nothing.
+      subtitle: "We'll text them a link to join ${widget.walkerName}'s Care "
+          'Team. They join by verifying this phone number.',
       child: Form(
         key: _formKey,
         child: Column(
@@ -614,29 +829,34 @@ class _InviteSheetState extends State<_InviteSheet> {
             ),
             const SizedBox(height: 14),
             _SheetField(
-              controller: _email,
-              label: 'Email',
-              hint: 'name@example.com',
-              keyboardType: TextInputType.emailAddress,
+              controller: _phone,
+              label: 'Mobile phone',
+              hint: '(555) 123-4567',
+              keyboardType: TextInputType.phone,
               validator: (v) {
-                if (v == null || v.trim().isEmpty) return 'Required';
-                if (!v.contains('@')) return 'Enter a valid email';
+                final digits = (v ?? '').replaceAll(RegExp(r'\D'), '');
+                if (digits.isEmpty) return 'Required';
+                if (digits.length < 10) return 'Enter a 10-digit mobile number';
                 return null;
               },
             ),
             const SizedBox(height: 14),
             _SheetField(
               controller: _relationship,
-              label: 'Relationship to Susan',
+              label: 'Relationship to ${widget.walkerName} (optional)',
               hint: 'e.g. Son, Neighbor, Aide',
               textCapitalization: TextCapitalization.words,
-              validator: (v) =>
-                  (v == null || v.trim().isEmpty) ? 'Required' : null,
             ),
             const SizedBox(height: 18),
             _AdminToggle(
               value: _asAdmin,
               onChanged: (v) => setState(() => _asAdmin = v),
+            ),
+            const SizedBox(height: 10),
+            _WalkerUserToggle(
+              walkerName: widget.walkerName,
+              value: _isWalkerUser,
+              onChanged: (v) => setState(() => _isWalkerUser = v),
             ),
             const SizedBox(height: 22),
             SizedBox(
@@ -657,6 +877,57 @@ class _InviteSheetState extends State<_InviteSheet> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _WalkerUserToggle extends StatelessWidget {
+  const _WalkerUserToggle({
+    required this.walkerName,
+    required this.value,
+    required this.onChanged,
+  });
+  final String walkerName;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+      decoration: BoxDecoration(
+        color: AppTheme.cream,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'This is $walkerName',
+                  style: const TextStyle(
+                    color: AppTheme.textDark,
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                const Text(
+                  "Invite the walker user themselves — links their account to the activity you see.",
+                  style: TextStyle(color: AppTheme.textSoft, fontSize: 12.5),
+                ),
+              ],
+            ),
+          ),
+          Switch(
+            value: value,
+            onChanged: onChanged,
+            activeColor: AppTheme.sage,
+          ),
+        ],
       ),
     );
   }
@@ -721,9 +992,12 @@ class _MemberSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final contact = member.email.isNotEmpty ? member.email : member.contactMask;
+    final subtitleParts =
+        [member.relationship, contact].where((s) => s.isNotEmpty).toList();
     return _SheetScaffold(
       title: member.displayName,
-      subtitle: '${member.relationship} · ${member.email}',
+      subtitle: subtitleParts.isEmpty ? null : subtitleParts.join(' · '),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,

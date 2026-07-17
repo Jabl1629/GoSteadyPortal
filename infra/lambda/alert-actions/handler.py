@@ -92,8 +92,13 @@ _SK_RE = re.compile(
 )
 _NOTES_MAX = 500
 
-# Roles that can ack alerts (Phase 2A-AA L5)
-_CAN_ACK = {"caregiver", "facility_admin", "client_admin", "household_owner", "internal_admin"}
+# Roles that can ack alerts (Phase 2A-AA L5; family_viewer added by
+# d2c-care-circle.md D3/D12 — Care Circle members ack with a note, scoped
+# to their linkedPatientIds via enforce_patient_access below)
+_CAN_ACK = {
+    "caregiver", "facility_admin", "client_admin", "household_owner",
+    "family_viewer", "internal_admin",
+}
 
 # Roles that can write per-patient thresholds (Phase 2A-AA L6)
 _CAN_WRITE_THRESHOLDS = {"facility_admin", "client_admin", "internal_admin"}
@@ -422,6 +427,11 @@ def _route(api_event: dict[str, Any]) -> tuple[str, dict[str, str]]:
     method = (http.get("method") or "").upper()
     route_key = api_event.get("routeKey", "")
     path_params = api_event.get("pathParameters") or {}
+
+    # D2C routes are the same actions re-registered under /api/v1/d2c/* with
+    # the D2C-pool JWT authorizer (api-stack.ts); normalize the prefix before
+    # dispatch — same pattern as patient-api. Handlers are pool-agnostic.
+    route_key = route_key.replace("/api/v1/d2c/", "/api/v1/")
 
     table = {
         ("PATCH", "PATCH /api/v1/alerts/{patientId}/{timestamp}"): "ack_alert",

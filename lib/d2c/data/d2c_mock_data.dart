@@ -43,6 +43,7 @@ class CareCircleMember {
     required this.relationship,
     required this.email,
     this.phoneE164,
+    this.contactMask = '',        // •••-1234 (live roster; raw phone never crosses the API)
     this.isAdmin = false,
     this.isWalkerUser = false,
     this.isViewer = false,        // true for the signed-in user
@@ -55,6 +56,7 @@ class CareCircleMember {
   final String relationship;      // "Daughter", "Son", "Self", "Niece"
   final String email;
   final String? phoneE164;
+  final String contactMask;
   final bool isAdmin;
   final bool isWalkerUser;
   final bool isViewer;
@@ -233,8 +235,10 @@ class D2CDashboardSnapshot {
 /// A pending invitation (sent, not yet claimed).
 class PendingInvite {
   const PendingInvite({
+    this.id = '',                 // inviteId (live; drives resend/revoke)
     required this.name,
     required this.email,
+    this.contactMask = '',        // •••-1234 (live phone-first invites)
     required this.relationship,
     required this.invitedByName,
     required this.sentAt,
@@ -242,13 +246,37 @@ class PendingInvite {
     required this.expiresInDays,
   });
 
+  final String id;
   final String name;
   final String email;
+  final String contactMask;
   final String relationship;
   final String invitedByName;
   final DateTime sentAt;
   final bool asAdmin;
   final int expiresInDays;
+}
+
+/// Everything the Care Team screen needs, from one repository call:
+/// the confirmed roster, pending invites (Admins only), walk-up access
+/// requests (mock/5b only — the live backend returns none until 5b
+/// ships), and the viewer's own standing in the circle.
+class CareCircleData {
+  const CareCircleData({
+    required this.members,
+    required this.invites,
+    this.requests = const [],
+    required this.walkerName,
+    required this.viewerIsAdmin,
+    required this.viewerUserId,
+  });
+
+  final List<CareCircleMember> members;
+  final List<PendingInvite> invites;
+  final List<AccessRequest> requests;
+  final String walkerName;
+  final bool viewerIsAdmin;
+  final String viewerUserId;
 }
 
 /// A walk-up access request awaiting Admin approval (from QR scan).

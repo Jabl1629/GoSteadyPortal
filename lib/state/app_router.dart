@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 
 import '../auth/auth_service_interface.dart';
 import '../d2c/d2c_preview.dart';
+import '../d2c/data/d2c_repository.dart';
 import '../d2c/screens/d2c_account_screens.dart';
 import '../d2c/screens/d2c_care_team_screen.dart';
 import '../d2c/screens/d2c_history_screen.dart';
@@ -131,13 +132,17 @@ GoRouter buildAppRouter({
       // Care Team
       GoRoute(
         path: '/d2c/preview/care-team',
-        builder: (context, state) =>
-            const D2CCareTeamScreen(viewerIsAdmin: true),
+        builder: (context, state) => const D2CCareTeamScreen(
+          repository: D2CMockRepository(),
+          viewerIsAdmin: true,
+        ),
       ),
       GoRoute(
         path: '/d2c/preview/care-team-member',
-        builder: (context, state) =>
-            const D2CCareTeamScreen(viewerIsAdmin: false),
+        builder: (context, state) => const D2CCareTeamScreen(
+          repository: D2CMockRepository(),
+          viewerIsAdmin: false,
+        ),
       ),
       // Onboarding — QR walk-up
       GoRoute(

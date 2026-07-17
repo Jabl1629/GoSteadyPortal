@@ -747,7 +747,7 @@ Access is modeled in two tiers:
 | Role | Typical persona | Scope of access | Write? | MFA | Self-signup |
 |------|------------------|-----------------|--------|-----|-------------|
 | `patient` | Walker user with their own login (rare in MVP) | Own activity only | Self-only edits (e.g., own care notes) | Optional | Yes (then needs household setup) |
-| `family_viewer` | Grandson, daughter, family caregiver | Specific patient(s) listed in `linkedPatientIds` | None — read-only | Optional | No — invited by `household_owner` |
+| `family_viewer` | Grandson, daughter, family caregiver | Specific patient(s) listed in `linkedPatientIds` | Alert-ack only (2026-07-14, [`specs/d2c-care-circle.md`](specs/d2c-care-circle.md) D3) | Optional | No — invited by `household_owner` |
 | `household_owner` | D2C primary signer (often a family member setting up for a relative; sometimes the patient themselves) | Full admin within their synthetic household client | Full | **Optional** (softer than enterprise — reduces D2C signup friction) | Yes (D2C path) |
 | `caregiver` | CNA, aide, floor nurse | One or more **censuses** within one **facility** | Full within scope | Optional | No — admin-created |
 | `facility_admin` | Director of Nursing, ED | All censuses in one **facility** + facility-wide admin actions | Full within facility | **Required** | No — admin-created |
@@ -780,7 +780,7 @@ Greyed-out entries (—) indicate "not permitted."
 | Action | `family_viewer` | `caregiver` | `household_owner` | `facility_admin` | `client_admin` | `internal_admin` |
 |--------|:---:|:---:|:---:|:---:|:---:|:---:|
 | View Census dashboard | own patients | scoped censuses | own household | full facility | full client | any client |
-| Acknowledge Notification | — | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Acknowledge Notification | ✓ (linked)† | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Edit Care Note (US-44) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
 | Pause Notifications (US-31) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
 | Add Resident (US-28) | — | ✓ (scope) | ✓ | ✓ | ✓ | ✓ |
@@ -799,6 +799,10 @@ Greyed-out entries (—) indicate "not permitted."
 | View Audit Log (V2+ UI) | — | — | own household | own facility | own client | any client |
 
 `internal_support` reads everything in this table; writes nothing.
+
+† `family_viewer` acknowledge added 2026-07-14 for the D2C Care Circle,
+scoped to `linkedPatientIds` ([`specs/d2c-care-circle.md`](specs/d2c-care-circle.md)
+D3/D12). The facility-channel family portal (V3) may re-gate this per client.
 
 ### How V1 maps onto this model
 

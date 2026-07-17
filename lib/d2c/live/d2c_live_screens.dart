@@ -356,12 +356,18 @@ class D2CSignUpScreen extends StatefulWidget {
     super.key,
     required this.auth,
     this.walkerId,
+    this.joinInviteId,
     this.repository,
     this.prefilledPhone,
   });
 
   final D2CAuthService auth;
   final String? walkerId;
+
+  /// Care Circle invite context (`/join/{inviteId}` → sign-up). Threaded
+  /// through to /otp, which accepts the invite right after the OTP lands —
+  /// the invite parallel of [walkerId]'s claim (d2c-care-circle.md §5.9).
+  final String? joinInviteId;
 
   /// Optional — when arriving from a reserved-device QR, used to look up the
   /// masked recipient so the form can guide the user to the reserved number
@@ -447,6 +453,9 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
       if (!mounted) return;
       final q = StringBuffer('phoneHint=${Uri.encodeComponent(challenge.phoneHint)}');
       if (widget.walkerId != null) q.write('&walkerId=${Uri.encodeComponent(widget.walkerId!)}');
+      if (widget.joinInviteId != null) {
+        q.write('&join=${Uri.encodeComponent(widget.joinInviteId!)}');
+      }
       context.go('/otp?$q');
     } catch (e) {
       if (mounted) {
@@ -539,9 +548,13 @@ class _InfoBanner extends StatelessWidget {
 // ════════════════════════════════════════════════════════════════════
 
 class D2CSignInScreen extends StatefulWidget {
-  const D2CSignInScreen({super.key, required this.auth});
+  const D2CSignInScreen({super.key, required this.auth, this.joinInviteId});
 
   final D2CAuthService auth;
+
+  /// Care Circle invite context — threaded through to /otp so a returning
+  /// user who tapped a /join link accepts right after sign-in.
+  final String? joinInviteId;
 
   @override
   State<D2CSignInScreen> createState() => _D2CSignInScreenState();
@@ -566,7 +579,11 @@ class _D2CSignInScreenState extends State<D2CSignInScreen> {
     try {
       final challenge = await widget.auth.startSignIn(_phone.text);
       if (!mounted) return;
-      context.go('/otp?phoneHint=${Uri.encodeComponent(challenge.phoneHint)}');
+      final q = StringBuffer('phoneHint=${Uri.encodeComponent(challenge.phoneHint)}');
+      if (widget.joinInviteId != null) {
+        q.write('&join=${Uri.encodeComponent(widget.joinInviteId!)}');
+      }
+      context.go('/otp?$q');
     } catch (e) {
       if (mounted) {
         setState(() => _busy = false);
@@ -610,12 +627,17 @@ class D2COtpEntryScreen extends StatefulWidget {
     required this.repository,
     required this.phoneHint,
     this.walkerId,
+    this.joinInviteId,
   });
 
   final D2CAuthService auth;
   final D2CRepository repository;
   final String phoneHint;
   final String? walkerId;
+
+  /// Care Circle invite to accept right after the OTP lands (the invite
+  /// parallel of [walkerId]'s claim).
+  final String? joinInviteId;
 
   @override
   State<D2COtpEntryScreen> createState() => _D2COtpEntryScreenState();
@@ -642,6 +664,26 @@ class _D2COtpEntryScreenState extends State<D2COtpEntryScreen> {
         } catch (e) {
           // Claim failure shouldn't strand a signed-in user on the OTP
           // screen — surface it but proceed to the dashboard.
+          if (mounted) _snack(context, _errText(e));
+        }
+      }
+      // If we arrived from a /join link, accept the invite now (the
+      // server matches this account's just-verified phone — fail-closed).
+      if (widget.joinInviteId != null) {
+        try {
+          final joined =
+              await widget.repository.acceptInvite(widget.joinInviteId!);
+          if (mounted) {
+            _snack(
+              context,
+              joined.walkerName.isEmpty
+                  ? "You're in the Care Circle."
+                  : "You're in ${joined.walkerName}'s Care Circle.",
+            );
+          }
+        } catch (e) {
+          // Non-fatal — the dashboard's pending-invite prompt is the
+          // recovery path (organic match by verified phone).
           if (mounted) _snack(context, _errText(e));
         }
       }
@@ -694,6 +736,17 @@ class _D2COtpEntryScreenState extends State<D2COtpEntryScreen> {
 // /dashboard — live monitoring (reuses the wireframe dashboard screen)
 // ════════════════════════════════════════════════════════════════════
 
+class _DashState {
+  const _DashState({this.patientId, this.snapshot, this.joinable = const []});
+  final String? patientId;
+  final D2CDashboardSnapshot? snapshot;
+
+  /// Live invites addressed to this account's verified phone — the organic
+  /// join path ("got the text, signed up from the app instead of the link";
+  /// d2c-care-circle.md §5.3). Only checked when the account has no walker.
+  final List<JoinableInvite> joinable;
+}
+
 class D2CDashboardHost extends StatefulWidget {
   const D2CDashboardHost({super.key, required this.repository});
 
@@ -704,7 +757,8 @@ class D2CDashboardHost extends StatefulWidget {
 }
 
 class _D2CDashboardHostState extends State<D2CDashboardHost> {
-  late Future<D2CDashboardSnapshot?> _future;
+  late Future<_DashState> _future;
+  bool _joining = false;
 
   @override
   void initState() {
@@ -712,15 +766,58 @@ class _D2CDashboardHostState extends State<D2CDashboardHost> {
     _future = _load();
   }
 
-  Future<D2CDashboardSnapshot?> _load() async {
+  Future<_DashState> _load() async {
     final patientId = await widget.repository.myWalkerPatientId();
-    if (patientId == null) return null;
-    return widget.repository.dashboard(patientId);
+    if (patientId == null) {
+      // No walker in this household — before showing the empty state,
+      // check for Care Circle invites matched to this verified phone.
+      var joinable = const <JoinableInvite>[];
+      try {
+        joinable = await widget.repository.pendingInvitesForMe();
+      } catch (_) {
+        // Best-effort — a hiccup just falls back to the empty state.
+      }
+      return _DashState(joinable: joinable);
+    }
+    final snapshot = await widget.repository.dashboard(patientId);
+    return _DashState(patientId: patientId, snapshot: snapshot);
+  }
+
+  void _reload() => setState(() => _future = _load());
+
+  Future<void> _acceptInvite(JoinableInvite invite) async {
+    setState(() => _joining = true);
+    try {
+      final joined = await widget.repository.acceptInvite(invite.inviteId);
+      if (!mounted) return;
+      _snack(
+        context,
+        joined.walkerName.isEmpty
+            ? "You're in the Care Circle."
+            : "You're in ${joined.walkerName}'s Care Circle.",
+      );
+      _reload();
+    } catch (e) {
+      if (mounted) _snack(context, _errText(e));
+    } finally {
+      if (mounted) setState(() => _joining = false);
+    }
+  }
+
+  Future<void> _ackAlert(String patientId, WalkerAlert alert) async {
+    try {
+      await widget.repository.ackAlert(patientId, alert.id);
+      if (!mounted) return;
+      _snack(context, 'Marked as handled.');
+      _reload();
+    } catch (e) {
+      if (mounted) _snack(context, _errText(e));
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<D2CDashboardSnapshot?>(
+    return FutureBuilder<_DashState>(
       future: _future,
       builder: (context, snap) {
         if (snap.connectionState != ConnectionState.done) {
@@ -734,12 +831,23 @@ class _D2CDashboardHostState extends State<D2CDashboardHost> {
             tab: D2CTab.activity,
             child: _RetryView(
               message: _errText(snap.error!),
-              onRetry: () => setState(() => _future = _load()),
+              onRetry: _reload,
             ),
           );
         }
-        final data = snap.data;
+        final state = snap.data ?? const _DashState();
+        final data = state.snapshot;
         if (data == null) {
+          if (state.joinable.isNotEmpty) {
+            return _HostScaffold(
+              tab: D2CTab.activity,
+              child: _JoinPrompt(
+                invites: state.joinable,
+                busy: _joining,
+                onAccept: _acceptInvite,
+              ),
+            );
+          }
           return const _HostScaffold(
             tab: D2CTab.activity,
             child: _Message(
@@ -748,8 +856,87 @@ class _D2CDashboardHostState extends State<D2CDashboardHost> {
             ),
           );
         }
-        return D2CDashboardScreen(snapshot: data);
+        return D2CDashboardScreen(
+          snapshot: data,
+          onAckAlert: state.patientId == null
+              ? null
+              : (alert) => _ackAlert(state.patientId!, alert),
+        );
       },
+    );
+  }
+}
+
+/// "You've been invited" card list — shown instead of the no-walker empty
+/// state when live invites match this account's verified phone.
+class _JoinPrompt extends StatelessWidget {
+  const _JoinPrompt({
+    required this.invites,
+    required this.busy,
+    required this.onAccept,
+  });
+
+  final List<JoinableInvite> invites;
+  final bool busy;
+  final void Function(JoinableInvite) onAccept;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 480),
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.all(24),
+          children: [
+            const Icon(Icons.group_add_outlined, size: 48, color: AppTheme.sage),
+            const SizedBox(height: 16),
+            Text(
+              invites.length == 1
+                  ? "You've been invited to a Care Circle"
+                  : "You've been invited to Care Circles",
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    color: AppTheme.textDark,
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
+            const SizedBox(height: 20),
+            for (final inv in invites)
+              Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppTheme.sage.withOpacity(0.3)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      inv.inviterName.isEmpty
+                          ? "Join ${inv.walkerName.isEmpty ? 'this' : "${inv.walkerName}'s"} Care Circle"
+                          : "${inv.inviterName} invited you to follow ${inv.walkerName.isEmpty ? 'their walker' : inv.walkerName}",
+                      style: const TextStyle(
+                        color: AppTheme.textDark,
+                        fontSize: 15.5,
+                        fontWeight: FontWeight.w600,
+                        height: 1.35,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    _PrimaryButton(
+                      label: 'Join Care Circle',
+                      busy: busy,
+                      onPressed: () => onAccept(inv),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -854,20 +1041,148 @@ class _D2CHistoryHostState extends State<D2CHistoryHost> {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// /care-team — Phase-5 placeholder
+// /join/:inviteId — Care Circle invite landing (d2c-care-circle.md §5.9)
 // ════════════════════════════════════════════════════════════════════
 
-class D2CCareTeamPlaceholder extends StatelessWidget {
-  const D2CCareTeamPlaceholder({super.key});
+/// Landing for the invite SMS link. The link is a pointer, not a
+/// credential — the server only grants membership when the signed-in
+/// account's VERIFIED phone matches the invite, so this screen simply
+/// routes: signed-out → phone-first sign-up/sign-in (carrying the invite
+/// id); signed-in → confirm-and-accept (matched via the caller's own
+/// pending-invite list; an invite sent to a different phone shows the
+/// neutral not-available copy).
+class D2CJoinScreen extends StatefulWidget {
+  const D2CJoinScreen({
+    super.key,
+    required this.inviteId,
+    required this.repository,
+    required this.signedIn,
+  });
+
+  final String inviteId;
+  final D2CRepository repository;
+  final bool signedIn;
+
+  @override
+  State<D2CJoinScreen> createState() => _D2CJoinScreenState();
+}
+
+class _D2CJoinScreenState extends State<D2CJoinScreen> {
+  Future<List<JoinableInvite>>? _future;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.signedIn) {
+      _future = widget.repository.pendingInvitesForMe();
+    }
+  }
+
+  Future<void> _accept() async {
+    setState(() => _busy = true);
+    try {
+      final joined = await widget.repository.acceptInvite(widget.inviteId);
+      if (!mounted) return;
+      _snack(
+        context,
+        joined.walkerName.isEmpty
+            ? "You're in the Care Circle."
+            : "You're in ${joined.walkerName}'s Care Circle.",
+      );
+      context.go(D2CRoutes.dashboard);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        _snack(context, _errText(e));
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return const _HostScaffold(
-      tab: D2CTab.careTeam,
-      child: _Message(
-        icon: Icons.group_outlined,
-        text: 'Inviting family and caregivers is coming in a future update.',
-      ),
+    if (!widget.signedIn) {
+      final joinQ = 'join=${Uri.encodeComponent(widget.inviteId)}';
+      return _OnboardScaffold(
+        title: "You're invited",
+        children: [
+          const _Message(
+            icon: Icons.group_add_outlined,
+            text: "You've been invited to follow a family member's walker "
+                'on GoSteady. Continue with the phone number that received '
+                "the invite text — we'll verify it with a code.",
+          ),
+          const SizedBox(height: 20),
+          _PrimaryButton(
+            label: 'Create my account',
+            onPressed: () => context.go('/sign-up?$joinQ'),
+          ),
+          TextButton(
+            onPressed: () => context.go('/sign-in?$joinQ'),
+            child: const Text('I already have an account'),
+          ),
+        ],
+      );
+    }
+
+    return _OnboardScaffold(
+      title: "You're invited",
+      children: [
+        FutureBuilder<List<JoinableInvite>>(
+          future: _future,
+          builder: (context, snap) {
+            if (snap.connectionState != ConnectionState.done) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 32),
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            if (snap.hasError) {
+              return _Message(
+                icon: Icons.wifi_off_rounded,
+                text: _errText(snap.error!),
+              );
+            }
+            final matches = (snap.data ?? const [])
+                .where((i) => i.inviteId == widget.inviteId)
+                .toList();
+            if (matches.isEmpty) {
+              // Neutral by design: sent-to-a-different-phone, revoked,
+              // expired, and already-used all read the same (no oracle —
+              // mirrors the server's fail-closed accept).
+              return const _Message(
+                icon: Icons.help_outline,
+                text: "This invite isn't available for this account. It may "
+                    'have been sent to a different phone number, already '
+                    'used, or expired — ask the sender for a fresh one.',
+              );
+            }
+            final inv = matches.first;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _Message(
+                  icon: Icons.group_add_outlined,
+                  text: inv.inviterName.isEmpty
+                      ? "Join ${inv.walkerName.isEmpty ? 'this' : "${inv.walkerName}'s"} Care Circle?"
+                      : "${inv.inviterName} invited you to follow "
+                          "${inv.walkerName.isEmpty ? 'their walker' : inv.walkerName}. Join the Care Circle?",
+                ),
+                const SizedBox(height: 20),
+                _PrimaryButton(
+                  label: 'Join Care Circle',
+                  busy: _busy,
+                  onPressed: _accept,
+                ),
+                TextButton(
+                  onPressed: () => context.go(D2CRoutes.dashboard),
+                  child: const Text('Not now'),
+                ),
+              ],
+            );
+          },
+        ),
+      ],
     );
   }
 }

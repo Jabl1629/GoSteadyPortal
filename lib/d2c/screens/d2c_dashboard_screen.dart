@@ -27,6 +27,7 @@ class D2CDashboardScreen extends StatelessWidget {
     super.key,
     required this.snapshot,
     this.onSwitchViewer,
+    this.onAckAlert,
   });
 
   final D2CDashboardSnapshot snapshot;
@@ -35,6 +36,11 @@ class D2CDashboardScreen extends StatelessWidget {
   /// Admin caregiver view and the walker-user view so the user can
   /// see both copy variants in one session. Null in production.
   final VoidCallback? onSwitchViewer;
+
+  /// Live alert acknowledge ("I called Mom") — 2A-AA first-write-wins,
+  /// permitted for owners AND Care Circle members (d2c-care-circle.md D3).
+  /// Null in the preview build (button stays visual-only).
+  final void Function(WalkerAlert alert)? onAckAlert;
 
   bool get _isWalkerUser => snapshot.viewer.isWalkerUser;
 
@@ -110,7 +116,10 @@ class D2CDashboardScreen extends StatelessWidget {
                   const _SectionLabel('Today\'s alerts'),
                   const SizedBox(height: 10),
                   for (final a in snapshot.openAlerts) ...[
-                    _AlertCard(alert: a),
+                    _AlertCard(
+                      alert: a,
+                      onAck: onAckAlert == null ? null : () => onAckAlert!(a),
+                    ),
                     const SizedBox(height: 10),
                   ],
                 ],
@@ -998,8 +1007,12 @@ class _WalkRow extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────
 
 class _AlertCard extends StatelessWidget {
-  const _AlertCard({required this.alert});
+  const _AlertCard({required this.alert, this.onAck});
   final WalkerAlert alert;
+
+  /// Wired in the live build (repository ack + refresh); null in the
+  /// preview, where the button remains visual-only.
+  final VoidCallback? onAck;
 
   Color _severityColor() {
     switch (alert.severity) {
@@ -1070,7 +1083,7 @@ class _AlertCard extends StatelessWidget {
                     ),
                     const Spacer(),
                     TextButton(
-                      onPressed: () {},
+                      onPressed: onAck ?? () {},
                       style: TextButton.styleFrom(
                         foregroundColor: color,
                         padding: const EdgeInsets.symmetric(

@@ -133,9 +133,12 @@ class ApiClient {
 
   // ── 2A-AA writes (deployed 2026-05-23; wired in 2B-FAC-W) ───────
 
-  /// `PATCH /api/v1/alerts/{patientId}/{compoundSk}` — caregiver ack.
+  /// `PATCH {prefix}/alerts/{patientId}/{compoundSk}` — alert ack.
   /// The compound SK is `{eventTs}#{alertType}` and contains `#` which
-  /// must be percent-encoded for safe URL routing.
+  /// must be percent-encoded for safe URL routing. Uses [_readPrefix] so
+  /// the D2C build hits the `/api/v1/d2c/...` route bound to the D2C-pool
+  /// authorizer (Care Circle member ack, d2c-care-circle.md §5.7); the
+  /// facility build is byte-identical (`/api/v1/alerts/...`).
   Future<AckAlertResponse> ackAlert(
     String patientId,
     String compoundSk, {
@@ -144,7 +147,7 @@ class ApiClient {
     final encoded = Uri.encodeComponent(compoundSk);
     final body = await _request(
       'PATCH',
-      '/api/v1/alerts/$patientId/$encoded',
+      '$_readPrefix/alerts/$patientId/$encoded',
       body: {if (notes != null) 'notes': notes},
     );
     return AckAlertResponse.fromJson(body);
@@ -430,6 +433,98 @@ class ApiClient {
       },
     );
     return ClaimResponse.fromJson(body);
+  }
+
+  // ── Care Circle (d2c-care-circle.md §5.2; D2C-authorizer routes) ──
+  // These routes bind the D2C pool authorizer directly (no /d2c/ prefix
+  // needed — they exist only for the consumer app, like /api/v1/claim).
+
+  /// `GET /api/v1/household/members` — roster + (Admins) pending invites.
+  Future<CareCircleRoster> getCareCircle() async {
+    final body = await _get('/api/v1/household/members');
+    return CareCircleRoster.fromJson(body);
+  }
+
+  /// `POST /api/v1/household/invites` — phone-first SMS invite (Admin).
+  Future<RosterInvite> sendCareInvite({
+    required String name,
+    required String phone,
+    String relationship = '',
+    bool asAdmin = false,
+    bool isWalkerUser = false,
+  }) async {
+    final body = await _request(
+      'POST',
+      '/api/v1/household/invites',
+      body: {
+        'name': name,
+        'phone': phone,
+        if (relationship.isNotEmpty) 'relationship': relationship,
+        if (asAdmin) 'role': 'household_owner',
+        if (isWalkerUser) 'isWalkerUser': true,
+      },
+    );
+    return RosterInvite.fromJson(
+      (body['invite'] as Map<String, dynamic>?) ?? const {},
+    );
+  }
+
+  /// `POST /api/v1/household/invites/{id}/resend` — re-send + re-arm expiry.
+  Future<void> resendCareInvite(String inviteId) async {
+    await _request(
+      'POST',
+      '/api/v1/household/invites/${Uri.encodeComponent(inviteId)}/resend',
+      body: const <String, dynamic>{},
+    );
+  }
+
+  /// `DELETE /api/v1/household/invites/{id}` — revoke a pending invite.
+  Future<void> revokeCareInvite(String inviteId) async {
+    await _request(
+      'DELETE',
+      '/api/v1/household/invites/${Uri.encodeComponent(inviteId)}',
+    );
+  }
+
+  /// `GET /api/v1/invites/pending` — live invites addressed to the caller's
+  /// verified phone (the organic-signup match). Empty when the phone is
+  /// unverified (server fails closed, no error).
+  Future<List<JoinableInvite>> getPendingInvitesForMe() async {
+    final body = await _get('/api/v1/invites/pending');
+    final raw = (body['invites'] as List<dynamic>?) ?? const [];
+    return raw
+        .map((e) => JoinableInvite.fromJson(e as Map<String, dynamic>))
+        .toList(growable: false);
+  }
+
+  /// `POST /api/v1/invites/accept` — verified-phone-matched join.
+  /// Caller must `refreshClaims()` after a fresh join (the repository
+  /// wrapper does this).
+  Future<AcceptInviteResult> acceptCareInvite(String inviteId) async {
+    final body = await _request(
+      'POST',
+      '/api/v1/invites/accept',
+      body: {'inviteId': inviteId},
+    );
+    return AcceptInviteResult.fromJson(body);
+  }
+
+  /// `PATCH /api/v1/household/members/{userId}` — promote/demote (Admin).
+  Future<void> setCareMemberRole(String userId, {required bool admin}) async {
+    await _request(
+      'PATCH',
+      '/api/v1/household/members/${Uri.encodeComponent(userId)}',
+      body: {'role': admin ? 'household_owner' : 'family_viewer'},
+    );
+  }
+
+  /// `DELETE /api/v1/household/members/{userId}` — Admin remove, or
+  /// self-delete = leave the Care Circle.
+  Future<void> removeCareMember(String userId) async {
+    await _request(
+      'DELETE',
+      '/api/v1/household/members/${Uri.encodeComponent(userId)}',
+    );
   }
 
   // ── Internals ─────────────────────────────────────────────────

@@ -59,6 +59,8 @@ export class AuthStack extends cdk.Stack {
   public readonly portalInternalClient: cognito.UserPoolClient;
   /** RoleAssignments table — replaces Relationships. */
   public readonly roleAssignmentsTable: dynamodb.Table;
+  /** CareInvites table — D2C Care Circle phone-first invites. */
+  public readonly careInvitesTable: dynamodb.Table;
   /** Pre-Token Generation Lambda — exposes for ops/testing. */
   public readonly preTokenLambda: lambda.Function;
 
@@ -101,6 +103,44 @@ export class AuthStack extends cdk.Stack {
         name: 'role_userId',
         type: dynamodb.AttributeType.STRING,
       },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // ── CareInvites Table (D2C Care Circle) ───────────────────────────
+    // Phone-first membership invites (docs/specs/d2c-care-circle.md §5.1).
+    // Lives beside RoleAssignments — same membership/identity domain, same
+    // IdentityKey CMK, same api-stack import path. GSIs:
+    //   by-client       — the Admin's invite list per household
+    //   by-contact-hash — accept-time + organic-signup match on the
+    //                     peppered phone HMAC (never the raw phone)
+    // DDB TTL on `ttl` sweeps rows ~90 d after expiry; the audit log keeps
+    // the permanent trail.
+    this.careInvitesTable = new dynamodb.Table(this, 'CareInvites', {
+      tableName: `gosteady-${p}-care-invites`,
+      partitionKey: {
+        name: 'inviteId',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode:
+        config.dynamoBillingMode === 'PAY_PER_REQUEST'
+          ? dynamodb.BillingMode.PAY_PER_REQUEST
+          : dynamodb.BillingMode.PROVISIONED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: config.pitrEnabled },
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: securityStack.identityKey,
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: removal,
+    });
+    this.careInvitesTable.addGlobalSecondaryIndex({
+      indexName: 'by-client',
+      partitionKey: { name: 'clientId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    this.careInvitesTable.addGlobalSecondaryIndex({
+      indexName: 'by-contact-hash',
+      partitionKey: { name: 'contactHash', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
