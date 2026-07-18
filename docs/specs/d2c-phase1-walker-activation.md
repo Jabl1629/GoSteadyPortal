@@ -9,6 +9,15 @@
 > `dtc_{householdId}`; the claim rewrites the claimer's `RoleAssignments`/
 > `clientId` pointer per claim (ARCHITECTURE §4 D2C Modeling).
 >
+> ⚠️ **Twilio status stale (2026-07-17):** the "still gated on Twilio /
+> secret unpopulated / ~2 business days" notes below are a **2026-05-31
+> snapshot** and are now WRONG. Twilio is **LIVE in dev + prod** (secret
+> populated, toll-free `+1833…` sender); SMS-OTP + Care Circle invites are
+> proven on real phones. Phase 1 shipped dev + prod. Read every "blocked on
+> Twilio" line below as historical. Current state:
+> [phase-dt4-d2c-launch-readiness.md](phase-dt4-d2c-launch-readiness.md) +
+> ARCHITECTURE §15.
+>
 > **Status:** Draft — 2026-05-28
 > **Scope:** The thinnest end-to-end D2C slice: a new walker user claims a
 > brand-new device and sees their own walking activity. No caregivers, one

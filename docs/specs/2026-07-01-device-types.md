@@ -1,6 +1,7 @@
 # Design memo: Multi-device-type architecture — adding the rollator accessory platform
 
 > **Date:** 2026-07-01 | **Status:** ✅ DECIDED 2026-07-01 — D1–D11 locked with product owner; Q1–Q15 all resolved (residual TODOs in §10). **DT-0 deployed (dev) same day** ([`phase-dt0-device-type-scaffold.md`](phase-dt0-device-type-scaffold.md), smoke 15/15); DT-1 (firmware bench bring-up + capture readiness) is next
+> ⚠️ **External-gate note stale (2026-07-17):** the "Twilio approval / `gosteady/dev/twilio` secret — operator, in progress" mentions below are a 2026-07-01 snapshot. **Twilio is now LIVE in dev + prod** (approved 2026-07-06; secret populated; SMS-OTP + Care Circle invites proven on real phones). DT-4 shipped. Current: [`phase-dt4-d2c-launch-readiness.md`](phase-dt4-d2c-launch-readiness.md).
 > **Supersedes:** nothing (first formalization of the device-type concept)
 > **Related:** [`ARCHITECTURE.md`](ARCHITECTURE.md) §4 (lifecycle), §6 (data model), §7 (MQTT contracts), §16 ("Multi-device per patient" medium-term question) · firmware coord doc (append-only log)
 
@@ -288,7 +289,9 @@ plumbing is shared; this is rendering work only.
 - [x] **Q6 (C/F)** — Serial blocks. **RESOLVED (as leaned):** dev/bench
   `GS9999999980–89`; rollator production `GS0001000000–GS0001999999`; caps
   continue from `GS0000000001`. Convenience only — registry authoritative
-  (D2). Allocation table lands in the coord doc at DT-0.
+  (D2). Allocation table lands in the coord doc at DT-0. **Amended
+  2026-07-17:** prod **D2C** rollators allocate from `GS0002000001`+ — block
+  recorded in `new-prod-unit-bringup.md` (first use: coord §C58).
 - [x] **Q7 (C/F)** — Firmware self-report. **RESOLVED (as leaned):**
   `device_type` in the heartbeat (lands in Shadow via accept-all D16);
   heartbeat-processor cross-checks vs registry; mismatch → structured log +
@@ -336,7 +339,7 @@ plumbing is shared; this is rendering work only.
 
 | TODO | Owner | Where it lands |
 |---|---|---|
-| Twilio compliance approval + populate `gosteady/dev/twilio` secret | Operator (in progress) | Gates DT-4 SMS-OTP; drive early — external |
+| ~~Twilio compliance approval + populate `gosteady/dev/twilio` secret~~ | ✅ **DONE** (approved 2026-07-06; secret live dev+prod; OTP + invites proven) | ~~Gates DT-4 SMS-OTP~~ — cleared |
 | Rollator battery/OCV/wipe-floor values from real cupholder hardware | Firmware | DT-3 |
 | Rollator alert-type definition (`rollaway`, brake-state candidates) | Product/FW | DT-4 launch planning |
 | §C41.3 D2C follow-ups: `status_patientId` underscore alignment in `d2c-claim`; `walkerId` → `claimId` rename; dedicated D2C test device | Cloud | DT-4 |

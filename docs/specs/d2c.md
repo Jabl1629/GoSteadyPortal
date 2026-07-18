@@ -1,6 +1,21 @@
 # D2C — Direct-to-Consumer Household Product (umbrella spec)
 
-> **Status:** Draft — 2026-05-28
+> **Status:** Draft — 2026-05-28 · **status refreshed 2026-07-17.**
+> **⚠️ Currency note (2026-07-17):** the phased plan below was authored
+> 2026-05-28 and its `🔲` markers lag reality. What has actually shipped:
+> **Phase 1** (walker/rollator claim + activation + dashboard) — live dev +
+> prod. **Twilio SMS is LIVE in dev + prod** (secrets populated, toll-free
+> `+1833…` sender): SMS-OTP sign-in and Care Circle **invite SMS** both
+> proven on real phones (invite E2E 2026-07-17). So the Phase-2 line-item
+> "Twilio account + secret" is **done** — Twilio was pulled forward into
+> Phase 1 / DT-4 and approved 2026-07-06 (see
+> [phase-dt4-d2c-launch-readiness.md](phase-dt4-d2c-launch-readiness.md)).
+> What remains in "Phase 2" is only the **alert→SMS dispatch pipeline** +
+> per-user notification prefs (the notification-stack scaffold), NOT the
+> Twilio setup. **Phase 5 (Care Circle) 5a+5d shipped dev+prod 2026-07-17**
+> ([d2c-care-circle.md](d2c-care-circle.md)). Only open Twilio item is a
+> **10DLC/long-code** registration *if* we move off the toll-free sender —
+> it does **not** block sending today (§7).
 > **Scope:** The consumer (household / Care Circle) product: account model,
 > onboarding, walker-user monitoring, SMS notifications, device recycle,
 > and the multi-member Care Circle. Maps to the historical `2B-D2C` slot
@@ -111,7 +126,8 @@ build for D2C; everything else is deployed.**
 | **Household/patient bootstrap + self-serve claim endpoint** | 🔲 new | 1 |
 | **Multi-issuer JWT authorizer (accept D2C-pool tokens)** | 🔲 new | 1 |
 | **D2C Flutter portal wired to live data (dashboard already mocked)** | 🔲 new | 1 |
-| **Twilio integration + SMS-dispatch Lambda** | 🔲 new | 2 |
+| **Twilio account + `gosteady/{env}/twilio` secret** | ✅ live dev+prod (OTP + Care Circle invites) | 1 / DT-4 |
+| **SMS-dispatch Lambda (alert → SMS) + notification prefs** | 🔲 new | 2 |
 | **Notification-preferences storage + endpoints** | 🔲 new | 2 |
 | **D2C deactivate/return-device UI affordance** | 🔲 new | 3 |
 | **Care Circle: invites, member mgmt, member view (5a+5d)** | ✅ shipped dev+prod 2026-07-17 ([`d2c-care-circle.md`](d2c-care-circle.md)); 5b access-requests + 5c member SMS still 🔲 | 5 |
@@ -166,9 +182,18 @@ account for the first time.
 **Goal:** The same walker user receives useful SMS alerts from the live
 device.
 
+> **Note (2026-07-17):** the Twilio *foundation* below is already live —
+> the account + `gosteady/{env}/twilio` secret are populated in dev + prod
+> and proven end-to-end for SMS-OTP + Care Circle invites (`_shared/sms.py`
+> is the shared sender). What is genuinely unbuilt is the **alert→SMS
+> dispatch pipeline** (subscribe to alert writes → route to SMS) + the
+> per-user notification-preferences storage. So this phase is now
+> "wire alerts to the existing SMS sender," not "stand up Twilio."
+
 **New build:**
-- Twilio account + CDK secret (`gosteady/{env}/twilio`); SMS-dispatch
-  Lambda (10DLC-compliant; STOP-keyword handling; TCPA opt-in audit).
+- SMS-dispatch Lambda routing alert writes → the **already-live** Twilio
+  sender (`_shared/sms.py`); STOP-keyword handling; TCPA opt-in audit.
+  (Twilio account + `gosteady/{env}/twilio` secret already done — DT-4.)
 - Notification-preferences storage (`Users.notificationPrefs` as the
   `{alertType × channel}` matrix from the mockup) + `GET/PATCH
   /me/notification-prefs`.
@@ -277,8 +302,14 @@ controls enforced.
   via an order pipeline is folded in once a checkout channel is chosen
   (deferred). The bootstrap endpoint is designed so ops can pre-bind
   manually in the meantime.
-- **Twilio 10DLC registration** lead time — start the brand/campaign
-  registration early in Phase 2 (can take days).
+- **Twilio SMS: LIVE** (dev + prod) on a **toll-free** sender (`+1833…`) —
+  SMS-OTP + Care Circle invites proven on real phones (Twilio approved
+  2026-07-06). The only open item is a **10DLC campaign registration**,
+  and only *if* we move to a standard 10-digit **long-code** sender;
+  toll-free (which uses toll-free verification, not 10DLC) carries
+  transactional OTP + invites at pilot scale today, so this is a
+  GA-throughput decision, **not** a blocker. Revisit with the Phase-2
+  alert→SMS pipeline. (`d2c-care-circle.md` §10 tracks the GA review.)
 - **Care-note privacy nuance** (walker user sees notes written about them) —
   acceptable for V1; revisit if a "private note" need appears.
 - **SES sender reputation** — verify `gosteady.co` DKIM/SPF/DMARC before

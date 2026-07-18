@@ -73,6 +73,11 @@ Concretely: scan QR → sign up → SMS OTP → `POST /claim` → cap activates 
 
 ## WS3 — SMS-OTP go-live (Twilio)
 
+> ✅ **DONE (2026-07-17): the operator steps below are complete.**
+> `gosteady/{dev,prod}/twilio` are populated (toll-free `+1833…` sender);
+> SMS-OTP + Care Circle invites proven on real phones. `_shared/sms.py`
+> is now the shared sender. Steps 1–2 are historical.
+
 **Current:** the D2C SMS-OTP custom-auth is **fully built + deployed** (§C37) — `d2c-custom-auth` (Define/Create/Verify triggers), reads creds from Secrets Manager `gosteady/dev/twilio`, sends via the Twilio REST API (stdlib, no SDK), 6-digit CSPRNG code, 3-attempt cap. **Fail-closed:** an empty/absent secret raises at first OTP attempt (no misleading "sent").
 
 **Change surface: NONE (code).** Go-live is a **pure operator step**:
