@@ -39,6 +39,9 @@ class D2CAuthService extends AuthServiceInterface {
   static const _phonePrefsKey = 'gs_d2c_auth_phone';
 
   late final CognitoUserPool _pool;
+  /// localStorage-backed token store — kept so [adoptSession] can write the
+  /// SDK's token-cache keys for a session minted server-side (QR re-login).
+  late final PrefsCognitoStorage _storage;
   CognitoUser? _cognitoUser;
   CognitoUserSession? _session;
   GoSteadyUser? _currentUser;
@@ -66,12 +69,48 @@ class D2CAuthService extends AuthServiceInterface {
     // refresh forces a fresh SMS-OTP sign-in. getSession() then restores from
     // the persisted tokens + auto-refreshes via the 30-day refresh token.
     final prefs = await SharedPreferences.getInstance();
+    _storage = PrefsCognitoStorage(prefs, namespace: 'd2c_cognito');
     _pool = CognitoUserPool(
       D2CCognitoConfig.userPoolId,
       D2CCognitoConfig.clientId,
-      storage: PrefsCognitoStorage(prefs, namespace: 'd2c_cognito'),
+      storage: _storage,
     );
     await _tryRestoreSession();
+  }
+
+  /// Adopt a session minted **server-side** (the QR re-login broker verified
+  /// the SMS-OTP and returned the tokens + phone). Writes the SDK's token-cache
+  /// keys so a reload restores via [getSession] exactly like a normal sign-in,
+  /// then installs the session in memory. The phone is the Cognito username
+  /// (returned only after the code was verified — the caller holds that phone).
+  Future<GoSteadyUser> adoptSession({
+    required String phone,
+    required String idToken,
+    required String accessToken,
+    required String refreshToken,
+  }) async {
+    final clientId = D2CCognitoConfig.clientId;
+    final prefix = 'CognitoIdentityServiceProvider.$clientId.$phone';
+    await _storage.setItem('$prefix.idToken', idToken);
+    await _storage.setItem('$prefix.accessToken', accessToken);
+    if (refreshToken.isNotEmpty) {
+      await _storage.setItem('$prefix.refreshToken', refreshToken);
+    }
+    await _storage.setItem('$prefix.clockDrift', '0');
+    await _storage.setItem(
+        'CognitoIdentityServiceProvider.$clientId.LastAuthUser', phone);
+
+    final user = CognitoUser(phone, _pool, storage: _storage);
+    final session = CognitoUserSession(
+      CognitoIdToken(idToken),
+      CognitoAccessToken(accessToken),
+      refreshToken:
+          refreshToken.isNotEmpty ? CognitoRefreshToken(refreshToken) : null,
+    );
+    _username = phone;
+    _adoptSession(user, session);
+    await _persistSession();
+    return _currentUser!;
   }
 
   // ── D2C sign-up (phone-first; auto-confirmed, no code) ────────

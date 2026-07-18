@@ -1028,6 +1028,10 @@ export class ApiStack extends cdk.Stack {
         ORGANIZATIONS_TABLE: dataStack.organizationsTable.tableName,
         ROLE_ASSIGNMENTS_TABLE: authStack.roleAssignmentsTable.tableName,
         CLAIM_BINDING_PEPPER_SECRET_ARN: claimBindingPepper.secretArn,
+        // QR re-login broker (d2c-qr-relogin): the handler drives the D2C
+        // pool's SMS-OTP CUSTOM_AUTH so a scanned QR can text a login code
+        // to a masked household number without exposing the phone.
+        D2C_APP_CLIENT_ID: d2cAuthStack.portalClient.userPoolClientId,
       },
     });
     // RW: claim creates Patient + Organizations + RoleAssignments rows and
@@ -1056,6 +1060,18 @@ export class ApiStack extends cdk.Stack {
       actions: ['iot:UpdateThingShadow', 'iot:GetThingShadow'],
       resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
     }));
+    // QR re-login broker: initiate + complete the D2C pool's CUSTOM_AUTH
+    // (unauthenticated Cognito flows) server-side. InitiateAuth /
+    // RespondToAuthChallenge are account-level and do NOT support
+    // resource-level scoping (`*` is required); the effective scope is the
+    // single app client id passed in code (D2C_APP_CLIENT_ID). Using `*`
+    // also avoids a new cross-stack export from the delicate D2C-Auth pool
+    // stack (coord §C56).
+    d2cClaim.function.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['cognito-idp:InitiateAuth', 'cognito-idp:RespondToAuthChallenge'],
+      resources: ['*'],
+    }));
 
     const d2cClaimIntegration = new HttpLambdaIntegration(
       'D2CClaimIntegration',
@@ -1075,6 +1091,22 @@ export class ApiStack extends cdk.Stack {
       methods: [apigwv2.HttpMethod.GET],
       integration: d2cClaimIntegration,
     });
+    // QR re-login (d2c-qr-relogin) — three UNAUTHENTICATED routes so a
+    // scanned QR on an allocated device can text a login code to a masked
+    // household number and complete SMS-OTP. The full phone never crosses
+    // the wire until a code is verified (see d2c-claim handler).
+    const d2cReloginRoutes: Array<[apigwv2.HttpMethod, string]> = [
+      [apigwv2.HttpMethod.GET, '/api/v1/public/walkers/{walkerId}/recipients'],
+      [apigwv2.HttpMethod.POST, '/api/v1/public/walkers/{walkerId}/login-code'],
+      [apigwv2.HttpMethod.POST, '/api/v1/public/walkers/{walkerId}/login-code/verify'],
+    ];
+    for (const [method, routePath] of d2cReloginRoutes) {
+      this.httpApi.addRoutes({
+        path: routePath,
+        methods: [method],
+        integration: d2cClaimIntegration,
+      });
+    }
 
     // ── D2C dashboard reads (DT-4 / coord §C54) ──────────────────────
     // The consumer dashboard reuses the facility patient-api reads, but the

@@ -297,3 +297,76 @@ class ClaimedPatient {
     );
   }
 }
+
+// ── QR re-login (d2c-qr-relogin) ───────────────────────────────────
+
+/// One masked login target for a claimed device's QR re-login flow. No raw
+/// phone or Cognito sub — `recipientId` is an opaque, walker-scoped handle
+/// the client passes back to send/verify.
+class WalkerRecipient {
+  final String recipientId;
+  final String mask; // •••-4566
+  final String label; // "Registered user" | relationship | "Care Circle member"
+  final bool isPrimary; // the "That's me" target
+
+  const WalkerRecipient({
+    required this.recipientId,
+    required this.mask,
+    required this.label,
+    required this.isPrimary,
+  });
+
+  factory WalkerRecipient.fromJson(Map<String, dynamic> json) => WalkerRecipient(
+        recipientId: (json['recipientId'] as String?) ?? '',
+        mask: (json['mask'] as String?) ?? '',
+        label: (json['label'] as String?) ?? '',
+        isPrimary: (json['isPrimary'] as bool?) ?? false,
+      );
+}
+
+/// Result of `POST .../login-code` — an opaque Cognito session + the masked
+/// destination. The full phone is never returned here.
+class LoginCodeChallenge {
+  final String session;
+  final String mask;
+  const LoginCodeChallenge({required this.session, required this.mask});
+
+  factory LoginCodeChallenge.fromJson(Map<String, dynamic> json) =>
+      LoginCodeChallenge(
+        session: (json['session'] as String?) ?? '',
+        mask: (json['mask'] as String?) ?? '',
+      );
+}
+
+/// Result of `POST .../login-code/verify`. `ok` → tokens + phone (the caller
+/// proved possession) to adopt a signed-in session; `retry` → a fresh session
+/// to try the code again.
+class LoginCodeVerifyResult {
+  final String status; // "ok" | "retry"
+  final String idToken;
+  final String accessToken;
+  final String refreshToken;
+  final String phone;
+  final String session; // present on retry
+
+  const LoginCodeVerifyResult({
+    required this.status,
+    this.idToken = '',
+    this.accessToken = '',
+    this.refreshToken = '',
+    this.phone = '',
+    this.session = '',
+  });
+
+  bool get isOk => status == 'ok';
+
+  factory LoginCodeVerifyResult.fromJson(Map<String, dynamic> json) =>
+      LoginCodeVerifyResult(
+        status: (json['status'] as String?) ?? '',
+        idToken: (json['idToken'] as String?) ?? '',
+        accessToken: (json['accessToken'] as String?) ?? '',
+        refreshToken: (json['refreshToken'] as String?) ?? '',
+        phone: (json['phone'] as String?) ?? '',
+        session: (json['session'] as String?) ?? '',
+      );
+}

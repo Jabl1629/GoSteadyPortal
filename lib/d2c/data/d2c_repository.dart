@@ -15,6 +15,20 @@ abstract class D2CRepository {
   /// `GET /public/walkers/{walkerId}` — unauthenticated QR-landing lookup.
   Future<PublicWalkerLookup> lookupWalker(String walkerId);
 
+  // ── QR re-login (d2c-qr-relogin) — get back into a claimed device ──
+
+  /// Masked login targets for a claimed device's QR (registered user +
+  /// Care Circle members). No raw phones.
+  Future<List<WalkerRecipient>> walkerLoginRecipients(String walkerId);
+
+  /// Text a login code to a masked recipient; returns an opaque session.
+  Future<LoginCodeChallenge> sendWalkerLoginCode(
+      String walkerId, String recipientId);
+
+  /// Verify the code; `ok` carries the tokens to adopt a session.
+  Future<LoginCodeVerifyResult> verifyWalkerLoginCode(
+      String walkerId, String recipientId, String session, String code);
+
   /// `POST /claim` — bootstrap household + patient then provision the
   /// device. Authenticated with the just-signed-up walker user's JWT.
   Future<ClaimResponse> claim(String walkerId, {String? displayName});
@@ -81,6 +95,31 @@ class D2CMockRepository implements D2CRepository {
   @override
   Future<PublicWalkerLookup> lookupWalker(String walkerId) async =>
       const PublicWalkerLookup(status: PublicWalkerStatus.unclaimed);
+
+  @override
+  Future<List<WalkerRecipient>> walkerLoginRecipients(String walkerId) async =>
+      const [
+        WalkerRecipient(
+            recipientId: 'mock_primary',
+            mask: '•••-4566',
+            label: 'Registered user',
+            isPrimary: true),
+        WalkerRecipient(
+            recipientId: 'mock_member',
+            mask: '•••-1234',
+            label: 'Daughter',
+            isPrimary: false),
+      ];
+
+  @override
+  Future<LoginCodeChallenge> sendWalkerLoginCode(
+          String walkerId, String recipientId) async =>
+      const LoginCodeChallenge(session: 'mock-session', mask: '•••-4566');
+
+  @override
+  Future<LoginCodeVerifyResult> verifyWalkerLoginCode(String walkerId,
+          String recipientId, String session, String code) async =>
+      const LoginCodeVerifyResult(status: 'ok', phone: '+15125550100');
 
   @override
   Future<ClaimResponse> claim(String walkerId, {String? displayName}) async =>

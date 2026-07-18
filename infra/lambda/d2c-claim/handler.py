@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -51,6 +52,7 @@ from _shared.claim_binding import (
     PhoneFormatError,
     get_pepper,
     hmac_phone,
+    mask_phone,
     normalize_e164,
 )
 from _shared.device_types import DEFAULT_TYPE as DEFAULT_DEVICE_TYPE
@@ -76,6 +78,17 @@ _roles = _ddb.Table(ROLE_ASSIGNMENTS_TABLE)
 # IoT data-plane client for activate-cmd publish + Shadow writes.
 iot_data = boto3.client("iot-data")
 
+# Cognito for the QR re-login broker (d2c-qr-relogin): the backend initiates +
+# completes the D2C pool's SMS-OTP CUSTOM_AUTH so the setup landing can text a
+# login code to a number it only knows as a mask — the full phone never crosses
+# the wire until the caller proves possession of the code. The custom-auth
+# Lambda (SMS send) is unchanged.
+cognito_idp = boto3.client("cognito-idp")
+D2C_APP_CLIENT_ID = os.environ.get("D2C_APP_CLIENT_ID", "")
+# Per-device cooldown between login-code sends — throttles the SMS-to-owner
+# spam vector inherent to a public "text a code" button on a scanned QR.
+LOGIN_CODE_COOLDOWN_S = 30
+
 STATE_READY = "ready_to_provision"
 STATE_DECOMMISSIONED = "decommissioned"
 
@@ -92,10 +105,14 @@ AUDIT_D2C_CLAIM_REJECTED_DEVICE_OWNED = "d2c.claim_rejected_device_owned"
 AUDIT_D2C_CLAIM_REJECTED_MEMBER = "d2c.claim_rejected_member_account"
 # User-agreement acknowledgment recorded at setup (d2c-user-agreement.md).
 AUDIT_D2C_AGREEMENT_ACKNOWLEDGED = "d2c.agreement_acknowledged"
+# QR re-login (d2c-qr-relogin) — masked, never the raw phone.
+AUDIT_D2C_LOGIN_CODE_SENT = "d2c.login_code_sent"
+AUDIT_D2C_LOGIN_CODE_VERIFIED = "d2c.login_code_verified"
 
 # Pure claim helpers (household anchor + identity split + contact masking) live
 # in claim_logic.py so they're unit-testable without boto3/powertools.
 from claim_logic import (  # noqa: E402
+    build_login_recipients,
     mask_contact,
     resolve_household,
     resolve_identity,
@@ -111,6 +128,12 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
             return _claim(event)
         if route == "GET /api/v1/public/walkers/{walkerId}":
             return _public_lookup(event)
+        if route == "GET /api/v1/public/walkers/{walkerId}/recipients":
+            return _login_recipients(event)
+        if route == "POST /api/v1/public/walkers/{walkerId}/login-code":
+            return _send_login_code(event)
+        if route == "POST /api/v1/public/walkers/{walkerId}/login-code/verify":
+            return _verify_login_code(event)
         raise ApiError(code="NOT_FOUND", message=f"Unknown route {route}", status=404)
     except ApiError as e:
         return error_response(e.code, e.message, e.status, e.details)
@@ -389,6 +412,189 @@ def _public_lookup(event: dict[str, Any]) -> dict[str, Any]:
     # until wipe-ack recycles it to ready. (Previously this fell into the
     # "claimed" branch and served the PRIOR owner's stale hint.)
     return ok_response({"status": "unclaimed", "deviceType": device_type})
+
+
+# ── QR re-login (d2c-qr-relogin) — get back in from a claimed device's QR ─
+#
+# The persistent QR on an allocated device is the natural "I forgot the app
+# link, get me back in" affordance. These three UNAUTHENTICATED routes let the
+# /setup landing text a login code to a household number it only knows as a
+# mask, and complete SMS-OTP sign-in, WITHOUT ever exposing the full phone
+# until the caller proves possession of the code:
+#   GET  .../recipients        → masked household roster (no phone, no sub)
+#   POST .../login-code        → resolve + initiate CUSTOM_AUTH → {session, mask}
+#   POST .../login-code/verify → respond → {tokens, phone} on success
+# The full phone is returned ONLY on a verified code (the caller is then, by
+# definition, the holder of that phone).
+
+def _household_for_walker(walker_id: str) -> tuple[dict[str, Any] | None, str]:
+    """(device, owningClientId) for a walkerId, or (None, "") / (device, "")
+    when unknown/unowned. Neutral on miss — no existence leak."""
+    device = _device_by_walker_id(walker_id)
+    if not device:
+        return None, ""
+    return device, device.get("owningClientId") or ""
+
+
+def _household_members(client_id: str) -> list[dict[str, Any]]:
+    """RoleAssignments rows for the household (by-client-role GSI)."""
+    res = _roles.query(
+        IndexName="by-client-role",
+        KeyConditionExpression="clientId = :c",
+        ExpressionAttributeValues={":c": client_id},
+    )
+    return res.get("Items", [])
+
+
+def _login_recipients(event: dict[str, Any]) -> dict[str, Any]:
+    """GET /public/walkers/{walkerId}/recipients — masked login targets."""
+    walker_id = (event.get("pathParameters") or {}).get("walkerId", "")
+    _device, client_id = _household_for_walker(walker_id)
+    if not client_id:
+        # Unknown / unclaimed — nothing to sign into. Neutral empty list.
+        return ok_response({"recipients": []})
+    public, _ = build_login_recipients(
+        _household_members(client_id), walker_id, get_pepper()
+    )
+    return ok_response({"recipients": public})
+
+
+def _resolve_recipient_phone(walker_id: str, recipient_id: str) -> tuple[str, str]:
+    """(phone, clientId) for a recipientId under a walker's household, or
+    ("", "") if it doesn't resolve. Recomputes the id→phone map server-side."""
+    _device, client_id = _household_for_walker(walker_id)
+    if not client_id:
+        return "", ""
+    _public, id_to_phone = build_login_recipients(
+        _household_members(client_id), walker_id, get_pepper()
+    )
+    return id_to_phone.get(recipient_id, ""), client_id
+
+
+def _login_cooldown_ok(serial: str) -> bool:
+    """Per-device send cooldown (conditional write). False → still cooling."""
+    now = int(time.time())
+    try:
+        _devices.update_item(
+            Key={"serialNumber": serial},
+            UpdateExpression="SET loginCodeCooldownUntil = :until",
+            ConditionExpression=(
+                "attribute_not_exists(loginCodeCooldownUntil) "
+                "OR loginCodeCooldownUntil < :now"
+            ),
+            ExpressionAttributeValues={":until": now + LOGIN_CODE_COOLDOWN_S, ":now": now},
+        )
+        return True
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def _send_login_code(event: dict[str, Any]) -> dict[str, Any]:
+    """POST /public/walkers/{walkerId}/login-code — SMS a code to a masked
+    recipient. Returns an opaque Cognito session + the mask; no phone."""
+    walker_id = (event.get("pathParameters") or {}).get("walkerId", "")
+    body = _parse_body(event)
+    recipient_id = (body.get("recipientId") or "").strip()
+    if not recipient_id:
+        raise ApiError(code="INVALID_REQUEST", message="recipientId required", status=400)
+
+    device, _client = _household_for_walker(walker_id)
+    phone, client_id = _resolve_recipient_phone(walker_id, recipient_id)
+    if not phone or not device:
+        # Neutral — don't reveal whether the recipient/device exists.
+        raise ApiError(code="RECIPIENT_NOT_FOUND",
+                       message="That option isn't available.", status=404)
+
+    if not _login_cooldown_ok(device["serialNumber"]):
+        raise ApiError(code="TOO_MANY_REQUESTS",
+                       message="A code was just sent. Wait a moment and try again.",
+                       status=429)
+
+    try:
+        resp = cognito_idp.initiate_auth(
+            ClientId=D2C_APP_CLIENT_ID,
+            AuthFlow="CUSTOM_AUTH",
+            AuthParameters={"USERNAME": phone},
+        )
+    except ClientError as exc:
+        logger.warning("login_code_initiate_failed",
+                       extra={"error": exc.response.get("Error", {}).get("Code")})
+        raise ApiError(code="LOGIN_CODE_FAILED",
+                       message="Couldn't send a code right now. Try again.", status=502)
+
+    if resp.get("ChallengeName") != "CUSTOM_CHALLENGE" or not resp.get("Session"):
+        raise ApiError(code="LOGIN_CODE_FAILED",
+                       message="Couldn't start sign-in. Try again.", status=502)
+
+    emit_audit(event=AUDIT_D2C_LOGIN_CODE_SENT,
+               actor={"clientId": client_id},
+               subject={"serialNumber": device["serialNumber"], "clientId": client_id},
+               action="event", extra={"mask": mask_phone(phone)},
+               request_id=_request_id(event))
+    return ok_response({"session": resp["Session"], "mask": mask_phone(phone)})
+
+
+def _verify_login_code(event: dict[str, Any]) -> dict[str, Any]:
+    """POST /public/walkers/{walkerId}/login-code/verify — complete SMS-OTP.
+    On success returns the session tokens + the phone (the caller just proved
+    they hold it) so the app can adopt a normal signed-in session."""
+    walker_id = (event.get("pathParameters") or {}).get("walkerId", "")
+    body = _parse_body(event)
+    recipient_id = (body.get("recipientId") or "").strip()
+    session = body.get("session") or ""
+    code = (body.get("code") or "").strip()
+    if not (recipient_id and session and code):
+        raise ApiError(code="INVALID_REQUEST",
+                       message="recipientId, session, and code are required", status=400)
+
+    phone, client_id = _resolve_recipient_phone(walker_id, recipient_id)
+    if not phone:
+        raise ApiError(code="RECIPIENT_NOT_FOUND",
+                       message="That option isn't available.", status=404)
+
+    try:
+        resp = cognito_idp.respond_to_auth_challenge(
+            ClientId=D2C_APP_CLIENT_ID,
+            ChallengeName="CUSTOM_CHALLENGE",
+            Session=session,
+            ChallengeResponses={"USERNAME": phone, "ANSWER": code},
+        )
+    except ClientError as exc:
+        code_name = exc.response.get("Error", {}).get("Code")
+        if code_name in ("NotAuthorizedException", "CodeMismatchException"):
+            # Out of attempts / session expired — start over.
+            raise ApiError(code="LOGIN_CODE_EXPIRED",
+                           message="That code didn't work. Request a new one.",
+                           status=401)
+        logger.warning("login_code_verify_failed", extra={"error": code_name})
+        raise ApiError(code="LOGIN_CODE_FAILED",
+                       message="Couldn't verify the code. Try again.", status=502)
+
+    auth = resp.get("AuthenticationResult")
+    if not auth:
+        # Wrong code but attempts remain — Cognito re-issued the challenge.
+        new_session = resp.get("Session")
+        if new_session:
+            return ok_response({"status": "retry", "session": new_session})
+        raise ApiError(code="LOGIN_CODE_EXPIRED",
+                       message="That code didn't work. Request a new one.", status=401)
+
+    emit_audit(event=AUDIT_D2C_LOGIN_CODE_VERIFIED,
+               actor={"clientId": client_id},
+               subject={"clientId": client_id},
+               action="event", extra={"mask": mask_phone(phone)},
+               request_id=_request_id(event))
+    return ok_response({
+        "status": "ok",
+        "idToken": auth["IdToken"],
+        "accessToken": auth["AccessToken"],
+        # A refresh token is present for a first full auth (not on token refresh).
+        "refreshToken": auth.get("RefreshToken", ""),
+        "phone": phone,
+        "mask": mask_phone(phone),
+    })
 
 
 # ── Inline provision chain (Option B — mirrors device-api/patient-mgmt) ─

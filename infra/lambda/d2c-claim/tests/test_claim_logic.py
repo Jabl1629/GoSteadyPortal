@@ -14,6 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # d2c-claim/
 
 from claim_logic import (  # noqa: E402
+    build_login_recipients,
+    login_recipient_id,
     mask_contact,
     resolve_household,
     resolve_identity,
@@ -93,6 +95,69 @@ class MaskContact(unittest.TestCase):
 
     def test_short_phone_falls_through_to_email(self):
         self.assertEqual(mask_contact(phone="1", email="k@x.io"), "k•••@x.io")
+
+
+class BuildLoginRecipients(unittest.TestCase):
+    PEPPER = "test-pepper"
+    WID = "walker-abc"
+
+    def _members(self):
+        return [
+            {"userId": "u_owner", "phone": "+17202064566", "role": "household_owner",
+             "isWalkerUser": True, "relationship": "", "displayName": "Susan"},
+            {"userId": "u_dau", "phone": "+14155551234", "role": "family_viewer",
+             "isWalkerUser": False, "relationship": "Daughter", "displayName": "Sarah"},
+            {"userId": "u_acctless", "phone": "", "role": "family_viewer",
+             "isWalkerUser": False, "relationship": "Son"},  # no phone → skipped
+        ]
+
+    def test_masks_labels_and_primary(self):
+        public, id_to_phone = build_login_recipients(self._members(), self.WID, self.PEPPER)
+        # account-less (no phone) row is dropped
+        self.assertEqual(len(public), 2)
+        primary = [r for r in public if r["isPrimary"]]
+        self.assertEqual(len(primary), 1)
+        self.assertEqual(primary[0]["mask"], "•••-4566")       # walker user
+        self.assertEqual(primary[0]["label"], "Registered user")
+        self.assertTrue(public[0]["isPrimary"])                # primary sorts first
+        dau = [r for r in public if r["label"] == "Daughter"][0]
+        self.assertEqual(dau["mask"], "•••-1234")
+
+    def test_no_phone_or_sub_leaks(self):
+        public, _ = build_login_recipients(self._members(), self.WID, self.PEPPER)
+        blob = str(public)
+        self.assertNotIn("7202064566", blob)   # no raw phone
+        self.assertNotIn("4155551234", blob)
+        self.assertNotIn("u_owner", blob)       # no Cognito sub
+        self.assertNotIn("Susan", blob)         # no raw name
+
+    def test_recipient_id_opaque_stable_and_resolvable(self):
+        public, id_to_phone = build_login_recipients(self._members(), self.WID, self.PEPPER)
+        for r in public:
+            self.assertEqual(len(r["recipientId"]), 24)
+            self.assertIn(r["recipientId"], id_to_phone)
+        # deterministic across calls
+        again = login_recipient_id(self.PEPPER, self.WID, "+17202064566")
+        self.assertEqual(id_to_phone[again], "+17202064566")
+        # walker-scoped: same phone under a different walker → different id
+        other = login_recipient_id(self.PEPPER, "walker-xyz", "+17202064566")
+        self.assertNotEqual(again, other)
+
+    def test_primary_falls_back_to_owner_when_no_walker_user(self):
+        members = [
+            {"userId": "u1", "phone": "+14155551234", "role": "family_viewer",
+             "isWalkerUser": False, "relationship": "Aide"},
+            {"userId": "u2", "phone": "+17202064566", "role": "household_owner",
+             "isWalkerUser": False, "relationship": ""},
+        ]
+        public, _ = build_login_recipients(members, self.WID, self.PEPPER)
+        primary = [r for r in public if r["isPrimary"]][0]
+        self.assertEqual(primary["mask"], "•••-4566")  # the owner
+
+    def test_empty_household(self):
+        public, id_to_phone = build_login_recipients([], self.WID, self.PEPPER)
+        self.assertEqual(public, [])
+        self.assertEqual(id_to_phone, {})
 
 
 if __name__ == "__main__":
