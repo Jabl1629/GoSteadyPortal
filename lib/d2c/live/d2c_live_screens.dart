@@ -303,11 +303,13 @@ class _D2CSetupLandingScreenState extends State<D2CSetupLandingScreen> {
                   ],
                 );
               case PublicWalkerStatus.claimed:
-                return _Message(
-                  icon: Icons.lock_outline,
-                  text: lookup.ownerMasked == null
-                      ? 'This $noun is already registered to another account.'
-                      : 'This $noun is already registered to ${lookup.ownerMasked}.',
+                // Post-allocation, the persistent QR is the way back in —
+                // text a login code to the registered number, or pick a Care
+                // Circle member (d2c-qr-relogin).
+                return _ClaimedReloginView(
+                  walkerId: widget.walkerId,
+                  repository: widget.repository,
+                  noun: noun,
                 );
               case PublicWalkerStatus.decommissioned:
                 return _Message(
@@ -342,6 +344,260 @@ class _Message extends StatelessWidget {
           text,
           textAlign: TextAlign.center,
           style: const TextStyle(fontSize: 16, color: AppTheme.textDark, height: 1.4),
+        ),
+      ],
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Claimed-device QR re-login (d2c-qr-relogin)
+// ════════════════════════════════════════════════════════════════════
+
+/// Args carried to the brokered-OTP screen (session tokens can be long, so
+/// they ride GoRouter `extra`, not the URL).
+class ReloginArgs {
+  const ReloginArgs({
+    required this.walkerId,
+    required this.recipientId,
+    required this.session,
+    required this.mask,
+    required this.label,
+  });
+  final String walkerId;
+  final String recipientId;
+  final String session;
+  final String mask;
+  final String label;
+}
+
+/// The claimed-device landing: the persistent QR's primary job post-allocation
+/// is getting the registered user back in. Shows a big "That's me — text a code
+/// to •••-4566" and a de-emphasized "I'm in the Care Circle" that reveals the
+/// masked member list. Selecting either texts a login code and continues to the
+/// brokered-OTP screen.
+class _ClaimedReloginView extends StatefulWidget {
+  const _ClaimedReloginView({
+    required this.walkerId,
+    required this.repository,
+    required this.noun,
+  });
+
+  final String walkerId;
+  final D2CRepository repository;
+  final String noun;
+
+  @override
+  State<_ClaimedReloginView> createState() => _ClaimedReloginViewState();
+}
+
+class _ClaimedReloginViewState extends State<_ClaimedReloginView> {
+  late Future<List<WalkerRecipient>> _future;
+  bool _showCircle = false;
+  bool _sending = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = widget.repository.walkerLoginRecipients(widget.walkerId);
+  }
+
+  Future<void> _sendCode(WalkerRecipient r) async {
+    setState(() => _sending = true);
+    try {
+      final challenge =
+          await widget.repository.sendWalkerLoginCode(widget.walkerId, r.recipientId);
+      if (!mounted) return;
+      context.go('/relogin-otp', extra: ReloginArgs(
+        walkerId: widget.walkerId,
+        recipientId: r.recipientId,
+        session: challenge.session,
+        mask: challenge.mask.isNotEmpty ? challenge.mask : r.mask,
+        label: r.label,
+      ));
+    } catch (e) {
+      if (mounted) {
+        setState(() => _sending = false);
+        _snack(context, _errText(e));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<WalkerRecipient>>(
+      future: _future,
+      builder: (context, snap) {
+        if (snap.connectionState != ConnectionState.done) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 32),
+            child: Center(child: CircularProgressIndicator()),
+          );
+        }
+        final recipients = snap.data ?? const <WalkerRecipient>[];
+        if (snap.hasError || recipients.isEmpty) {
+          // Nothing to sign into from here (unowned, or no accounts yet).
+          return _Message(
+            icon: Icons.lock_outline,
+            text: 'This ${widget.noun} is already set up. Open the GoSteady '
+                'app and sign in with your phone number to see activity.',
+          );
+        }
+
+        final primary = recipients.firstWhere(
+          (r) => r.isPrimary,
+          orElse: () => recipients.first,
+        );
+        final others = recipients.where((r) => r != primary).toList();
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _Message(
+              icon: Icons.lock_outline,
+              text: 'This ${widget.noun} is set up. Get back in and we\'ll '
+                  'text you a login code.',
+            ),
+            const SizedBox(height: 24),
+            _PrimaryButton(
+              label: "That's me — text a code to ${primary.mask}",
+              busy: _sending,
+              onPressed: () => _sendCode(primary),
+            ),
+            if (others.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              if (!_showCircle)
+                TextButton(
+                  onPressed:
+                      _sending ? null : () => setState(() => _showCircle = true),
+                  child: const Text("I'm in the Care Circle"),
+                )
+              else ...[
+                const SizedBox(height: 4),
+                const Text(
+                  'Pick your number to get a login code:',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: AppTheme.textSoft, fontSize: 13.5),
+                ),
+                const SizedBox(height: 8),
+                for (final r in others)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: OutlinedButton(
+                      onPressed: _sending ? null : () => _sendCode(r),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppTheme.textDark,
+                        side: const BorderSide(color: AppTheme.border),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                      child: Text('${r.mask}   ·   ${r.label}'),
+                    ),
+                  ),
+              ],
+            ],
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// Brokered SMS-OTP entry for QR re-login. Unlike [D2COtpEntryScreen] (which
+/// drives the Cognito SDK directly), the code here is verified by the backend
+/// broker, which returns tokens the app adopts — so the full phone was never
+/// exposed to this device until the code proved possession.
+class D2CReloginOtpScreen extends StatefulWidget {
+  const D2CReloginOtpScreen({
+    super.key,
+    required this.auth,
+    required this.repository,
+    required this.args,
+  });
+
+  final D2CAuthService auth;
+  final D2CRepository repository;
+  final ReloginArgs args;
+
+  @override
+  State<D2CReloginOtpScreen> createState() => _D2CReloginOtpScreenState();
+}
+
+class _D2CReloginOtpScreenState extends State<D2CReloginOtpScreen> {
+  final _code = TextEditingController();
+  late String _session;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _session = widget.args.session;
+  }
+
+  @override
+  void dispose() {
+    _code.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    setState(() => _busy = true);
+    try {
+      final res = await widget.repository.verifyWalkerLoginCode(
+        widget.args.walkerId,
+        widget.args.recipientId,
+        _session,
+        _code.text.trim(),
+      );
+      if (!res.isOk) {
+        // Wrong code, attempts remain — swap in the fresh session.
+        if (!mounted) return;
+        setState(() {
+          _busy = false;
+          _session = res.session.isNotEmpty ? res.session : _session;
+          _code.clear();
+        });
+        _snack(context, 'Incorrect code. Try again.');
+        return;
+      }
+      await widget.auth.adoptSession(
+        phone: res.phone,
+        idToken: res.idToken,
+        accessToken: res.accessToken,
+        refreshToken: res.refreshToken,
+      );
+      if (mounted) context.go(D2CRoutes.dashboard);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        // Expired/out-of-attempts → send them back to request a fresh code.
+        _snack(context, _errText(e));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hint = widget.args.mask.isEmpty ? 'your phone' : widget.args.mask;
+    return _OnboardScaffold(
+      title: 'Enter your code',
+      onBack: () => context.go('/setup/${Uri.encodeComponent(widget.args.walkerId)}'),
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 18),
+          child: Text(
+            'We sent a 6-digit code to $hint.',
+            style: const TextStyle(color: AppTheme.textSoft, height: 1.4),
+          ),
+        ),
+        _field(_code, label: '6-digit code', keyboard: TextInputType.number),
+        const SizedBox(height: 6),
+        _PrimaryButton(label: 'Verify', busy: _busy, onPressed: _submit),
+        TextButton(
+          onPressed: _busy
+              ? null
+              : () => context.go(
+                  '/setup/${Uri.encodeComponent(widget.args.walkerId)}'),
+          child: const Text('Send a new code'),
         ),
       ],
     );

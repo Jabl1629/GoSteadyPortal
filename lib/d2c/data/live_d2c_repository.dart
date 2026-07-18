@@ -44,6 +44,22 @@ class LiveD2CRepository implements D2CRepository {
   Future<PublicWalkerLookup> lookupWalker(String walkerId) =>
       _api.publicWalkerLookup(walkerId);
 
+  // ── QR re-login (d2c-qr-relogin) ───────────────────────────────
+
+  @override
+  Future<List<WalkerRecipient>> walkerLoginRecipients(String walkerId) =>
+      _api.getWalkerRecipients(walkerId);
+
+  @override
+  Future<LoginCodeChallenge> sendWalkerLoginCode(
+          String walkerId, String recipientId) =>
+      _api.sendWalkerLoginCode(walkerId, recipientId);
+
+  @override
+  Future<LoginCodeVerifyResult> verifyWalkerLoginCode(
+          String walkerId, String recipientId, String session, String code) =>
+      _api.verifyWalkerLoginCode(walkerId, recipientId, session, code);
+
   @override
   Future<ClaimResponse> claim(String walkerId, {String? displayName}) async {
     // Reaching claim means the walker passed the setup agreement gate

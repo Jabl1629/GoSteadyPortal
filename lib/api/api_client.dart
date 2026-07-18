@@ -541,6 +541,55 @@ class ApiClient {
     );
   }
 
+  // ── QR re-login (d2c-qr-relogin) — all UNAUTHENTICATED ─────────
+  // Get back into a claimed device from its persistent QR: list masked
+  // household numbers, text a login code to one, and complete SMS-OTP —
+  // the full phone never crosses the wire until a code is verified.
+
+  /// `GET /public/walkers/{walkerId}/recipients` — masked login targets.
+  Future<List<WalkerRecipient>> getWalkerRecipients(String walkerId) async {
+    final body = await _request(
+      'GET',
+      '/api/v1/public/walkers/${Uri.encodeComponent(walkerId)}/recipients',
+      authenticated: false,
+    );
+    final raw = (body['recipients'] as List<dynamic>?) ?? const [];
+    return raw
+        .map((e) => WalkerRecipient.fromJson(e as Map<String, dynamic>))
+        .toList(growable: false);
+  }
+
+  /// `POST /public/walkers/{walkerId}/login-code` — SMS a code to a masked
+  /// recipient; returns an opaque Cognito session (no phone).
+  Future<LoginCodeChallenge> sendWalkerLoginCode(
+    String walkerId,
+    String recipientId,
+  ) async {
+    final body = await _request(
+      'POST',
+      '/api/v1/public/walkers/${Uri.encodeComponent(walkerId)}/login-code',
+      body: {'recipientId': recipientId},
+      authenticated: false,
+    );
+    return LoginCodeChallenge.fromJson(body);
+  }
+
+  /// `POST /public/walkers/{walkerId}/login-code/verify` — complete SMS-OTP.
+  Future<LoginCodeVerifyResult> verifyWalkerLoginCode(
+    String walkerId,
+    String recipientId,
+    String session,
+    String code,
+  ) async {
+    final body = await _request(
+      'POST',
+      '/api/v1/public/walkers/${Uri.encodeComponent(walkerId)}/login-code/verify',
+      body: {'recipientId': recipientId, 'session': session, 'code': code},
+      authenticated: false,
+    );
+    return LoginCodeVerifyResult.fromJson(body);
+  }
+
   // ── Internals ─────────────────────────────────────────────────
 
   /// GET with JWT attachment, envelope decoding, and retry on 5xx.

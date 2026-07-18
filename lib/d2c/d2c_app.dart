@@ -57,7 +57,8 @@ GoRouter buildD2CRouter({
       loc.startsWith('/join') ||
       loc == '/sign-in' ||
       loc == '/sign-up' ||
-      loc == '/otp';
+      loc == '/otp' ||
+      loc == '/relogin-otp';
 
   // Onboarding routes need the concrete D2C auth service; in demo it's
   // absent (and the user is already signed in), so bounce to the dashboard.
@@ -83,6 +84,22 @@ GoRouter buildD2CRouter({
           walkerId: state.pathParameters['walkerId'] ?? '',
           repository: repository,
           signedIn: auth.isSignedIn,
+        ),
+      ),
+      // QR re-login brokered-OTP (d2c-qr-relogin). Args (incl. the long
+      // Cognito session) ride `extra`; on a reload that loses them, bounce to
+      // phone sign-in. Needs the concrete D2C auth to adopt the session.
+      GoRoute(
+        path: '/relogin-otp',
+        redirect: (context, state) {
+          if (d2cAuth == null) return D2CRoutes.dashboard;
+          if (state.extra is! ReloginArgs) return '/sign-in';
+          return null;
+        },
+        builder: (context, state) => D2CReloginOtpScreen(
+          auth: d2cAuth!,
+          repository: repository,
+          args: state.extra as ReloginArgs,
         ),
       ),
       // Care Circle invite landing (d2c-care-circle.md §5.9). Public: the
