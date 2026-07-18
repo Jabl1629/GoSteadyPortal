@@ -157,6 +157,35 @@ Organic-signup path: after any OTP sign-in where the user has no household
 data, the app calls `GET /invites/pending` and offers the join — covers "got
 the SMS, ignored the link, signed up from the app store later."
 
+### 5.3a Durable re-entry + confirmation SMS (2026-07-18 follow-up)
+
+The invite `/join/{inviteId}` link is a **durable re-entry point**, not a
+one-time onboarding token — a member who returns to it (session timed out, or
+they just re-tap the text) must land back on the data, not an "expired" wall.
+Two pieces:
+
+- **Re-entry (frontend, `D2CJoinScreen`).** Signed-in: the invite is resolved
+  against the caller's identity — a live invite in their pending list →
+  first-time confirm-and-join; **already a member via this invite → straight
+  to the dashboard** (via the idempotent accept, which returns `alreadyMember`
+  for the original acceptor even past `expiresAt` — see step 3, the
+  `acceptedBy == sub` early-return precedes the liveness check); another
+  household → neutral + a link home; genuinely unavailable → neutral copy.
+  Signed-out: routes through phone-first sign-in (**a fresh OTP re-verifies
+  the phone**) → the post-OTP accept is idempotent → dashboard. So the link
+  keeps working forever, re-authenticating as needed. No backend change — the
+  accept endpoint was already idempotent for the original acceptor; this is a
+  frontend routing fix over that property.
+- **Confirmation SMS (backend, on FIRST accept only).** Immediately after a
+  fresh accept (step 7), the handler sends a one-time confirmation SMS to the
+  invite's stored `contactE164` — the number just proven — carrying the same
+  `/join/{inviteId}` link as their durable way back in. **Best-effort:** the
+  accept has already committed, so an `SmsSendError` is logged, never fatal
+  (mirrors the walker-user-link posture). Idempotent re-accepts do **not**
+  re-send (they return before this point). Emits `d2c.member_join_confirmed`
+  (masked contact only) on a successful send. Copy in `circle_logic.
+  confirm_sms_body`.
+
 ### 5.4 Roster read (`GET /household/members`)
 
 One query: RoleAssignments `by-client-role` (PK = token clientId; projection
@@ -257,6 +286,7 @@ transactional volume at pilot scale — flagged in §9 for GA review.
 - **Audit events** (local literals, masked contact only): `d2c.invite_sent`,
   `d2c.invite_resent`, `d2c.invite_revoked`, `d2c.invite_accepted`,
   `d2c.invite_accept_rejected`, `d2c.member_joined`,
+  `d2c.member_join_confirmed` (confirmation SMS sent on first accept — §5.3a),
   `d2c.member_role_changed`, `d2c.member_removed`, `d2c.member_left`,
   `d2c.claim_rejected_member_account`.
 - **Secrets:** reuses `gosteady/{env}/claim-binding-pepper` +
@@ -310,5 +340,6 @@ order: `npm run build` → `GoSteady-Dev-D2C-Auth` (table) → `GoSteady-Dev-Api
 | Date | Change |
 |------|--------|
 | 2026-07-14 | Initial spec — design locked in interactive scoping session (D1–D13): phone-first SMS invites w/ verified-phone fail-closed match; one-household-per-account V1 + guards (claim `MEMBER_CANNOT_CLAIM`, accept `ALREADY_IN_HOUSEHOLD`); member powers view+ack; core-only scope. CareInvites table + care-circle Lambda + Flutter wiring specced; 5b/5c/multi-household/facility deferred with compat notes. |
+| 2026-07-18 | **Re-entry follow-up** (from the first real-world caregiver test — §5.3a). Bug: a caregiver returning to their `/join/{inviteId}` link after accepting hit an "expired / not available" wall (the single-use invite was consumed, so the signed-in join screen's pending-lookup found nothing). Fixes: **(1)** `D2CJoinScreen` now resolves the invite against the caller — a returning member routes straight to the dashboard (idempotent accept), signed-out re-enters via a fresh OTP, only genuine non-members see the neutral copy; the invite link is now a durable re-entry point. **(2)** On the FIRST successful accept the handler sends a best-effort confirmation SMS (`confirm_sms_body`) carrying that same durable link, so the member has a way back in their texts; emits `d2c.member_join_confirmed`. No API-shape change — the accept endpoint was already idempotent for the original acceptor. Built on a separate worktree/branch to avoid a parallel session. |
 | 2026-07-17 | **Live-phone E2E passed + prod deploy.** Operator ran the full T1/T14 loop with a second real phone against dev — invite SMS delivered, `/join` → phone-first signup → verified-phone accept → member dashboard live. Precursor ops: the operator's household was rotated from the synthetic staged serial `GS0001000043` (returned to the staged pool) onto the physical rollator `GS9999999981` via the audited rotate primitives (end-assignment → §5.8 discharge of the DT-1 bench patient → walkerId mint → atomic release-and-bind → wipe-ack in ~2 min — first rollator-firmware wipe-ack recycle — → bound claim → `active_monitoring` ~1 min later); the claim rewrite also backfilled the pre-C56-era empty `phone`/`displayName` on the owner's role row. Prod deploy: Prod-Auth (CareInvites) + Prod-D2C-Auth (secret export) + Prod-Api (care-circle Lambda + routes + `/d2c/` ack route + refreshed handler bundles) + `deploy-d2c-app.sh --env=prod`; read-only prod smoke (empty-roster GET via synthetic bootstrap claims). |
 | 2026-07-14 (built) | **Built + deployed to dev.** Backend: `CareInvites` table lives in the **facility Auth stack** beside RoleAssignments (not D2C-Auth as first sketched — same IdentityKey CMK + same api-stack import path, no new cross-stack edge); new `care-circle` Lambda (8 routes, D2C authorizer; mutations **row-authoritative** — demote/remove effective immediately, not at token refresh); `_shared/sms.py` extracted from the OTP sender (custom-auth untouched); d2c-claim `MEMBER_CANNOT_CLAIM` guard placed AFTER the idempotent early-return (a member re-scanning their own household's claimed device still gets the benign `alreadyClaimed`) + owner rows now carry `displayName`; alert-actions adds `family_viewer` to `_CAN_ACK` + `/d2c/` route normalization + the `PATCH /api/v1/d2c/alerts/…` route. One shape addition vs the draft: invites store `contactE164` (resend needs a destination; HMAC is irreversible; identity-CMK at rest like RoleAssignments' raw `phone`; never returned by any endpoint). Flutter: care-team screen repository-driven (mock repo keeps demo/preview parity), invite sheet phone-first + walker-user toggle, `/join/{inviteId}` route + `join` threading through sign-up/sign-in/OTP, organic pending-invite prompt on the no-walker dashboard, member ack wired via the shared `ackAlert` (readPrefix). Verified: 50/50 unit + **26/26 synthetic-JWT E2E vs live dev** (roster/dedupe/fail-closed accept×3/idempotent/cross-household/member-read/ack×2/claim-guard/last-admin/promote-demote/instant-revoke) + `flutter analyze` clean + web build. |

@@ -1044,13 +1044,22 @@ class _D2CHistoryHostState extends State<D2CHistoryHost> {
 // /join/:inviteId — Care Circle invite landing (d2c-care-circle.md §5.9)
 // ════════════════════════════════════════════════════════════════════
 
-/// Landing for the invite SMS link. The link is a pointer, not a
-/// credential — the server only grants membership when the signed-in
-/// account's VERIFIED phone matches the invite, so this screen simply
-/// routes: signed-out → phone-first sign-up/sign-in (carrying the invite
-/// id); signed-in → confirm-and-accept (matched via the caller's own
-/// pending-invite list; an invite sent to a different phone shows the
-/// neutral not-available copy).
+/// Landing for the invite SMS link. The link is a **durable re-entry
+/// point**, not a one-time credential: the server only grants membership
+/// on a VERIFIED-phone match, so the link is safe to re-open forever.
+///
+/// Routing:
+///   • signed-out → phone-first sign-up/sign-in carrying the invite id
+///     (a fresh OTP re-verifies the phone; the post-OTP accept is
+///     idempotent, so a returning member who timed out lands on the
+///     dashboard — d2c-care-circle.md §5.3a).
+///   • signed-in → resolve the invite against the caller's identity:
+///       – a live invite for them → confirm-and-join (first-time);
+///       – already a member via this invite → straight to the dashboard
+///         ("get me back to the data" — the reported re-entry fix);
+///       – belongs to another Care Circle → neutral, with a link home;
+///       – genuinely unavailable (wrong phone / revoked / expired-unused)
+///         → neutral not-available copy (no oracle).
 class D2CJoinScreen extends StatefulWidget {
   const D2CJoinScreen({
     super.key,
@@ -1067,15 +1076,56 @@ class D2CJoinScreen extends StatefulWidget {
   State<D2CJoinScreen> createState() => _D2CJoinScreenState();
 }
 
+/// How a signed-in caller's invite resolved (see [_resolve]).
+enum _JoinKind { firstTime, alreadyMember, otherHousehold, unavailable, error }
+
+class _JoinResolution {
+  const _JoinResolution(this.kind,
+      {this.invite, this.walkerName = '', this.message = ''});
+  final _JoinKind kind;
+  final JoinableInvite? invite; // firstTime
+  final String walkerName; // alreadyMember
+  final String message; // error
+}
+
 class _D2CJoinScreenState extends State<D2CJoinScreen> {
-  Future<List<JoinableInvite>>? _future;
+  Future<_JoinResolution>? _resolution;
   bool _busy = false;
+  bool _redirecting = false;
 
   @override
   void initState() {
     super.initState();
-    if (widget.signedIn) {
-      _future = widget.repository.pendingInvitesForMe();
+    if (widget.signedIn) _resolution = _resolve();
+  }
+
+  /// Signed-in resolution. A first-time join surfaces in the caller's
+  /// pending list (server matches by verified-phone hash). If it's NOT
+  /// pending, we attempt the **idempotent** accept to tell a returning
+  /// member (already accepted → 200 alreadyMember) apart from a genuinely
+  /// unavailable invite — without leaking which is which.
+  Future<_JoinResolution> _resolve() async {
+    try {
+      final pending = await widget.repository.pendingInvitesForMe();
+      final match =
+          pending.where((i) => i.inviteId == widget.inviteId).toList();
+      if (match.isNotEmpty) {
+        return _JoinResolution(_JoinKind.firstTime, invite: match.first);
+      }
+      try {
+        final joined = await widget.repository.acceptInvite(widget.inviteId);
+        return _JoinResolution(_JoinKind.alreadyMember,
+            walkerName: joined.walkerName);
+      } on ApiException catch (e) {
+        if (e.code == 'ALREADY_IN_HOUSEHOLD') {
+          return const _JoinResolution(_JoinKind.otherHousehold);
+        }
+        // INVITE_PHONE_MISMATCH / INVITE_NOT_FOUND / INVITE_NOT_ACTIVE →
+        // neutral (no oracle — mirrors the server's fail-closed accept).
+        return const _JoinResolution(_JoinKind.unavailable);
+      }
+    } catch (e) {
+      return _JoinResolution(_JoinKind.error, message: _errText(e));
     }
   }
 
@@ -1128,8 +1178,8 @@ class _D2CJoinScreenState extends State<D2CJoinScreen> {
     return _OnboardScaffold(
       title: "You're invited",
       children: [
-        FutureBuilder<List<JoinableInvite>>(
-          future: _future,
+        FutureBuilder<_JoinResolution>(
+          future: _resolution,
           builder: (context, snap) {
             if (snap.connectionState != ConnectionState.done) {
               return const Padding(
@@ -1137,49 +1187,76 @@ class _D2CJoinScreenState extends State<D2CJoinScreen> {
                 child: Center(child: CircularProgressIndicator()),
               );
             }
-            if (snap.hasError) {
-              return _Message(
-                icon: Icons.wifi_off_rounded,
-                text: _errText(snap.error!),
-              );
+            final res = snap.data ??
+                const _JoinResolution(_JoinKind.unavailable);
+            switch (res.kind) {
+              case _JoinKind.alreadyMember:
+                // Returning member — take them straight to the data (the
+                // reported re-entry fix). Redirect once, post-frame.
+                if (!_redirecting) {
+                  _redirecting = true;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) context.go(D2CRoutes.dashboard);
+                  });
+                }
+                return _Message(
+                  icon: Icons.check_circle_outline,
+                  text: res.walkerName.isEmpty
+                      ? 'Welcome back — opening your dashboard…'
+                      : "Welcome back — opening ${res.walkerName}'s activity…",
+                );
+              case _JoinKind.otherHousehold:
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const _Message(
+                      icon: Icons.info_outline,
+                      text: 'This account is already part of another Care '
+                          'Circle. Contact support to move it.',
+                    ),
+                    const SizedBox(height: 20),
+                    _PrimaryButton(
+                      label: 'Go to my dashboard',
+                      onPressed: () => context.go(D2CRoutes.dashboard),
+                    ),
+                  ],
+                );
+              case _JoinKind.error:
+                return _Message(
+                    icon: Icons.wifi_off_rounded, text: res.message);
+              case _JoinKind.unavailable:
+                return const _Message(
+                  icon: Icons.help_outline,
+                  text: "This invite isn't available for this account. It "
+                      'may have been sent to a different phone number, '
+                      'already used, or expired — ask the sender for a '
+                      'fresh one.',
+                );
+              case _JoinKind.firstTime:
+                final inv = res.invite!;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _Message(
+                      icon: Icons.group_add_outlined,
+                      text: inv.inviterName.isEmpty
+                          ? "Join ${inv.walkerName.isEmpty ? 'this' : "${inv.walkerName}'s"} Care Circle?"
+                          : "${inv.inviterName} invited you to follow "
+                              "${inv.walkerName.isEmpty ? 'their walker' : inv.walkerName}. Join the Care Circle?",
+                    ),
+                    const SizedBox(height: 20),
+                    _PrimaryButton(
+                      label: 'Join Care Circle',
+                      busy: _busy,
+                      onPressed: _accept,
+                    ),
+                    TextButton(
+                      onPressed: () => context.go(D2CRoutes.dashboard),
+                      child: const Text('Not now'),
+                    ),
+                  ],
+                );
             }
-            final matches = (snap.data ?? const [])
-                .where((i) => i.inviteId == widget.inviteId)
-                .toList();
-            if (matches.isEmpty) {
-              // Neutral by design: sent-to-a-different-phone, revoked,
-              // expired, and already-used all read the same (no oracle —
-              // mirrors the server's fail-closed accept).
-              return const _Message(
-                icon: Icons.help_outline,
-                text: "This invite isn't available for this account. It may "
-                    'have been sent to a different phone number, already '
-                    'used, or expired — ask the sender for a fresh one.',
-              );
-            }
-            final inv = matches.first;
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _Message(
-                  icon: Icons.group_add_outlined,
-                  text: inv.inviterName.isEmpty
-                      ? "Join ${inv.walkerName.isEmpty ? 'this' : "${inv.walkerName}'s"} Care Circle?"
-                      : "${inv.inviterName} invited you to follow "
-                          "${inv.walkerName.isEmpty ? 'their walker' : inv.walkerName}. Join the Care Circle?",
-                ),
-                const SizedBox(height: 20),
-                _PrimaryButton(
-                  label: 'Join Care Circle',
-                  busy: _busy,
-                  onPressed: _accept,
-                ),
-                TextButton(
-                  onPressed: () => context.go(D2CRoutes.dashboard),
-                  child: const Text('Not now'),
-                ),
-              ],
-            );
           },
         ),
       ],

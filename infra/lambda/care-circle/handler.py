@@ -72,6 +72,7 @@ AUDIT_INVITE_REVOKED = "d2c.invite_revoked"
 AUDIT_INVITE_ACCEPTED = "d2c.invite_accepted"
 AUDIT_INVITE_ACCEPT_REJECTED = "d2c.invite_accept_rejected"
 AUDIT_MEMBER_JOINED = "d2c.member_joined"
+AUDIT_MEMBER_JOIN_CONFIRMED = "d2c.member_join_confirmed"  # confirmation SMS sent
 AUDIT_MEMBER_ROLE_CHANGED = "d2c.member_role_changed"
 AUDIT_MEMBER_REMOVED = "d2c.member_removed"
 AUDIT_MEMBER_LEFT = "d2c.member_left"
@@ -84,6 +85,7 @@ from circle_logic import (  # noqa: E402
     MAX_PENDING_INVITES,
     build_invite_item,
     build_member_row,
+    confirm_sms_body,
     invite_expiry,
     invite_is_live,
     invite_sms_body,
@@ -633,6 +635,25 @@ def _accept_invite(event: dict[str, Any], claims: dict[str, Any]) -> dict[str, A
                extra={"role": row["role"], "isWalkerUser": row["isWalkerUser"],
                       "invitedBy": invite.get("invitedBy", "")},
                request_id=_request_id(event))
+
+    # Post-accept confirmation SMS (spec §5.3a) — fires ONCE, only on this
+    # first successful accept (idempotent re-accepts return early above), so
+    # the member keeps a durable re-entry link in their texts. Best-effort:
+    # the accept has already committed, so an SMS failure must never fail the
+    # join — log and move on. Destination is the invite's stored E164 (the
+    # number we just proved the caller possesses).
+    to = invite.get("contactE164")
+    if to:
+        try:
+            send_sms(to, confirm_sms_body(invite, D2C_APP_BASE_URL))
+            emit_audit(event=AUDIT_MEMBER_JOIN_CONFIRMED, actor=actor,
+                       subject={"clientId": invite["clientId"], "memberUserId": sub},
+                       action="event",
+                       extra={"contactMask": invite.get("contactMask", "")},
+                       request_id=_request_id(event))
+        except SmsSendError as exc:
+            logger.warning("member_join_confirm_sms_failed",
+                           extra={"inviteId": invite_id, "error": str(exc)[:200]})
 
     # Client must refreshClaims() so the next token carries the household.
     return ok_response({"household": household_summary, "alreadyMember": False},

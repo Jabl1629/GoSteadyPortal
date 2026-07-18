@@ -142,6 +142,15 @@ class TestInviteItem(unittest.TestCase):
         self.assertIn("Susan", body)
         self.assertNotIn("hash", body)
 
+    def test_confirm_sms_body_carries_durable_link(self):
+        invite = _invite()
+        body = cl.confirm_sms_body(invite, "https://app.gosteady.co")
+        # Same durable /join link the member can re-open to get back in.
+        self.assertIn(f"/join/{invite['inviteId']}", body)
+        self.assertIn("Susan", body)
+        self.assertIn("STOP", body)  # opt-out compliance
+        self.assertNotIn("hash", body)
+
 
 class TestMemberRow(unittest.TestCase):
     def test_viewer_row_gets_linked_patients(self):

@@ -261,3 +261,18 @@ def invite_sms_body(invite: dict[str, Any], app_base_url: str) -> str:
         f"Join: {app_base_url}/join/{invite['inviteId']} "
         f"Reply STOP to opt out."
     )
+
+
+def confirm_sms_body(invite: dict[str, Any], app_base_url: str) -> str:
+    """Post-accept confirmation SMS (spec §5.3a). Sent once, on the FIRST
+    successful accept, so the member has a durable re-entry link in their
+    texts. The same `/join/{inviteId}` link is a durable re-entry point
+    (D2CJoinScreen routes a returning member straight to the dashboard,
+    re-verifying the phone with a fresh OTP if the session timed out) — so
+    the link they were invited with keeps working as their way back in."""
+    walker = invite.get("walkerName") or "your walker"
+    return (
+        f"You're all set — you can now follow {walker}'s activity on GoSteady. "
+        f"View anytime: {app_base_url}/join/{invite['inviteId']} "
+        f"(we'll text a code to confirm it's you). Reply STOP to opt out."
+    )
