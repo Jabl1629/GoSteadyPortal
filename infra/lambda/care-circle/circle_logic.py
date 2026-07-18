@@ -158,6 +158,7 @@ def build_member_row(
     claims: dict[str, Any],
     active_patient_ids: list[str],
     now: datetime,
+    agreement_version: str = "",
 ) -> dict[str, Any]:
     """
     RoleAssignments row for an accepted invite (spec §5.3 step 5).
@@ -167,6 +168,10 @@ def build_member_row(
     patient. Owners are client-scoped — no linkedPatientIds. scoped*
     ids are omitted (DDB rejects empty sets; absent = unrestricted
     within the household).
+
+    `agreement_version` (d2c-caregiver-agreement.md §Impl) stamps which
+    caregiver-agreement version the member acknowledged at join, and when —
+    evidenceable, absent when the client didn't send one.
     """
     role = invite.get("role") or "family_viewer"
     row: dict[str, Any] = {
@@ -185,6 +190,9 @@ def build_member_row(
     }
     if role == "family_viewer" and active_patient_ids:
         row["linkedPatientIds"] = set(active_patient_ids)
+    if agreement_version:
+        row["agreementVersion"] = agreement_version
+        row["agreementAcceptedAt"] = iso(now)
     return row
 
 

@@ -90,6 +90,8 @@ AUDIT_D2C_CLAIM_REJECTED_DEVICE_OWNED = "d2c.claim_rejected_device_owned"
 # Care Circle guard (d2c-care-circle.md §5.6): a family_viewer's claim must
 # not hijack the household they're a member of.
 AUDIT_D2C_CLAIM_REJECTED_MEMBER = "d2c.claim_rejected_member_account"
+# User-agreement acknowledgment recorded at setup (d2c-user-agreement.md).
+AUDIT_D2C_AGREEMENT_ACKNOWLEDGED = "d2c.agreement_acknowledged"
 
 # Pure claim helpers (household anchor + identity split + contact masking) live
 # in claim_logic.py so they're unit-testable without boto3/powertools.
@@ -280,7 +282,13 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
     #    ids are OMITTED (DynamoDB rejects empty sets; absent = unrestricted in
     #    the household). `email`/`phone` back the masked-owner hint (email may
     #    be empty under the phone-first pool).
-    _roles.put_item(Item={
+    # User-agreement acknowledgment (d2c-user-agreement.md): the setup screen
+    # gated on the plain-language agreement; the app sends the acknowledged
+    # version here. Stamp who acknowledged which version + when on the owner
+    # row so it's evidenceable. Absent (older client / bootstrap script) →
+    # simply not stamped.
+    agreement_version = (body.get("agreementVersion") or "").strip()
+    role_item = {
         "userId": sub,
         "clientId": client_id,
         "role": "household_owner",
@@ -293,7 +301,18 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
         "phone": claims.get("phoneNumber", ""),
         "validFrom": now_iso,
         "assignedBy": sub,
-    })
+    }
+    if agreement_version:
+        role_item["agreementVersion"] = agreement_version
+        role_item["agreementAcceptedAt"] = now_iso
+    _roles.put_item(Item=role_item)
+    if agreement_version:
+        emit_audit(event=AUDIT_D2C_AGREEMENT_ACKNOWLEDGED, actor=actor,
+                   subject={"clientId": client_id, "userId": sub},
+                   action="event",
+                   extra={"agreementVersion": agreement_version,
+                          "role": "household_owner"},
+                   request_id=req_id)
 
     # 4. Provision the device (inline chain). On failure, roll back the
     #    patient row IF this claim created it (a reused pre-existing active

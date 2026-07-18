@@ -22,6 +22,9 @@ dependencies:
   url_strategy: ^0.3.0
   # Added in Phase 2B-FAC-R (phase-2b-fac-r-facility-reads.md L5):
   visibility_detector: ^0.4.0+2
+  # D2C user-agreement acknowledgment — tappable Terms/Privacy links
+  # (d2c-user-agreement.md / d2c-caregiver-agreement.md).
+  url_launcher: ^6.2.0
 
 dev_dependencies:
   flutter_test:

@@ -73,6 +73,7 @@ AUDIT_INVITE_ACCEPTED = "d2c.invite_accepted"
 AUDIT_INVITE_ACCEPT_REJECTED = "d2c.invite_accept_rejected"
 AUDIT_MEMBER_JOINED = "d2c.member_joined"
 AUDIT_MEMBER_JOIN_CONFIRMED = "d2c.member_join_confirmed"  # confirmation SMS sent
+AUDIT_AGREEMENT_ACKNOWLEDGED = "d2c.agreement_acknowledged"  # caregiver agreement
 AUDIT_MEMBER_ROLE_CHANGED = "d2c.member_role_changed"
 AUDIT_MEMBER_REMOVED = "d2c.member_removed"
 AUDIT_MEMBER_LEFT = "d2c.member_left"
@@ -502,6 +503,9 @@ def _accept_invite(event: dict[str, Any], claims: dict[str, Any]) -> dict[str, A
     invite_id = (body.get("inviteId") or "").strip()
     if not invite_id:
         raise ApiError(code="INVALID_REQUEST", message="inviteId required", status=400)
+    # Caregiver-agreement acknowledgment (d2c-caregiver-agreement.md): the join
+    # screen gated on the plain-language agreement; the app sends the version.
+    agreement_version = (body.get("agreementVersion") or "").strip()
 
     invite = _invites.get_item(Key={"inviteId": invite_id}).get("Item")
     if not invite:
@@ -586,6 +590,7 @@ def _accept_invite(event: dict[str, Any], claims: dict[str, Any]) -> dict[str, A
     #    DIFFERENT household loses cleanly (§5.3 step 5).
     active = _active_patients(invite["clientId"])
     row = build_member_row(
+        agreement_version=agreement_version,
         user_id=sub,
         invite=invite,
         claims=claims,
@@ -635,6 +640,13 @@ def _accept_invite(event: dict[str, Any], claims: dict[str, Any]) -> dict[str, A
                extra={"role": row["role"], "isWalkerUser": row["isWalkerUser"],
                       "invitedBy": invite.get("invitedBy", "")},
                request_id=_request_id(event))
+    if agreement_version:
+        emit_audit(event=AUDIT_AGREEMENT_ACKNOWLEDGED, actor=actor,
+                   subject={"clientId": invite["clientId"], "userId": sub},
+                   action="event",
+                   extra={"agreementVersion": agreement_version,
+                          "role": row["role"]},
+                   request_id=_request_id(event))
 
     # Post-accept confirmation SMS (spec §5.3a) — fires ONCE, only on this
     # first successful accept (idempotent re-accepts return early above), so

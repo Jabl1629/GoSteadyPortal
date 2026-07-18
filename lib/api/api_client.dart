@@ -422,6 +422,7 @@ class ApiClient {
   Future<ClaimResponse> claimDevice(
     String walkerId, {
     String? displayName,
+    String? agreementVersion,
   }) async {
     final body = await _request(
       'POST',
@@ -430,6 +431,10 @@ class ApiClient {
         'walkerId': walkerId,
         if (displayName != null && displayName.isNotEmpty)
           'displayName': displayName,
+        // Records which user-agreement version the walker acknowledged at
+        // setup (d2c-user-agreement.md). Stamped onto the owner's role row.
+        if (agreementVersion != null && agreementVersion.isNotEmpty)
+          'agreementVersion': agreementVersion,
       },
     );
     return ClaimResponse.fromJson(body);
@@ -500,11 +505,20 @@ class ApiClient {
   /// `POST /api/v1/invites/accept` — verified-phone-matched join.
   /// Caller must `refreshClaims()` after a fresh join (the repository
   /// wrapper does this).
-  Future<AcceptInviteResult> acceptCareInvite(String inviteId) async {
+  Future<AcceptInviteResult> acceptCareInvite(
+    String inviteId, {
+    String? agreementVersion,
+  }) async {
     final body = await _request(
       'POST',
       '/api/v1/invites/accept',
-      body: {'inviteId': inviteId},
+      body: {
+        'inviteId': inviteId,
+        // Records which caregiver-agreement version the member acknowledged
+        // at join (d2c-caregiver-agreement.md). Stamped on the member row.
+        if (agreementVersion != null && agreementVersion.isNotEmpty)
+          'agreementVersion': agreementVersion,
+      },
     );
     return AcceptInviteResult.fromJson(body);
   }

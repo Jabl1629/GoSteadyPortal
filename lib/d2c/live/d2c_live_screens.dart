@@ -9,6 +9,7 @@ import '../auth/d2c_auth_service.dart';
 import '../d2c_routes.dart';
 import '../data/d2c_mock_data.dart';
 import '../data/d2c_repository.dart';
+import 'd2c_agreement.dart';
 import '../rendering/metric_registry.dart';
 import '../screens/d2c_dashboard_screen.dart';
 import '../widgets/d2c_bottom_nav.dart';
@@ -506,7 +507,11 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
           _field(_phone, label: 'Mobile phone', keyboard: TextInputType.phone),
         _field(_email,
             label: 'Email (optional)', keyboard: TextInputType.emailAddress),
-        const SizedBox(height: 6),
+        const SizedBox(height: 14),
+        // User-agreement acknowledgment (d2c-user-agreement.md). "Continue" is
+        // the clickwrap gate; the acknowledged version is recorded on claim.
+        const D2CAgreementPanel(audience: AgreementAudience.walker),
+        const SizedBox(height: 16),
         _PrimaryButton(label: 'Continue', busy: _busy, onPressed: _submit),
       ],
     );
@@ -1245,6 +1250,14 @@ class _D2CJoinScreenState extends State<D2CJoinScreen> {
                               "${inv.walkerName.isEmpty ? 'their walker' : inv.walkerName}. Join the Care Circle?",
                     ),
                     const SizedBox(height: 20),
+                    // Caregiver-agreement acknowledgment
+                    // (d2c-caregiver-agreement.md). "Join Care Circle" is the
+                    // clickwrap gate; the version is recorded on accept.
+                    D2CAgreementPanel(
+                      audience: AgreementAudience.caregiver,
+                      walkerName: inv.walkerName,
+                    ),
+                    const SizedBox(height: 16),
                     _PrimaryButton(
                       label: 'Join Care Circle',
                       busy: _busy,

@@ -325,9 +325,11 @@ def main() -> int:
               st == 403 and err_code(body) == "INVITE_PHONE_MISMATCH",
               f"{st} {body}")
 
-        # 10. Happy-path accept (T1 API leg).
+        # 10. Happy-path accept (T1 API leg) + caregiver-agreement stamp.
         st, body = invoke(LAMBDA_CARE_CIRCLE, "POST /api/v1/invites/accept",
-                          member_boot, body={"inviteId": invite_id})
+                          member_boot,
+                          body={"inviteId": invite_id,
+                                "agreementVersion": "2026-07-18"})
         check("accept → 201 + household summary",
               st == 201 and body.get("household", {}).get("clientId") == HH,
               f"{st} {body}")
@@ -336,6 +338,9 @@ def main() -> int:
               row.get("role") == "family_viewer"
               and row.get("clientId") == HH
               and PAT in (row.get("linkedPatientIds") or set()), f"{row}")
+        check("caregiver agreement stamped on member row",
+              row.get("agreementVersion") == "2026-07-18"
+              and bool(row.get("agreementAcceptedAt")), f"{row}")
 
         # 11. Idempotent re-accept (T6).
         st, body = invoke(LAMBDA_CARE_CIRCLE, "POST /api/v1/invites/accept",

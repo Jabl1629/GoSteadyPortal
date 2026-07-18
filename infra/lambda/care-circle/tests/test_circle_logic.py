@@ -189,6 +189,23 @@ class TestMemberRow(unittest.TestCase):
         self.assertTrue(row["isWalkerUser"])
         self.assertNotIn("linkedPatientIds", row)  # empty set never written
 
+    def test_agreement_version_stamped_when_provided(self):
+        row = cl.build_member_row(
+            user_id="m", invite=_invite(), claims={},
+            active_patient_ids=["pat_1"], now=NOW,
+            agreement_version="2026-07-18",
+        )
+        self.assertEqual(row["agreementVersion"], "2026-07-18")
+        self.assertEqual(row["agreementAcceptedAt"], cl.iso(NOW))
+
+    def test_agreement_absent_when_not_provided(self):
+        row = cl.build_member_row(
+            user_id="m", invite=_invite(), claims={},
+            active_patient_ids=["pat_1"], now=NOW,
+        )
+        self.assertNotIn("agreementVersion", row)
+        self.assertNotIn("agreementAcceptedAt", row)
+
 
 class TestViews(unittest.TestCase):
     def test_member_view_masks_phone_and_never_leaks_raw(self):
