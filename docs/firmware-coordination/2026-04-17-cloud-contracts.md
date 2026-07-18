@@ -9849,3 +9849,74 @@ flashed GS0002000001, then a **full deployment dry-run on real rollator hardware
 - **prod hygiene:** GS0002000001 is `active_monitoring` on the pilot build (test
   household `dtc_bc7f6e2cd956`). Clean up the test patient/session, or keep it as the
   prod rollator test unit.
+
+# §C59 — [D2C] Four more prod rollators (GS0002000002–05) brought up for the live demo, all GO (2026-07-18)
+
+Batch bring-up of 4 shippable prod rollators for a field demo, reusing the §C58
+path verbatim (`bringup-prod-unit.sh` → `flash_cert.py` → serial-baked pilot build
+→ heartbeat → `fleet.py check`). All four minted, flashed, and pass the pre-ship
+gate `GO ✓`. No code or contract changes — pure ops execution on the §C58 rails.
+Sequenced "pilot #2 end-to-end first, then batch 03–05" to catch process gotchas
+before committing the rest.
+
+## C59.1 — What was done per unit
+
+Cloud (`tools/bringup-prod-unit.sh GS000200000X rollator_platform thingy91x_bench`):
+prod cert/key → sec_tag 201, Thing + `gosteady-prod-device-policy`, registry row
+`ready_to_provision`, server-minted walkerId, claim URL `app.gosteady.co/setup/…`
+(all 4 verified live on the prod public lookup: `unclaimed`/`rollator_platform`).
+
+Firmware (bench, SW2=nRF91, J-Link 802006700, **flash via `nrfutil device`** —
+standalone `nrfjprog` still JLink-broken here): `at_client` → SIM check → `flash_cert.py`
+→ **pilot build `prj_rollator_pilot.conf` (`rol-0.1.0-ww`)** with per-unit
+`-DCONFIG_AWS_IOT_CLIENT_ID_STATIC` baked → flash → first-heartbeat PUBACK to the
+prod broker → `fleet.py --direct --env prod check … --expect-type rollator_platform`.
+
+**Chose the pilot/deployment build (not `prj_rollator_cloud`)** for all 4 since these
+ship to real demo users — dark + LOW_POWER + PSM + SESSION_LED + PREACT gate, the
+same image GS0002000001 runs. DT-3 shake-to-activate is validated (§C58.5); rolling
+false-trigger + battery slope remain the open DT-3 items but don't block a claim.
+
+## C59.2 — Handoff record (serial → walkerId → IMEI → SIM ICCID)
+
+| Serial | walkerId (QR: `/setup/<id>`) | IMEI | SIM ICCID (Onomondo) | Gate |
+|---|---|---|---|---|
+| GS0002000002 | 675f892c-cb18-4edd-a772-5bf409fce722 | 359404235492361 | 89457300000025948194 | GO ✓ |
+| GS0002000003 | fbb97255-85f5-4334-8dff-830ec9a48b3c | 355025930100738 | 89457300000025948376 | GO ✓ |
+| GS0002000004 | 4bee0953-e2e6-4ae3-ae9e-7630bb6bfdbc | 359404235388908 | 89457300000025579528 | GO ✓ |
+| GS0002000005 | 2c3480b3-ba2c-4c62-b31e-09a230d0f32c | 359404235492411 | 89457300000025947402 | GO ✓ |
+
+All 4 registered roaming on AT&T LTE-M (Onomondo), NITZ time correct (2026, no 2080),
+PSM tau=3 h granted, `device_type=rollator_platform` matches registry (no DT-0 mismatch
+alarm). IMEI/ICCID captured here only — the cloud still does **not** ingest board-level
+identifiers (heartbeat carries none; registry has serial/certFingerprint/walkerId only).
+
+## C59.3 — Two process notes (not defects)
+
+- **Onomondo SIMs must be carrier-registered before bring-up.** GS0002000002's first
+  boot showed `%XSIM: 0` / all SIM AT reads `ERROR` — not a seating fault; the SIM
+  wasn't activated on Onomondo yet. Post-registration it read fine and attached in
+  ~30 s. Carrier activation is a distinct layer from SIM *detection*, but an
+  unregistered Onomondo SIM here presented as undetectable until activated. Worth a
+  line in `new-prod-unit-bringup.md` pre-reqs.
+- **Don't pipe `bringup-prod-unit.sh` through a fragile filter.** A batch `… | grep`
+  with an unsupported regex died and SIGPIPE'd the script mid-run, leaving 2 empty
+  bundle dirs (no certs/Things minted — clean, idempotent re-run recovered). Run the
+  script unfiltered or tee to a file.
+
+## C59.4 — Serial-block decision recorded
+
+Prod D2C rollators allocate sequentially from **`GS0002000001`+** (now …01–05 used).
+Recorded in `new-prod-unit-bringup.md` (was flagged "open"). Note `2026-07-01-device-types.md`
+Q6 still reserves `GS0001…` for rollator *production*; the `GS0002…` block is the
+prod-D2C convenience block. Registry stays authoritative (D2 — no type encoding in the
+serial), so the blocks coexist without conflict.
+
+## C59.5 — State / handoff
+
+4 units `ready_to_provision` on prod, all `GO ✓`, visible on `fleet.py --env prod ls`.
+Physically labeled with their serials; each keeps its own Onomondo SIM. Ready for QR
+stickers (operator generates from the claim URLs above) + real household claims. The
+claim→activate→walk→dashboard loop is already proven on GS0002000001 (§C58.3), so no
+per-unit claim test was run on 02–05 (a claim binds a device to a household and there's
+no clean D2C un-claim path yet — §C58.6).

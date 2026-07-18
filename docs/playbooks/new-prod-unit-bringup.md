@@ -50,12 +50,12 @@ collide on the shared broker:
 | `GS9999999980`–`GS9999999999` | dev/test fixtures (walker + rollator bench) — **never prod** |
 | `GS0000000001`–`GS0000000003` | first three facility pilot walkers (used) |
 | `GS0000000004`+ | facility/walker shipping |
-| **prod D2C rollators** | **allocate a dedicated block — decide + record here before first use** |
+| `GS0002000001`+ | **prod D2C rollators** — allocate sequentially (first allocations `GS0002000001`–`GS0002000005`, 2026-07) |
 
-> ⚠ **Open decision:** no prod-D2C-rollator block is allocated yet. Pick one (e.g.
-> `GS0002000001`+ to keep it visually distinct from facility `GS0000…`), record it
-> in this table, and never reuse a walkerId/serial across units (the sparse GSI must
-> stay collision-free).
+> **Block decision (recorded 2026-07-17):** prod D2C rollators allocate
+> sequentially from `GS0002000001` — visually distinct from facility `GS0000…`
+> and the dev/test `GS9999…` ranges. Never reuse a walkerId/serial across units
+> (the sparse GSI must stay collision-free).
 
 ---
 
@@ -67,6 +67,13 @@ collide on the shared broker:
   live (see [move-to-prod §C57.3 #4]) and `gosteady/prod/twilio` must be populated
   (SMS-OTP sign-up). Cloud provisioning below works without these; the *claim test*
   needs them.
+- **Register each Onomondo SIM on the carrier side BEFORE the firmware flash.** An
+  unregistered Onomondo SIM presents at the bench as *undetectable* — `AT%XSIM: 0`
+  and `AT+CPIN?`/`AT%XICCID`/`AT+CIMI` all `ERROR` (looks like a seating fault, but
+  it isn't). Once activated on Onomondo it reads normally and attaches (roaming,
+  AT&T LTE-M) in ~30 s. Activation can lag a few minutes to propagate, so kick it
+  off early. (Bit us on GS0002000002 — coord §C59.3.) The SIM and the baked
+  cert/serial are independent — any registered Onomondo SIM works in any board.
 
 ---
 
