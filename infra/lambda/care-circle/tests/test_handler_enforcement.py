@@ -295,6 +295,44 @@ class TestAcceptInvite(CareCircleTestBase):
         self.assertIn("#st = :pending", upd["ConditionExpression"])
         # No walker link for a non-walker invite.
         self.patients.update_item.assert_not_called()
+        # No agreement stamp when the client didn't send a version.
+        self.assertNotIn("agreementVersion", put["Item"])
+        # §5.3a: a confirmation SMS fires once, to the invite's stored number,
+        # carrying the durable /join link.
+        self.sms.assert_called_once()
+        to, sms_body = self.sms.call_args.args
+        self.assertEqual(to, INVITEE_PHONE)
+        self.assertIn(f"/join/{_pending_invite()['inviteId']}", sms_body)
+
+    def test_confirmation_sms_not_sent_on_idempotent_reaccept(self):
+        # §5.3a: a returning member (already accepted) must NOT get a second
+        # confirmation text — the idempotent path returns before the send.
+        self.roles.get_item.return_value = {
+            "Item": _member_row(sub=MEMBER_SUB, client_id=HOUSEHOLD)
+        }
+        status, body = self._accept(
+            client_id=HOUSEHOLD,
+            invite=_pending_invite(status="accepted", acceptedBy=MEMBER_SUB),
+        )
+        self.assertEqual(status, 200, body)
+        self.sms.assert_not_called()
+
+    def test_confirmation_sms_failure_never_fails_the_join(self):
+        # §5.3a: the accept has already committed — an SMS failure is logged,
+        # not fatal (best-effort, mirrors the walker-user-link posture).
+        self.sms.side_effect = handler.SmsSendError("twilio down")
+        status, body = self._accept()
+        self.assertEqual(status, 201, body)
+        self.roles.put_item.assert_called_once()  # membership still written
+
+    def test_confirmation_sms_skipped_when_no_stored_number(self):
+        # A legacy invite row without contactE164 (pre-2026-07-14) → no send,
+        # no crash; the accept still succeeds.
+        no_e164 = _pending_invite()
+        no_e164.pop("contactE164", None)
+        status, body = self._accept(invite=no_e164)
+        self.assertEqual(status, 201, body)
+        self.sms.assert_not_called()
 
     def test_t2_wrong_phone_403_neutral(self):
         status, body = self._accept(phone="+15125559999")
@@ -376,6 +414,21 @@ class TestAcceptInvite(CareCircleTestBase):
         self.patients.update_item.side_effect = _cc_failed()
         status, body = self._accept(invite=_pending_invite(isWalkerUser=True))
         self.assertEqual(status, 201, body)
+
+    def test_agreement_version_recorded_on_member_row(self):
+        # d2c-caregiver-agreement.md: the join gate sends the acknowledged
+        # version → stamped on the member row (version + timestamp).
+        self.invites.get_item.return_value = {"Item": _pending_invite()}
+        status, body = self._call(_event(
+            self.ROUTE, sub=MEMBER_SUB, role="household_owner",
+            client_id=f"dtc_{MEMBER_SUB}", phone=INVITEE_PHONE,
+            body={"inviteId": _pending_invite()["inviteId"],
+                  "agreementVersion": "2026-07-18"},
+        ))
+        self.assertEqual(status, 201, body)
+        put = self.roles.put_item.call_args.kwargs
+        self.assertEqual(put["Item"]["agreementVersion"], "2026-07-18")
+        self.assertIn("agreementAcceptedAt", put["Item"])
 
 
 # ── GET /household/members ─────────────────────────────────────────────

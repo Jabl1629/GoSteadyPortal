@@ -193,6 +193,25 @@ class TestBindingEnforcement(ClaimTestBase):
         status, body = self._claim(_event(verified="false"))
         self.assertEqual(status, 201, body)
 
+    def test_agreement_version_recorded_on_owner_row(self):
+        # d2c-user-agreement.md: the setup gate sends the acknowledged version
+        # → stamped on the owner's RoleAssignments row (version + timestamp).
+        self._set_device(_device())
+        status, body = self._claim(
+            _event(body={"walkerId": WALKER_ID, "agreementVersion": "2026-07-18"})
+        )
+        self.assertEqual(status, 201, body)
+        put = self.roles.put_item.call_args.kwargs
+        self.assertEqual(put["Item"]["agreementVersion"], "2026-07-18")
+        self.assertIn("agreementAcceptedAt", put["Item"])
+
+    def test_no_agreement_version_leaves_owner_row_unstamped(self):
+        self._set_device(_device())
+        status, body = self._claim()  # default body has no agreementVersion
+        self.assertEqual(status, 201, body)
+        put = self.roles.put_item.call_args.kwargs
+        self.assertNotIn("agreementVersion", put["Item"])
+
 
 class TestOwnershipGate(ClaimTestBase):
     def test_t7_ready_but_owned_by_other_household_409(self):

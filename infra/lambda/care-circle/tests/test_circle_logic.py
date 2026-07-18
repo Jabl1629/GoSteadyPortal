@@ -142,6 +142,15 @@ class TestInviteItem(unittest.TestCase):
         self.assertIn("Susan", body)
         self.assertNotIn("hash", body)
 
+    def test_confirm_sms_body_carries_durable_link(self):
+        invite = _invite()
+        body = cl.confirm_sms_body(invite, "https://app.gosteady.co")
+        # Same durable /join link the member can re-open to get back in.
+        self.assertIn(f"/join/{invite['inviteId']}", body)
+        self.assertIn("Susan", body)
+        self.assertIn("STOP", body)  # opt-out compliance
+        self.assertNotIn("hash", body)
+
 
 class TestMemberRow(unittest.TestCase):
     def test_viewer_row_gets_linked_patients(self):
@@ -179,6 +188,23 @@ class TestMemberRow(unittest.TestCase):
         )
         self.assertTrue(row["isWalkerUser"])
         self.assertNotIn("linkedPatientIds", row)  # empty set never written
+
+    def test_agreement_version_stamped_when_provided(self):
+        row = cl.build_member_row(
+            user_id="m", invite=_invite(), claims={},
+            active_patient_ids=["pat_1"], now=NOW,
+            agreement_version="2026-07-18",
+        )
+        self.assertEqual(row["agreementVersion"], "2026-07-18")
+        self.assertEqual(row["agreementAcceptedAt"], cl.iso(NOW))
+
+    def test_agreement_absent_when_not_provided(self):
+        row = cl.build_member_row(
+            user_id="m", invite=_invite(), claims={},
+            active_patient_ids=["pat_1"], now=NOW,
+        )
+        self.assertNotIn("agreementVersion", row)
+        self.assertNotIn("agreementAcceptedAt", row)
 
 
 class TestViews(unittest.TestCase):

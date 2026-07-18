@@ -9,6 +9,7 @@ import '../../api/api_client.dart';
 import '../../api/api_models.dart' hide CareNote;
 import '../../api/d2c_api_models.dart';
 import '../../auth/auth_service_interface.dart';
+import '../../config/d2c_legal.dart';
 import '../../models/user.dart';
 import '../rendering/metric_registry.dart';
 import 'd2c_mock_data.dart';
@@ -45,7 +46,10 @@ class LiveD2CRepository implements D2CRepository {
 
   @override
   Future<ClaimResponse> claim(String walkerId, {String? displayName}) async {
-    final resp = await _api.claimDevice(walkerId, displayName: displayName);
+    // Reaching claim means the walker passed the setup agreement gate
+    // (D2CAgreementPanel); record the acknowledged version server-side.
+    final resp = await _api.claimDevice(walkerId,
+        displayName: displayName, agreementVersion: D2CLegal.agreementVersion);
     // The household clientId is now persisted server-side; force a token
     // refresh so custom:clientId reflects the new household (dtc_{householdId})
     // before the dashboard reads — the pre-claim bootstrap token carried
@@ -388,7 +392,10 @@ class LiveD2CRepository implements D2CRepository {
 
   @override
   Future<AcceptInviteResult> acceptInvite(String inviteId) async {
-    final result = await _api.acceptCareInvite(inviteId);
+    // Reaching accept means the caregiver passed the join agreement gate
+    // (D2CAgreementPanel); record the acknowledged version server-side.
+    final result = await _api.acceptCareInvite(inviteId,
+        agreementVersion: D2CLegal.agreementVersion);
     // The membership row is persisted server-side; refresh the token so
     // custom:clientId/custom:role reflect the joined household before the
     // dashboard reads — same pattern as post-claim (§C56).

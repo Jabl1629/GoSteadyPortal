@@ -158,6 +158,7 @@ def build_member_row(
     claims: dict[str, Any],
     active_patient_ids: list[str],
     now: datetime,
+    agreement_version: str = "",
 ) -> dict[str, Any]:
     """
     RoleAssignments row for an accepted invite (spec §5.3 step 5).
@@ -167,6 +168,10 @@ def build_member_row(
     patient. Owners are client-scoped — no linkedPatientIds. scoped*
     ids are omitted (DDB rejects empty sets; absent = unrestricted
     within the household).
+
+    `agreement_version` (d2c-caregiver-agreement.md §Impl) stamps which
+    caregiver-agreement version the member acknowledged at join, and when —
+    evidenceable, absent when the client didn't send one.
     """
     role = invite.get("role") or "family_viewer"
     row: dict[str, Any] = {
@@ -185,6 +190,9 @@ def build_member_row(
     }
     if role == "family_viewer" and active_patient_ids:
         row["linkedPatientIds"] = set(active_patient_ids)
+    if agreement_version:
+        row["agreementVersion"] = agreement_version
+        row["agreementAcceptedAt"] = iso(now)
     return row
 
 
@@ -260,4 +268,19 @@ def invite_sms_body(invite: dict[str, Any], app_base_url: str) -> str:
         f"{inviter} invited you to {walker}'s GoSteady Care Circle. "
         f"Join: {app_base_url}/join/{invite['inviteId']} "
         f"Reply STOP to opt out."
+    )
+
+
+def confirm_sms_body(invite: dict[str, Any], app_base_url: str) -> str:
+    """Post-accept confirmation SMS (spec §5.3a). Sent once, on the FIRST
+    successful accept, so the member has a durable re-entry link in their
+    texts. The same `/join/{inviteId}` link is a durable re-entry point
+    (D2CJoinScreen routes a returning member straight to the dashboard,
+    re-verifying the phone with a fresh OTP if the session timed out) — so
+    the link they were invited with keeps working as their way back in."""
+    walker = invite.get("walkerName") or "your walker"
+    return (
+        f"You're all set — you can now follow {walker}'s activity on GoSteady. "
+        f"View anytime: {app_base_url}/join/{invite['inviteId']} "
+        f"(we'll text a code to confirm it's you). Reply STOP to opt out."
     )
