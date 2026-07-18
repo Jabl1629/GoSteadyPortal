@@ -1,6 +1,6 @@
 # D2C QR re-login — get back into a claimed device from its QR
 
-> **Date:** 2026-07-18 | **Status:** 🟡 Built + deployed (dev); operator live-phone round-trip pending. Backend 49 unit + 6/6 live recipients; UI verified rendering on `dev.app.gosteady.co`.
+> **Date:** 2026-07-18 | **Status:** 🟢 SHIPPED (dev + prod). Backend 49 unit + 6/6 live recipients; UI verified on `dev.app.gosteady.co`; **operator real-phone OTP round-trip confirmed working**; **prod deployed 2026-07-18** (Prod-Api + `app.gosteady.co`; prod recipients smoke through the prod API GW — masked, no leak).
 > **Related:** [`d2c-phone-only-signin.md`](d2c-phone-only-signin.md) (SMS-OTP pool) · [`d2c-care-circle.md`](d2c-care-circle.md) (household roster) · [`d2c-claim-binding.md`](d2c-claim-binding.md) (pepper/HMAC + masking) · `lib/d2c/live/d2c_live_screens.dart` · `infra/lambda/d2c-claim/handler.py`
 
 ## 1. Problem
