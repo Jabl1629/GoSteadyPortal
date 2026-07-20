@@ -18,7 +18,7 @@ import '../widgets/d2c_bottom_nav.dart';
 /// Accessibility (C1-D6 / §5.7.1): chat body is 16px `textDark` on white,
 /// not the 15px app body and not `textSoft`; every tap target clears 44px.
 /// Persona is openly AI — a per-message "AI" glyph + the persistent
-/// disclosure footer name Steady as an AI walking coach on every screen.
+/// disclosure footer name Steady as an AI activity coach on every screen.
 
 // ════════════════════════════════════════════════════════════════════
 // (a) Main Coach screen — empty daily-note card + chat thread + composer
@@ -187,7 +187,7 @@ class _D2CCoachScreenState extends State<D2CCoachScreen> {
                     ),
               ),
               const Text(
-                'Your AI walking coach',
+                'Your AI activity coach',
                 style: TextStyle(
                   color: AppTheme.textSoft,
                   fontSize: 12,
@@ -653,7 +653,7 @@ class _DisclosureFooter extends StatelessWidget {
         border: Border(top: BorderSide(color: AppTheme.border.withOpacity(0.6))),
       ),
       child: const Text(
-        'Steady is your AI walking coach — not a medical professional. '
+        'Steady is your AI activity coach — not a medical professional. '
         'In an emergency, call 911.',
         textAlign: TextAlign.center,
         style: TextStyle(

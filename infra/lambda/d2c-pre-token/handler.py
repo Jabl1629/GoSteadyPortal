@@ -37,12 +37,27 @@ _table = _ddb.Table(os.environ["ROLE_ASSIGNMENTS_TABLE"])
 VALID_ROLES = {"household_owner", "family_viewer"}
 
 
+def resolve_is_walker_user(row: dict[str, Any] | None, role: str) -> str:
+    """Resolve the `custom:isWalkerUser` claim value ("true"/"false").
+
+    An ABSENT `isWalkerUser` on the row (legacy pre-C56 owner rows minted before
+    the flag was written) is derived from role — a solo `household_owner` IS the
+    walker — so the walker signal stays reliable across dev+prod without a bulk
+    RoleAssignments backfill. An EXPLICIT False (a caregiver-owner) is preserved.
+    No row (pre-claim bootstrap) → caller passes role="household_owner" → "true",
+    matching the bootstrap default.
+    """
+    raw = (row or {}).get("isWalkerUser")
+    if raw is None:
+        return "true" if role == "household_owner" else "false"
+    return "true" if raw else "false"
+
+
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG001
     sub = (event.get("request", {}).get("userAttributes", {}) or {}).get("sub", "")
 
     client_id = f"dtc_{sub}"
     role = "household_owner"
-    is_walker_user = "true"
 
     # Prefer an existing RoleAssignments row when present (post-claim, or an
     # invited Member). Falls back to the bootstrap default otherwise.
@@ -56,7 +71,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
         r = row.get("role")
         if r in VALID_ROLES:
             role = r
-        is_walker_user = "true" if row.get("isWalkerUser") else "false"
+
+    # Derived after role resolution so a legacy owner row with no isWalkerUser
+    # attribute still emits "true"; no row → the bootstrap owner default.
+    is_walker_user = resolve_is_walker_user(row, role)
 
     claims = {
         "custom:clientId": client_id,

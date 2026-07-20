@@ -18,10 +18,14 @@ import '../widgets/d2c_bottom_nav.dart';
 /// - **Whoop/Strava-style contextualization.** Today's numbers always
 ///   land relative to a baseline ("strongest day this week", "3 days
 ///   above your pace"). Numbers without context are noise.
-/// - **Role-conditional surfaces.** Walker user sees activity only —
-///   device alerts + care note + device card are operational concerns
-///   for the Admin, hidden from the walker user. Bottom nav swaps
-///   "Care Team" for "History" in walker user mode.
+/// - **Role-conditional surfaces.** The walker/device user sees their own
+///   activity and device-health status, but NOT the behavioral
+///   activity-judgment alerts about themselves (no-activity / below-typical /
+///   declining-trend) — those read as clinical to the person being monitored
+///   and are the caregiver's concern, so they're filtered server-side for a
+///   walker token (patient-api `hide_walker_alerts`) with a mirror on the
+///   alert list here. Device-health alerts (offline / battery) stay visible so
+///   the walker can act on their own device.
 class D2CDashboardScreen extends StatelessWidget {
   const D2CDashboardScreen({
     super.key,
@@ -287,7 +291,7 @@ class _CoachNudge extends StatelessWidget {
                       ),
                       SizedBox(height: 2),
                       Text(
-                        'Your AI walking coach has a hello for you',
+                        'Your AI activity coach has a hello for you',
                         style: TextStyle(
                           color: AppTheme.textSoft,
                           fontSize: 12.5,
@@ -1335,36 +1339,47 @@ class _DeviceCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          // Wrap (not Row + Spacer): on a ~390px phone the three status
+          // fragments + timestamp overflow a single line — the Spacer collapses
+          // to zero (running "signal" into "Last") and the timestamp clips off
+          // the right edge. Wrap flows the timestamp onto a second line instead.
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            runSpacing: 4,
             children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: dotColor,
-                  shape: BoxShape.circle,
-                ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: dotColor,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    device.connected ? 'Device connected' : 'Device offline',
+                    style: const TextStyle(
+                      color: AppTheme.textDark,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '·  ${device.signalLabel} signal',
+                    style: const TextStyle(
+                      color: AppTheme.textSoft,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
               Text(
-                device.connected ? 'Device connected' : 'Device offline',
-                style: const TextStyle(
-                  color: AppTheme.textDark,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '·  ${device.signalLabel} signal',
-                style: const TextStyle(
-                  color: AppTheme.textSoft,
-                  fontSize: 13,
-                ),
-              ),
-              const Spacer(),
-              Text(
-                'Last checked in ${device.lastSeenMinAgo} min ago',
+                'Last checked ${device.lastSeenMinAgo} min ago',
                 style: const TextStyle(
                   color: AppTheme.textSoft,
                   fontSize: 12,

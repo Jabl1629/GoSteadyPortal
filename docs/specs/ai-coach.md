@@ -1,6 +1,6 @@
 # AI Coach ("Steady") — D2C Fitness-Coach Assistant (proposal / umbrella spec)
 
-> **Status:** 🟡 Scoping resolved (Q1–Q12, 2026-07-18); **C1–C3 built + deployed to dev — 2026-07-19.** Generation runs on **Claude Haiku 4.5** (Bedrock); the C1 live D2C app (Coach tab) is served at `dev.app.gosteady.co`; the C2 proactive sweep is deployed **dormant** behind `COACH_DAILY_ENABLED` (no autonomous sends). Per-phase build specs + current state: §7 and each spec's changelog. C4 (voice) remains post-trial.
+> **Status:** 🟢 **Launched to prod (`app.gosteady.co`) + dev — 2026-07-20** (`coachEnabled: true`). Scoping resolved (Q1–Q12, 2026-07-18); C1–C3 built 2026-07-19. The persona is an **"activity coach"** (renamed from "walking coach" 2026-07-20), oriented around **eliciting + encouraging gentle activity goals** (system prompt §6, `PROMPT_VERSION c1-2026-07-20`). Generation runs on **Claude Haiku 4.5** (Bedrock); the C2 proactive sweep stays **dormant** behind `COACH_DAILY_ENABLED` (no autonomous sends). **Counsel review of the crisis + agreement copy (Q11) is still open — launched on operator decision ahead of it.** C4 (voice) remains post-trial.
 > **Scope:** A personal AI fitness-coach experience for the **D2C walker user** in the browser portal (`app.gosteady.co`): text chat grounded in the user's own activity data, persistent memory, proactive Whoop-style morning messages driven by activity trends, elderly-appropriate guardrails, and a forward path to a voice interface (ElevenLabs-class).
 > **Depends on (deployed):** 0A/0B data + auth, 1A/1B ingestion + processing, 1C-slim behavioral detector, 1.7 audit, 2A-RD reads, D2C auth pool + claim + live portal, care-circle 5a/5d.
 > **Interacts with (planned):** [d2c.md](d2c.md) Phase 2 (Twilio SMS alert pipeline + notification prefs) — the coach's SMS teaser rides that pipeline.
@@ -319,7 +319,7 @@ Build the OpenAI-compatible SSE shim; pick the modality (browser widget vs phone
 
 | # | Question | Lean |
 |---|---|---|
-| Q1 | **Persona & name** — name, personality brief, default tone; user-selectable tone (Oura) — now in-trial since C3 is trial scope | ✅ **Decided (2026-07-18):** **"Steady"** — named (carries the daily-relationship loop), gender-neutral (dodges the companion/parasocial trap), openly "your AI walking coach" in every disclosure. Warm-plain celebratory voice ending on an open question. Warm-vs-direct tone toggle lands in C3 |
+| Q1 | **Persona & name** — name, personality brief, default tone; user-selectable tone (Oura) — now in-trial since C3 is trial scope | ✅ **Decided (2026-07-18):** **"Steady"** — named (carries the daily-relationship loop), gender-neutral (dodges the companion/parasocial trap), openly "your AI activity coach" in every disclosure. Warm-plain celebratory voice ending on an open question. Warm-vs-direct tone toggle lands in C3 |
 | Q2 | **Cohort & consent** — ✅ **Decided (2026-07-18):** coach disclosures go into the **general user agreement shown at device setup** (first-run), coach disclaimers called out and acknowledged (Appendix A). **Q2a: on by default** — acknowledged-and-on ("Got it," coach on, off-switch in settings; not a gating checkbox) for the **in-app** coach; the **SMS teaser** rides its own notification-prefs / SMS-consent opt-in (promotional-ish SMS, disclosed + toggleable per Q7). Cohort: all trial account-holders. **Q2b (family-Admin household, Member ≠ walker user) deferred.** | Resolved (Q2a); Q2b follow-up |
 | Q3 | **Scope breadth** — strictly fitness/walking, or allow open small talk (companionship-adjacent)? | ✅ **Decided (2026-07-18):** companionship / small talk **permitted** — we're already unambiguous that Steady isn't a person, and the elderly-loneliness evidence (ElliQ) supports it. Boundaries retained: never claims humanity; **not** therapy or mood/emotion analysis (keeps IL WOPR / UT mental-health-chatbot laws out of scope, §3); dependency hygiene — routes affection to the care circle, no engagement dark patterns. Fitness-first in framing, conversational latitude allowed |
 | Q4 | **Escalation protocol** — two separate things, don't conflate: **(1)** the coach's own **scripted crisis response**; **(2)** **notifying a third party** | ✅ **Decided (2026-07-18):** **(1) keep** — a calm scripted reply + 988 when triage flags self-harm (911 for stated emergency). It's how the bot *responds* in a rare moment, not surveillance; adults get crisis resources too; it's the SB 243 / NY published-protocol floor and the Character.AI lesson. **(2) notify nobody automatically** during the trial — respects adult autonomy; flagged turns surface in the daily transcript review (Jace) for human judgment. Care-circle-Admin notification is **post-trial + opt-in with explicit up-front consent**, never a default. Abuse/neglect flags: same posture (resource + daily-review, no auto-report). |
@@ -355,7 +355,7 @@ Build the OpenAI-compatible SSE shim; pick the modality (browser widget vs phone
 >
 > **Superseded/expanded 2026-07-18:** the full whole-product plain-language agreement (device + data + coach + texts, for the side-by-side demo read-through) and the coach clauses for the **already-published** Terms/Privacy pages now live in **[d2c-user-agreement.md](d2c-user-agreement.md)**. That doc is the source of truth; the block below is the coach excerpt. Note: `web/terms.html`, `web/privacy.html`, `web/sms-consent.html` already exist (effective 2026-06-01) and predate the coach — d2c-user-agreement.md Part 2 covers the edits to bring them current.
 
-**Screen title:** Meet Steady, your walking coach
+**Screen title:** Meet Steady, your activity coach
 
 Steady is an automated coaching feature built into your GoSteady app. Before you start, a few things to know:
 
@@ -369,7 +369,7 @@ Steady is an automated coaching feature built into your GoSteady app. Before you
 
 *(Alternative gating form, if we choose opt-in:)* ☐ I understand what Steady is and I'd like to use it.
 
-**Persistent in-app footer (every coach screen):** *Steady is your AI walking coach — not a medical professional. In an emergency, call 911.*
+**Persistent in-app footer (every coach screen):** *Steady is your AI activity coach — not a medical professional. In an emergency, call 911.*
 
 ---
 

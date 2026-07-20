@@ -26,6 +26,14 @@ class GoSteadyUser {
   /// `facility_admin+` and all `internal_*` roles.
   final bool mfaEnrolled;
 
+  /// `custom:isWalkerUser` claim (D2C pool only). True when THIS account is
+  /// the walker/device user themselves — a solo `household_owner`, or a Care
+  /// Circle member linked as the walker — vs a caregiver watching someone
+  /// else. Drives walker-facing copy and the walker-only alert suppression
+  /// (activity-judgment alerts are hidden from the walker's own view).
+  /// Absent for facility / internal tokens and the mock/demo session → false.
+  final bool isWalkerUser;
+
   const GoSteadyUser({
     required this.userId,
     required this.email,
@@ -35,6 +43,7 @@ class GoSteadyUser {
     this.facilities = const [],
     this.censuses = const [],
     this.mfaEnrolled = false,
+    this.isWalkerUser = false,
   });
 
   /// Back-compat alias used by legacy screens (e.g. dashboard_screen.dart).

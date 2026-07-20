@@ -336,7 +336,8 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     // Phase 2A-UM-P (2026-05-24) — same in dev + prod.
     patientMgmtMemoryMb: 256,
     patientMgmtTimeoutSeconds: 15,
-    // AI Coach C1 (2026-07-18) — default OFF in prod until launch.
-    coachEnabled: false,
+    // AI Coach C1 (2026-07-18). Launched to prod 2026-07-20 (operator decision;
+    // counsel review of crisis + agreement copy still tracked in ai-coach.md Q11).
+    coachEnabled: true,
   },
 };

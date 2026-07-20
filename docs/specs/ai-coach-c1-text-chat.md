@@ -1,6 +1,6 @@
 # AI Coach — Phase C1: Text-Chat MVP (build spec)
 
-> **Status:** 🔲 Ready to build — spec drafted 2026-07-18. First buildable subphase under [ai-coach.md](ai-coach.md) (umbrella). Scoping (Q1–Q12) resolved 2026-07-18; this spec turns C1 into concrete tables, one Lambda, one guardrail module, one Flutter tab.
+> **Status:** 🟢 Built + **launched to prod + dev 2026-07-20** (`coachEnabled: true`). Spec drafted 2026-07-18; scoping (Q1–Q12) resolved 2026-07-18. The persona was renamed to **"activity coach"** and the §6 system prompt reoriented around **eliciting/encouraging activity goals** (`PROMPT_VERSION c1-2026-07-20`, 2026-07-20). Counsel review (Q11) of the crisis copy is still open.
 > **Delivers:** grounded text chat with "Steady" for the D2C walker user in the browser portal — triage → deterministic context (their own activity) → Claude on Bedrock → guardrail lint → persisted, audited turn — plus memory v1 (transcript + user-editable profile facts) and the Coach tab. Feature-flagged to allow-listed trial users.
 > **Safety policy is folded into this spec (§6)** — persona/system prompt, out-of-lane table, scripted crisis responses (988/911), output lint, disclosure cadence, red-team set. C2/C3 reference §6 rather than re-specifying it.
 > **Depends on (deployed):** 0A/0B auth+data, 1A/1B ingestion+processing, 1C-slim (`behavioral-detector` — we reuse its `history_window.py`), 1.7 audit (`_shared/observability.emit_audit`), D2C auth pool + `d2cAuthorizer`, care-circle (`infra/lambda/care-circle/` is the handler template).
@@ -15,7 +15,7 @@
 - **Branch:** `feature/infra-scaffold` (or a `feature/coach-c1` cut)
 - **Umbrella:** [ai-coach.md](ai-coach.md) — decisions D1–D9, Q1–Q12 resolved 2026-07-18
 
-**What C1 delivers.** A walker user (D2C account holder) opens the new **Coach** tab and chats with **Steady**, an openly-AI walking coach. Each message is triaged for safety, answered by Claude Opus 4.8 on Amazon Bedrock using a **deterministically-assembled context** (a system prompt + the user's own activity digest + memory + recent turns — the model never computes statistics), linted before it is shown, then persisted and audited. High-risk inputs (self-harm, stated emergency, medical) get **scripted, non-generative** responses. The user can see and edit "what Steady knows about you." A per-user + global kill switch disables the coach without redeploy.
+**What C1 delivers.** A walker user (D2C account holder) opens the new **Coach** tab and chats with **Steady**, an openly-AI activity coach. Each message is triaged for safety, answered by Claude Opus 4.8 on Amazon Bedrock using a **deterministically-assembled context** (a system prompt + the user's own activity digest + memory + recent turns — the model never computes statistics), linted before it is shown, then persisted and audited. High-risk inputs (self-harm, stated emergency, medical) get **scripted, non-generative** responses. The user can see and edit "what Steady knows about you." A per-user + global kill switch disables the coach without redeploy.
 
 **Exit test (from umbrella §7 C1).** A real walker user with a live device chats about their real activity ("how did I do this week?") and gets grounded, correct, warm answers; the §8 red-team script set produces **zero** unsafe responses; every turn appears in the audit trail; the kill switch is verified to stop chat instantly for one user and globally.
 
@@ -38,7 +38,7 @@
 | L7 | Coach conversations + memory are **private to the walker user** — care-circle members never see contents (only that the coach is active) | umbrella Q6 |
 | L8 | Every turn **audited** via the 1.7 pipeline; **PII-free Lambda logs** (T17) — no prompt/response bodies in CloudWatch | umbrella R11; `_shared/observability.py` |
 | L9 | `CoachMessages` transcript **CMK-encrypted, 12-mo TTL**; `CoachMemory` **CMK-encrypted, no TTL** (user-controlled); both crypto-shredded on account close | umbrella Q8 |
-| L10 | Persona = **"Steady"**, gender-neutral, openly "your AI walking coach"; warm-plain celebratory voice; the warm-vs-direct tone toggle is **C3**, not C1 | umbrella Q1 |
+| L10 | Persona = **"Steady"**, gender-neutral, openly "your AI activity coach"; warm-plain celebratory voice; the warm-vs-direct tone toggle is **C3**, not C1 | umbrella Q1 |
 | L11 | Claim discipline (FDA general-wellness): "supports strength, balance, staying active" ✅; disease/diagnosis/treatment language ❌ — enforced in the system prompt **and** the output lint | umbrella R8/D7 |
 | L12 | Client is the hard tenancy boundary; D2C `clientId == householdId`; identity/role/patient resolution is **DDB-authoritative**, not JWT-claim-derived | ARCHITECTURE §4; care-circle `handler.py` |
 
@@ -218,7 +218,7 @@ Mock-first (L1). Grounded in the audited D2C pattern.
 8. `lib/api/d2c_api_models.dart` — coach DTOs with `fromJson` (+ any status enum via the `wireValue`/`fromWire` idiom).
 
 **Create:**
-9. `lib/d2c/screens/d2c_coach_screen.dart` — presentational: **today's note card** (empty in C1 — populated by C2) + **chat thread** (bubbles, typing indicator for the non-streamed wait, per-message "AI" glyph + feedback flag) + overflow → "What Steady knows about you" (list of facts, edit/delete). Persistent footer: *"Steady is your AI walking coach — not a medical professional. In an emergency, call 911."*
+9. `lib/d2c/screens/d2c_coach_screen.dart` — presentational: **today's note card** (empty in C1 — populated by C2) + **chat thread** (bubbles, typing indicator for the non-streamed wait, per-message "AI" glyph + feedback flag) + overflow → "What Steady knows about you" (list of facts, edit/delete). Persistent footer: *"Steady is your AI activity coach — not a medical professional. In an emergency, call 911."*
 10. Add `D2CCoachHost` (+ memory host) to `lib/d2c/live/d2c_live_screens.dart` so it reuses the private `_HostScaffold`/`_RetryView`/`_Message`/`_PrimaryButton`/`_errText`/`_snack` (FutureBuilder pattern for thread; `D2CCareTeamScreen` manual-state + `_toast` pattern for memory edits).
 11. Coach display models (`CoachMessage`, `CoachMemoryFact`) + `D2CMockData.coachThread()/coachMemory()` seeds in `lib/d2c/data/d2c_mock_data.dart`. **Name display models distinctly from DTOs** to avoid the `CareNote`-style dual-definition collision (Flutter audit).
 
@@ -279,7 +279,7 @@ Local-literal names (care-circle D13 convention), `actor = _actor(claims)`, `sub
 
 ### 6.0 Persona brief — "Steady" (feeds `prompts.py` system prompt)
 
-- **Identity:** Steady, gender-neutral, **openly an AI walking coach** — never a person, doctor, nurse, or friend-pretending-to-be-human. Names itself "your AI walking coach" in disclosures.
+- **Identity:** Steady, gender-neutral, **openly an AI activity coach** — never a person, doctor, nurse, or friend-pretending-to-be-human. Names itself "your AI activity coach" in disclosures.
 - **Voice:** warm, plain, celebratory; ~6th-grade reading level; 2–4 short sentences; often ends on an open question ("what's been getting you out and about?"). No clinical tone, no verdicts, no guilt.
 - **Lane:** walking activity, encouragement, goal talk, light companionable small talk (permitted per Q3) — **not** therapy, mood/emotion analysis, or medical advice.
 - **Tone toggle (warm vs direct):** **C3**, not C1. C1 ships the single warm-plain voice.
@@ -290,7 +290,7 @@ The static, prompt-cached system block enumerates the lane and the out-of-lane r
 
 | Out-of-lane topic | Response |
 |---|---|
-| Medical (symptoms, meds, diagnoses, "is this normal?") | Scripted: "That's a good one for your doctor or nurse — I'm just your walking coach, so I can't help with anything medical. How are your walks feeling this week?" |
+| Medical (symptoms, meds, diagnoses, "is this normal?") | Scripted: "That's a good one for your doctor or nurse — I'm just your activity coach, so I can't help with anything medical. How are your walks feeling this week?" |
 | Emergency ("I've fallen", "I can't breathe", "I'm hurt") | **Scripted (non-generative), §6.3.** 911 + family; coach is explicitly not an emergency channel. |
 | Self-harm / "burden" idioms ("I'm so tired of being a burden", "I don't want to be here") | **Scripted (non-generative), §6.3.** Calm + 988. |
 | Abuse / neglect disclosure | **Scripted (non-generative), §6.3.** Resource + (trial) surfaces in daily review; no auto-report (umbrella Q4). |
@@ -312,7 +312,7 @@ Every user message is classified **before** any Opus call, via `coach_llm.triage
 
 Non-generative, fixed strings (NEDA-Tessa lesson: never let the model improvise here). Draft copy (counsel-reviewed before real users, Q11):
 
-- **Self-harm:** "I'm really glad you told me, and I want to make sure you get the right support — I'm just a walking coach and not able to help with this the way you deserve. Please reach out to people who can: call or text **988** (the Suicide & Crisis Lifeline) any time, day or night. If you're in immediate danger, call **911**. Would you like to tell someone in your care circle too?"
+- **Self-harm:** "I'm really glad you told me, and I want to make sure you get the right support — I'm just a activity coach and not able to help with this the way you deserve. Please reach out to people who can: call or text **988** (the Suicide & Crisis Lifeline) any time, day or night. If you're in immediate danger, call **911**. Would you like to tell someone in your care circle too?"
 - **Stated emergency:** "It sounds like this could be an emergency. I'm not able to get help for you — please call **911** now, or a family member right away. I'll be here when you're safe."
 - **Abuse/neglect:** a calm acknowledgment + resource line (e.g. Eldercare Locator **1-800-677-1116**), no auto-report; flagged for daily review.
 

@@ -20,6 +20,39 @@ from typing import Any
 from boto3.dynamodb.conditions import Attr, Key
 
 
+# Behavioral activity-judgment alert types hidden from the WALKER user's own
+# view — they read as clinical / discouraging to the person being monitored and
+# are the caregiver's operational concern (dashboard intent, d2c_dashboard_
+# screen.dart §doc). These are exactly the behavioral-detector `cloud-behavioral`
+# source types (behavioral-detector/rules/types.py). Device-health alerts
+# (device_offline / device_silent / battery / signal) are deliberately absent so
+# the walker can still act on their own device.
+WALKER_HIDDEN_ALERT_TYPES = frozenset(
+    {"no_activity_today", "below_typical_activity", "declining_trend"}
+)
+
+
+def hide_walker_alerts(
+    items: list[dict[str, Any]], claims: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Read-side walker-only suppression of behavioral activity-judgment alerts.
+
+    When the caller IS the walker/device user (the D2C-only `isWalkerUser` claim,
+    normalized to a bool by `_shared.api_authz.extract_claims`), drop
+    `WALKER_HIDDEN_ALERT_TYPES` from what they see about themselves. Everyone
+    else — non-walker Care Circle caregivers, facility / internal readers (no
+    claim) — is unaffected, so the same rows still reach the people who act on
+    them. Device-health alerts always pass through. Per-caller by design: never a
+    detector-side skip (the rows must still be written so caregivers see them).
+
+    `claims` is the normalized dict from `extract_claims`, NOT the raw JWT
+    claims — so the key is `isWalkerUser` (bool), not `custom:isWalkerUser`.
+    """
+    if not claims.get("isWalkerUser"):
+        return items
+    return [r for r in items if r.get("alertType") not in WALKER_HIDDEN_ALERT_TYPES]
+
+
 def get_patient(patients_table: Any, patient_id: str) -> dict[str, Any] | None:
     """Single Patients GetItem. Returns None if not found."""
     res = patients_table.get_item(Key={"patientId": patient_id})

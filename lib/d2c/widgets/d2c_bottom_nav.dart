@@ -45,7 +45,7 @@ class D2CBottomNav extends StatelessWidget {
               onTap: () => context.go(D2CRoutes.careTeam),
             ),
             _NavItem(
-              icon: Icons.forum_outlined,
+              icon: Icons.chat_bubble_outline_rounded,
               label: 'Coach',
               active: active == D2CTab.coach,
               onTap: () => context.go(D2CRoutes.coach),

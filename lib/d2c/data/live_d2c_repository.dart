@@ -15,6 +15,18 @@ import '../rendering/metric_registry.dart';
 import 'd2c_mock_data.dart';
 import 'd2c_repository.dart';
 
+/// Behavioral activity-judgment alert types hidden from the WALKER user's own
+/// dashboard (kept in sync with the backend read filter in
+/// `patient-api/handler.py :: _WALKER_HIDDEN_ALERT_TYPES`). The backend already
+/// strips these for a walker token; this is defense-in-depth so the walker's
+/// app hides them even against an older backend. Device-health alerts
+/// (offline / silent / battery / signal) are intentionally NOT in this set.
+const _walkerHiddenActivityAlertTypes = <String>{
+  'no_activity_today',
+  'below_typical_activity',
+  'declining_trend',
+};
+
 /// Live D2C repository: maps the deployed claim + 2A-RD read endpoints
 /// into the wireframe screen models. The 2A-RD API returns raw walking
 /// *sessions*; the rich dashboard contextualisation (today's totals,
@@ -29,9 +41,12 @@ import 'd2c_repository.dart';
 ///     battery from a low-battery alert if one is open, else shows full;
 ///     a dedicated device-health read (FAC-R Q5) would close this.
 ///   • 90-day history is unavailable — the activity range maxes at 30d.
-///   • `isWalkerUser` on the viewer is hard-true for the Phase-1 solo
-///     walker-user-as-admin household; Phase 5 (caregivers) must read the
-///     `custom:isWalkerUser` claim to distinguish caregiver viewers.
+///   • `isWalkerUser` on the viewer is read from the `custom:isWalkerUser`
+///     JWT claim (falling back to the role proxy — owner ⇒ walker — only when
+///     the claim is absent, e.g. the mock/demo session). It drives the
+///     viewer framing copy AND the walker-only alert suppression below
+///     (activity-judgment alerts are hidden from the walker's own view;
+///     device-health alerts stay).
 class LiveD2CRepository implements D2CRepository {
   LiveD2CRepository({required ApiClient api, required AuthServiceInterface auth})
       : _api = api,
@@ -202,17 +217,26 @@ class LiveD2CRepository implements D2CRepository {
     ];
 
     // ── Open alerts ──
+    // Walker-only suppression (mirrors the backend read filter keyed on
+    // custom:isWalkerUser): the walker/device user does not see the behavioral
+    // activity-judgment alerts about themselves. Device-health alerts pass
+    // through. Reused below for the viewer framing copy.
+    final viewerIsWalker = _auth.currentUser?.isWalkerUser ?? false;
     final openAlerts = [
       for (final a in openAlertRows)
-        WalkerAlert(
-          id: a.sk,
-          icon: _alertIcon(a.alertType),
-          title: _alertTitle(a.alertType),
-          detail: _alertDetail(a),
-          severity: _alertSeverity(a.severity),
-          openedMinAgo:
-              now.difference(a.eventTimestamp.toLocal()).inMinutes.clamp(0, 1 << 30),
-        ),
+        if (!(viewerIsWalker &&
+            _walkerHiddenActivityAlertTypes.contains(a.alertType)))
+          WalkerAlert(
+            id: a.sk,
+            icon: _alertIcon(a.alertType),
+            title: _alertTitle(a.alertType),
+            detail: _alertDetail(a),
+            severity: _alertSeverity(a.severity),
+            openedMinAgo: now
+                .difference(a.eventTimestamp.toLocal())
+                .inMinutes
+                .clamp(0, 1 << 30),
+          ),
     ];
 
     // ── Care note ──
@@ -259,10 +283,10 @@ class LiveD2CRepository implements D2CRepository {
     // ── Viewer + walker ──
     // A family_viewer is a Care Circle member looking at someone ELSE's
     // walker (d2c-care-circle.md) — drives the "Susan's activity" (vs
-    // "your activity") copy. household_owner keeps the Phase-1 solo
-    // walker-user-as-admin default. (A caregiver-owner is still framed as
-    // the walker — pre-existing limitation until custom:isWalkerUser is
-    // threaded through UserClaims.)
+    // "your activity") copy. `viewerIsWalker` (computed above from the real
+    // custom:isWalkerUser claim) now distinguishes the walker-user from a
+    // caregiver-owner directly, rather than assuming every household_owner is
+    // the walker.
     final u = _auth.currentUser;
     final viewerIsMember = u?.role == UserRole.familyViewer;
     final viewer = CareCircleMember(
@@ -271,7 +295,7 @@ class LiveD2CRepository implements D2CRepository {
       relationship: viewerIsMember ? 'Member' : 'Self',
       email: u?.email ?? '',
       isAdmin: u?.role == UserRole.householdOwner,
-      isWalkerUser: !viewerIsMember,
+      isWalkerUser: viewerIsWalker,
       isViewer: true,
     );
     final walker = Walker(

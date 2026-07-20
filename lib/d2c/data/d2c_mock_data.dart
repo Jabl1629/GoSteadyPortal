@@ -346,7 +346,7 @@ class AuditEntry {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Coach ("Steady") display models — the 4th-tab AI walking coach
+// Coach ("Steady") display models — the 4th-tab AI activity coach
 // (ai-coach-c1-text-chat.md §5.7). Display-model names are deliberately
 // DISTINCT from the wire DTOs in d2c_api_models.dart (Coach*Dto) so the
 // live repo can import both without the CareNote-style `hide` collision.
@@ -649,7 +649,7 @@ class D2CMockData {
         CoachMessage(
           id: 'coach_seed_1',
           role: CoachRole.coach,
-          text: "Hi, I'm Steady, your AI walking coach. I'm here to cheer you "
+          text: "Hi, I'm Steady, your AI activity coach. I'm here to cheer you "
               'on and chat about staying active. How have your walks been '
               'feeling lately?',
           createdAt: DateTime.now().subtract(const Duration(minutes: 3)),

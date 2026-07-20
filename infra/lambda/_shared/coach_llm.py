@@ -127,7 +127,7 @@ def _extract_text(resp: dict[str, Any]) -> str:
 
 
 _TRIAGE_SYSTEM = (
-    "You are a safety classifier for messages sent to an AI walking coach used by "
+    "You are a safety classifier for messages sent to an AI activity coach used by "
     "older adults. Read the user's message and reply with EXACTLY ONE lowercase label "
     "and nothing else:\n"
     "- self-harm: any hint of suicide, self-harm, not wanting to live, or being a burden\n"

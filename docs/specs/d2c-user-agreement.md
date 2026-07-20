@@ -1,6 +1,6 @@
 # D2C User Agreement — plain-language draft + coach clauses
 
-> **Status:** 🔵 Draft for review — 2026-07-18. **Needs a counsel skim before real users** (Q11 in [ai-coach.md](ai-coach.md)). Entity/contact/governing-law match the published pages: GoSteady LLC, 3049 Lawrence Street, Denver, CO 80205, jace@gosteady.co, Colorado law.
+> **Status:** 🟡 Copy is DRAFT — **still needs a counsel skim** (Q11 in [ai-coach.md](ai-coach.md)) — but the `D2CAgreementPanel` clickwrap is **deployed to prod + dev** (setup/signup + every device claim/rotation) as of 2026-07-20. Entity/contact/governing-law match the published pages: GoSteady LLC, 3049 Lawrence Street, Denver, CO 80205, jace@gosteady.co, Colorado law.
 > **What this is:** two things, not a replacement for the published legal pages.
 > 1. **Part 1 — the plain-language agreement** shown at device setup and read aloud with the user during the demo (Q2 direction). Human words; ~6th-grade reading level; large-type friendly. It *summarizes and links to* the full legal pages — it does not replace them.
 > 2. **Part 2 — coach clauses** to fold into the existing [terms.html](../../web/terms.html) and [privacy.html](../../web/privacy.html), which predate the AI coach and don't yet cover it.
@@ -27,7 +27,7 @@ The device only senses *movement*. It has **no microphone, no camera, and no GPS
 **It's not a doctor, and it's not for emergencies**
 GoSteady is a wellness and activity product. It is **not a medical device**, it can't diagnose or treat anything, and it does **not** detect falls or emergencies. **If you ever feel unwell, hurt, or unsafe, call 911 or a family member right away** — don't wait on the app.
 
-**Meet Steady, your walking coach**
+**Meet Steady, your activity coach**
 GoSteady includes **Steady**, an automated coaching feature.
 - **Steady is an AI** — a computer program, not a person, and not a doctor or nurse.
 - It's here to cheer you on and talk about your walking — **encouragement, not medical advice**.
@@ -65,7 +65,7 @@ You're one of our first users — thank you. Features may change and improve as 
 
 *(Alternative gating form, if we choose explicit opt-in instead:)*
 > ☐ I've read and agree to the Terms of Service and Privacy Policy.
-> ☐ I'd like to use Steady, my walking coach. *(optional — you can turn it on later)*
+> ☐ I'd like to use Steady, my activity coach. *(optional — you can turn it on later)*
 
 ---
 
@@ -115,5 +115,6 @@ The published [terms.html](../../web/terms.html) and [privacy.html](../../web/pr
 - **Rendering:** Part 1 becomes a Flutter setup screen (the D2C onboarding flow) and, optionally, a plain `web/welcome.html` companion page; Part 2 edits go into the existing `web/*.html` after sign-off.
 
 ## Changelog
+- **2026-07-20** — **Agreement now shows on every device claim/rotation, not just first-time signup** (prod + dev). Previously the `D2CAgreementPanel` clickwrap rendered only on the "Create your account" screen, so an already-signed-in owner **rotating/claiming** a device skipped it (they took the "Claim this device" direct path). Now the panel renders above that claim button too — the claim button is the clickwrap — personalized to the device noun (walker/rollator). NOT shown on a plain sign-in (device changes are rare; a fresh acknowledgment per claim is cheap). `claim()` records the acknowledged `agreementVersion` server-side regardless (`d2c-claim/handler.py`). Also: the coach it references is now the **"activity coach"** (persona rename).
 - **2026-07-18** — Genericized on form factor: "walker cap" → "GoSteady device," neutral attach verb, dropped walker-only "steps" from the metric examples (rollators report distance/active-time/pace); added a per-`deviceType` render note and a Part 2 item (2c) to genericize the same "smart walker cap" language in the published Terms/Privacy — the trial is rollator-focused.
 - **2026-07-18** — Initial draft. Plain-language whole-product agreement for the setup/demo read-through + coach clauses for the existing Terms/Privacy. Authored after confirming the three published legal pages already exist (effective 2026-06-01) and identifying the coach coverage gap.

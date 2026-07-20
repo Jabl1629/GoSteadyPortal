@@ -82,6 +82,32 @@ class TestExtractClaimsIat(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# extract_claims isWalkerUser normalization (D2C walker-alert suppression)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestExtractClaimsIsWalkerUser(unittest.TestCase):
+    """`custom:isWalkerUser` (D2C pre-token) normalizes to a real bool, which
+    patient-api's `hide_walker_alerts` keys on. Facility/internal tokens carry
+    no such claim → False (they must never have activity alerts filtered)."""
+
+    def _event(self, jwt_claims: dict) -> dict:
+        return {"requestContext": {"authorizer": {"jwt": {"claims": jwt_claims}}}}
+
+    def test_true_string_becomes_true(self):
+        claims = extract_claims(self._event({"sub": "u1", "custom:isWalkerUser": "true"}))
+        self.assertIs(claims["isWalkerUser"], True)
+
+    def test_false_string_becomes_false(self):
+        claims = extract_claims(self._event({"sub": "u1", "custom:isWalkerUser": "false"}))
+        self.assertIs(claims["isWalkerUser"], False)
+
+    def test_absent_defaults_false(self):
+        claims = extract_claims(self._event({"sub": "u1"}))
+        self.assertIs(claims["isWalkerUser"], False)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # enforce_internal_session_age
 # ──────────────────────────────────────────────────────────────────────
 

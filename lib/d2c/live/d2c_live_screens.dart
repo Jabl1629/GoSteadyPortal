@@ -266,13 +266,28 @@ class _D2CSetupLandingScreenState extends State<D2CSetupLandingScreen> {
                     const SizedBox(height: 20),
                     if (widget.signedIn)
                       // Already signed in → claim directly (their verified
-                      // phone is enforced against the binding server-side).
-                      _PrimaryButton(
-                        label: reserved
-                            ? 'Yes — set up this $noun'
-                            : 'Claim this $noun',
-                        busy: _claiming,
-                        onPressed: _claimNow,
+                      // phone is enforced against the binding server-side). The
+                      // user-agreement is re-shown on every claim/rotation (NOT
+                      // on a plain sign-in) — device changes are rare, so a
+                      // fresh acknowledgment each time is cheap and honest. The
+                      // claim button is the clickwrap; claim() records the
+                      // acknowledged version server-side (d2c-user-agreement.md).
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          D2CAgreementPanel(
+                            audience: AgreementAudience.walker,
+                            deviceNoun: noun,
+                          ),
+                          const SizedBox(height: 16),
+                          _PrimaryButton(
+                            label: reserved
+                                ? 'Yes — set up this $noun'
+                                : 'Claim this $noun',
+                            busy: _claiming,
+                            onPressed: _claimNow,
+                          ),
+                        ],
                       )
                     else if (reserved)
                       // Reserved + new user: collect the phone HERE so the

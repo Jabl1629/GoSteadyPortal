@@ -61,6 +61,7 @@ from queries import (
     get_active_assignment,
     get_device,
     get_patient,
+    hide_walker_alerts,
     query_activity_window,
     query_alerts,
     query_patients_by_census,
@@ -359,7 +360,8 @@ def _action_get_alerts(
         limit=page_size,
         exclusive_start_key=start_key,
     )
-    alerts = [_alert_view(r) for r in res["items"]]
+    # Walker-only suppression (firm default, no opt-out) — see hide_walker_alerts.
+    alerts = [_alert_view(r) for r in hide_walker_alerts(res["items"], claims)]
 
     body = {
         "alerts": alerts,

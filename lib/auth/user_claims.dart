@@ -11,6 +11,7 @@ import '../models/user.dart';
 ///   - `custom:facilities`    → comma-separated facility IDs
 ///   - `custom:censuses`      → comma-separated census IDs
 ///   - `custom:mfa_enrolled`  → "true" / "false"
+///   - `custom:isWalkerUser`  → "true" / "false" (D2C pool only)
 ///
 /// Per phase-2b-0-foundation.md §Interfaces > GoSteadyUser.
 class UserClaims {
@@ -26,6 +27,7 @@ class UserClaims {
       facilities: _splitCsv(payload['custom:facilities']),
       censuses: _splitCsv(payload['custom:censuses']),
       mfaEnrolled: _parseBool(payload['custom:mfa_enrolled']),
+      isWalkerUser: _parseBool(payload['custom:isWalkerUser']),
     );
   }
 

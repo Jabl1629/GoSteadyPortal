@@ -18,14 +18,14 @@ from typing import Any
 EXTRACT_EVERY_N = 4  # extract on every 4th user turn
 
 _EXTRACT_SYSTEM = (
-    "You maintain a small memory profile for an AI walking coach's older-adult user. "
+    "You maintain a small memory profile for an AI activity coach's older-adult user. "
     "Read the recent conversation and reply with STRICT JSON only (no prose, no code fences), "
     "with exactly these keys:\n"
     '  "summary": a warm running summary of who they are and what they are working toward '
     "(<= 280 characters), or an empty string if there is nothing to say;\n"
     '  "facts": an array of at most 3 short new profile facts worth remembering '
     '(e.g. "walks with her daughter on Tuesdays");\n'
-    '  "goals": an array of at most 2 walking goals the user has clearly stated '
+    '  "goals": an array of at most 2 activity goals the user has clearly stated '
     '(e.g. "walk to the mailbox and back every day").\n'
     "Only include items clearly grounded in the conversation. Use empty arrays if nothing is new. "
     "Never include medical, diagnostic, or sensitive-health content."

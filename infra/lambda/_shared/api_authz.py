@@ -82,6 +82,11 @@ def extract_claims(event: dict[str, Any]) -> dict[str, Any]:
         "facilities": [f.strip() for f in facilities_raw.split(",") if f.strip()],
         "censuses": [c.strip() for c in censuses_raw.split(",") if c.strip()],
         "mfaEnrolled": claims.get("custom:mfa_enrolled", "false") == "true",
+        # D2C-only `custom:isWalkerUser` (d2c-pre-token) — True when the caller
+        # IS the walker/device user themselves. Facility/internal tokens lack
+        # the claim → False. Drives walker-only alert suppression (queries.
+        # hide_walker_alerts). Arrives as the string "true"/"false".
+        "isWalkerUser": claims.get("custom:isWalkerUser", "false") == "true",
         "iat": iat,
         # D2C claim-binding (spec §5.2a): the D2C app authenticates with the
         # Cognito ID token, so the standard OIDC phone/name claims are present
