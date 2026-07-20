@@ -17,16 +17,17 @@ import '../rendering/metric_registry.dart';
 import 'd2c_mock_data.dart';
 import 'd2c_repository.dart';
 
-/// Behavioral activity-judgment alert types hidden from the WALKER user's own
-/// dashboard (kept in sync with the backend read filter in
-/// `patient-api/handler.py :: _WALKER_HIDDEN_ALERT_TYPES`). The backend already
-/// strips these for a walker token; this is defense-in-depth so the walker's
-/// app hides them even against an older backend. Device-health alerts
-/// (offline / silent / battery / signal) are intentionally NOT in this set.
-const _walkerHiddenActivityAlertTypes = <String>{
-  'no_activity_today',
-  'below_typical_activity',
-  'declining_trend',
+/// The ONLY alert types a WALKER user sees on their own dashboard: battery (the
+/// one thing they can act on). Kept in sync with the backend allow-list
+/// (`patient-api/queries.py :: WALKER_VISIBLE_ALERT_TYPES`). The backend already
+/// strips non-battery alerts for a walker token; this mirror is defense-in-depth
+/// against an older backend. Activity, signal, offline, and safety alerts are
+/// the caregiver's concern — hidden from the walker (2026-07-20 "only battery").
+const _walkerVisibleAlertTypes = <String>{
+  'battery_low',
+  'battery_critical',
+  'low_battery',
+  'battery',
 };
 
 /// Live D2C repository: maps the deployed claim + 2A-RD read endpoints
@@ -245,8 +246,8 @@ class LiveD2CRepository implements D2CRepository {
 
     final openAlerts = [
       for (final a in openAlertRows)
-        if (!(viewerIsWalker &&
-            _walkerHiddenActivityAlertTypes.contains(a.alertType)))
+        // Non-walker viewers see every alert; the walker sees ONLY battery.
+        if (!viewerIsWalker || _walkerVisibleAlertTypes.contains(a.alertType))
           WalkerAlert(
             id: a.sk,
             icon: _alertIcon(a.alertType),
@@ -693,11 +694,16 @@ class LiveD2CRepository implements D2CRepository {
     switch (type) {
       case 'low_battery':
       case 'battery':
+      case 'battery_low':
+      case 'battery_critical':
         return Icons.battery_alert_outlined;
       case 'offline':
       case 'device_offline':
       case 'device_silent':
         return Icons.wifi_off_outlined;
+      case 'signal_lost':
+      case 'signal_weak':
+        return Icons.signal_cellular_off_outlined;
       case 'no_activity':
       case 'no_activity_today':
       case 'low_activity':
@@ -719,12 +725,19 @@ class LiveD2CRepository implements D2CRepository {
     switch (type) {
       case 'low_battery':
       case 'battery':
+      case 'battery_low':
         return 'Battery is getting low';
+      case 'battery_critical':
+        return 'Battery is critically low';
       case 'offline':
       case 'device_offline':
         return 'Device is offline';
       case 'device_silent':
         return 'Device has gone quiet';
+      case 'signal_lost':
+        return 'Signal lost';
+      case 'signal_weak':
+        return 'Weak signal';
       case 'no_activity':
       case 'no_activity_today':
         return 'No activity yet';
@@ -751,12 +764,19 @@ class LiveD2CRepository implements D2CRepository {
     switch (a.alertType) {
       case 'low_battery':
       case 'battery':
+      case 'battery_low':
         return 'Replace the AA batteries in the next day or two.';
+      case 'battery_critical':
+        return 'Replace the AA batteries now to avoid a gap in monitoring.';
       case 'offline':
       case 'device_offline':
         return "The device hasn't checked in for a couple of hours.";
       case 'device_silent':
         return "The device hasn't sent an update in over a day.";
+      case 'signal_lost':
+        return "The device can't reach the cellular network right now.";
+      case 'signal_weak':
+        return "The device's cellular signal is weak; readings may be delayed.";
       case 'no_activity':
       case 'no_activity_today':
         return 'No walking recorded yet today.';
