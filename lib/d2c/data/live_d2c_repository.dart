@@ -107,7 +107,16 @@ class LiveD2CRepository implements D2CRepository {
     final alertsF = _api.getAlerts(patientId, AlertStatus.unacknowledged);
 
     final patient = (await detailF).patient;
-    final todaySessions = await todayF;
+    // `range=h24` is a rolling 24-hour window; "Today's walks" (and the today
+    // totals derived from it) want the CALENDAR day the viewer sees. Row times
+    // below render via `.toLocal()`, so bucket "today" the same way — filter to
+    // sessions whose local start is today. Without this, last night's late
+    // sessions (still inside the 24h window, and stamped as today's date when
+    // the patient timezone is unset → UTC) wrongly appear under today.
+    final todaySessions = [
+      for (final s in await todayF)
+        if (_isSameDay(s.sessionStart.toLocal(), now)) s,
+    ];
     final weekSessions = await weekF;
     final openAlertRows = (await alertsF).alerts;
 
