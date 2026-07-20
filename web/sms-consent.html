@@ -49,14 +49,23 @@
   consumers provide consent to receive messages.</p>
 
   <h2>What messages we send</h2>
-  <p>All GoSteady SMS are <strong>transactional and consumer-initiated</strong>. We do not
-  send marketing or promotional content. There are two message types:</p>
+  <!-- DRAFT pending counsel review (AI Coach C2 §5.7 / umbrella Q11): the "Coach messages"
+       category is motivational rather than transactional and rides its own explicit,
+       off-by-default opt-in, distinct from the security/alert categories above. -->
+  <p>Most GoSteady SMS are <strong>transactional and consumer-initiated</strong>. There are
+  three message types:</p>
   <ul>
     <li><strong>Account verification (2FA / one-time passcode):</strong> a one-time code so a
     user can verify their mobile number and securely sign in to the GoSteady app.</li>
     <li><strong>Account &amp; activity notifications:</strong> occasional caregiver alerts
     about the person they monitor — for example, a low-activity check-in suggestion, or a
     device/account status alert.</li>
+    <li><strong>Coach messages (optional):</strong> occasional encouraging notes from
+    &ldquo;Steady,&rdquo; the walker user&rsquo;s in-app AI walking coach — for example, a
+    short heads-up that a new coach note is waiting in the app. These are motivational rather
+    than transactional, are <strong>off by default</strong>, and are sent only if the user
+    turns on &ldquo;Coach text messages&rdquo; in the app. They can be turned off there, or by
+    replying STOP, at any time — without affecting verification or alert texts.</li>
   </ul>
 
   <h2>How consumers opt in (consent)</h2>

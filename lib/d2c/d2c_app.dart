@@ -160,6 +160,15 @@ GoRouter buildD2CRouter({
             D2CCareTeamScreen(repository: repository),
       ),
       GoRoute(
+        path: D2CRoutes.coach,
+        builder: (context, state) => D2CCoachHost(repository: repository),
+      ),
+      GoRoute(
+        path: D2CRoutes.coachMemory,
+        builder: (context, state) =>
+            D2CCoachMemoryHost(repository: repository),
+      ),
+      GoRoute(
         path: D2CRoutes.account,
         builder: (context, state) => D2CAccountHost(auth: auth),
       ),

@@ -11,6 +11,7 @@ import '../data/d2c_mock_data.dart';
 import '../data/d2c_repository.dart';
 import 'd2c_agreement.dart';
 import '../rendering/metric_registry.dart';
+import '../screens/d2c_coach_screen.dart';
 import '../screens/d2c_dashboard_screen.dart';
 import '../widgets/d2c_bottom_nav.dart';
 
@@ -998,7 +999,11 @@ class _D2COtpEntryScreenState extends State<D2COtpEntryScreen> {
 // ════════════════════════════════════════════════════════════════════
 
 class _DashState {
-  const _DashState({this.patientId, this.snapshot, this.joinable = const []});
+  const _DashState(
+      {this.patientId,
+      this.snapshot,
+      this.joinable = const [],
+      this.coachUnread = false});
   final String? patientId;
   final D2CDashboardSnapshot? snapshot;
 
@@ -1006,6 +1011,10 @@ class _DashState {
   /// join path ("got the text, signed up from the app instead of the link";
   /// d2c-care-circle.md §5.3). Only checked when the account has no walker.
   final List<JoinableInvite> joinable;
+
+  /// C1 re-engagement: show the "new message from Steady" nudge until the
+  /// walker user opens the Coach tab.
+  final bool coachUnread;
 }
 
 class D2CDashboardHost extends StatefulWidget {
@@ -1041,7 +1050,14 @@ class _D2CDashboardHostState extends State<D2CDashboardHost> {
       return _DashState(joinable: joinable);
     }
     final snapshot = await widget.repository.dashboard(patientId);
-    return _DashState(patientId: patientId, snapshot: snapshot);
+    var coachUnread = false;
+    try {
+      coachUnread = await widget.repository.coachHasUnread();
+    } catch (_) {
+      // The nudge is best-effort — a hiccup just hides it.
+    }
+    return _DashState(
+        patientId: patientId, snapshot: snapshot, coachUnread: coachUnread);
   }
 
   void _reload() => setState(() => _future = _load());
@@ -1119,6 +1135,11 @@ class _D2CDashboardHostState extends State<D2CDashboardHost> {
         }
         return D2CDashboardScreen(
           snapshot: data,
+          coachUnread: state.coachUnread,
+          onOpenCoach: () {
+            widget.repository.markCoachOpened();
+            context.go(D2CRoutes.coach);
+          },
           onAckAlert: state.patientId == null
               ? null
               : (alert) => _ackAlert(state.patientId!, alert),
@@ -1576,6 +1597,278 @@ class D2CAccountHost extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// /coach — Steady chat. Thread loads via FutureBuilder (host pattern);
+// sending is manual state — the user turn appends optimistically and the
+// coach reply appends on return, behind a typing indicator (L5).
+// ════════════════════════════════════════════════════════════════════
+
+/// The Coach tab's initial payload: the transcript (primary) plus the C2
+/// proactive note and the C3 preferences (both best-effort — a hiccup in
+/// either still renders the chat).
+class _CoachData {
+  const _CoachData({
+    required this.messages,
+    required this.note,
+    required this.prefs,
+  });
+  final List<CoachMessage> messages;
+  final CoachNote? note;
+  final CoachPrefs prefs;
+}
+
+class D2CCoachHost extends StatefulWidget {
+  const D2CCoachHost({super.key, required this.repository});
+
+  final D2CRepository repository;
+
+  @override
+  State<D2CCoachHost> createState() => _D2CCoachHostState();
+}
+
+class _D2CCoachHostState extends State<D2CCoachHost> {
+  late Future<_CoachData> _future;
+
+  /// Mutable working copies, seeded once from the load so a sent message /
+  /// prefs change sticks without a refetch.
+  List<CoachMessage>? _messages;
+  CoachNote? _note;
+  CoachPrefs? _prefs;
+  bool _sending = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _load();
+    // Opening the coach clears the Activity-screen "new message" nudge.
+    widget.repository.markCoachOpened();
+  }
+
+  Future<_CoachData> _load() async {
+    // Thread first (the primary payload); note + prefs are best-effort so a
+    // failure in either still renders the chat (mirrors the dashboard's
+    // best-effort coachUnread / joinable loads).
+    final messages = await widget.repository.getCoachThread();
+    CoachNote? note;
+    try {
+      note = await widget.repository.getCoachInbox();
+    } catch (_) {
+      // A missing note just shows the placeholder card.
+    }
+    var prefs = const CoachPrefs(tone: CoachTone.warm, smsTeaser: false);
+    try {
+      prefs = await widget.repository.getCoachPrefs();
+    } catch (_) {
+      // Fall back to the warm default; the settings sheet still works.
+    }
+    return _CoachData(messages: messages, note: note, prefs: prefs);
+  }
+
+  void _reload() => setState(() {
+        _messages = null;
+        _note = null;
+        _prefs = null;
+        _future = _load();
+      });
+
+  Future<CoachPrefs> _updatePrefs({String? tone, bool? smsTeaser}) async {
+    final updated =
+        await widget.repository.updateCoachPrefs(tone: tone, smsTeaser: smsTeaser);
+    if (mounted) setState(() => _prefs = updated);
+    return updated;
+  }
+
+  Future<void> _send(String text) async {
+    final t = text.trim();
+    if (t.isEmpty || _sending || _messages == null) return;
+    final now = DateTime.now();
+    // New list instances (not in-place mutation) so the child screen's
+    // didUpdateWidget sees the length change and auto-scrolls to the latest.
+    setState(() {
+      _messages = [
+        ..._messages!,
+        CoachMessage(
+          id: 'local_${now.microsecondsSinceEpoch}',
+          role: CoachRole.user,
+          text: t,
+          createdAt: now,
+        ),
+      ];
+      _sending = true;
+    });
+    try {
+      final reply = await widget.repository.sendCoachMessage(t);
+      if (!mounted) return;
+      setState(() {
+        _messages = [..._messages!, reply];
+        _sending = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _sending = false);
+      _snack(context, _errText(e));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<_CoachData>(
+      future: _future,
+      builder: (context, snap) {
+        if (snap.connectionState != ConnectionState.done) {
+          return const _HostScaffold(
+            tab: D2CTab.coach,
+            child: Center(child: CircularProgressIndicator()),
+          );
+        }
+        if (snap.hasError) {
+          return _HostScaffold(
+            tab: D2CTab.coach,
+            child: _RetryView(message: _errText(snap.error!), onRetry: _reload),
+          );
+        }
+        // Seed all three working copies once (the transcript is the sentinel).
+        if (_messages == null) {
+          final data = snap.data!;
+          _messages = List.of(data.messages);
+          _note = data.note;
+          _prefs = data.prefs;
+        }
+        return D2CCoachScreen(
+          messages: _messages!,
+          sending: _sending,
+          note: _note,
+          prefs: _prefs,
+          onSend: _send,
+          onUpdatePrefs: _updatePrefs,
+        );
+      },
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// /coach/memory — "What Steady knows about you". Manual state: load, then
+// mutate a local list on add/edit/delete with try/catch + toast (the
+// D2CCareTeamScreen pattern; L4).
+// ════════════════════════════════════════════════════════════════════
+
+class D2CCoachMemoryHost extends StatefulWidget {
+  const D2CCoachMemoryHost({super.key, required this.repository});
+
+  final D2CRepository repository;
+
+  @override
+  State<D2CCoachMemoryHost> createState() => _D2CCoachMemoryHostState();
+}
+
+class _D2CCoachMemoryHostState extends State<D2CCoachMemoryHost> {
+  Object? _error;
+  bool _loading = true;
+  String _summary = '';
+  List<CoachMemoryFact> _facts = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final memory = await widget.repository.getCoachMemory();
+      if (!mounted) return;
+      setState(() {
+        _summary = memory.summary;
+        _facts = List.of(memory.facts);
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e;
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _add(String text) async {
+    try {
+      final fact = await widget.repository.addCoachFact(text);
+      if (!mounted) return;
+      setState(() => _facts = [..._facts, fact]);
+      _snack(context, 'Added.');
+    } catch (e) {
+      if (mounted) _snack(context, _errText(e));
+    }
+  }
+
+  Future<void> _addGoal(String text) async {
+    try {
+      final fact = await widget.repository.addCoachGoal(text);
+      if (!mounted) return;
+      setState(() => _facts = [..._facts, fact]);
+      _snack(context, 'Goal added.');
+    } catch (e) {
+      if (mounted) _snack(context, _errText(e));
+    }
+  }
+
+  Future<void> _edit(CoachMemoryFact fact, String text) async {
+    try {
+      final updated =
+          await widget.repository.updateCoachFact(fact.factId, text);
+      if (!mounted) return;
+      setState(() => _facts = [
+            for (final f in _facts)
+              if (f.factId == fact.factId) updated else f,
+          ]);
+      _snack(context, 'Updated.');
+    } catch (e) {
+      if (mounted) _snack(context, _errText(e));
+    }
+  }
+
+  Future<void> _delete(CoachMemoryFact fact) async {
+    try {
+      await widget.repository.deleteCoachFact(fact.factId);
+      if (!mounted) return;
+      setState(() =>
+          _facts = [for (final f in _facts) if (f.factId != fact.factId) f]);
+      _snack(context, 'Deleted.');
+    } catch (e) {
+      if (mounted) _snack(context, _errText(e));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const _HostScaffold(
+        tab: D2CTab.coach,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    if (_error != null) {
+      return _HostScaffold(
+        tab: D2CTab.coach,
+        child: _RetryView(message: _errText(_error!), onRetry: _load),
+      );
+    }
+    return D2CCoachMemoryScreen(
+      memory: CoachMemory(facts: _facts, summary: _summary),
+      onAddFact: _add,
+      onAddGoal: _addGoal,
+      onEditFact: _edit,
+      onDeleteFact: _delete,
     );
   }
 }

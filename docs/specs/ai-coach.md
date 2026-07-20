@@ -1,6 +1,6 @@
 # AI Coach ("Steady") — D2C Fitness-Coach Assistant (proposal / umbrella spec)
 
-> **Status:** 🔵 Proposal for scoping — 2026-07-17. No code exists; nothing here is committed until the Open Questions (§10) are decided.
+> **Status:** 🟡 Scoping resolved (Q1–Q12, 2026-07-18); **C1–C3 built + deployed to dev — 2026-07-19.** Generation runs on **Claude Haiku 4.5** (Bedrock); the C1 live D2C app (Coach tab) is served at `dev.app.gosteady.co`; the C2 proactive sweep is deployed **dormant** behind `COACH_DAILY_ENABLED` (no autonomous sends). Per-phase build specs + current state: §7 and each spec's changelog. C4 (voice) remains post-trial.
 > **Scope:** A personal AI fitness-coach experience for the **D2C walker user** in the browser portal (`app.gosteady.co`): text chat grounded in the user's own activity data, persistent memory, proactive Whoop-style morning messages driven by activity trends, elderly-appropriate guardrails, and a forward path to a voice interface (ElevenLabs-class).
 > **Depends on (deployed):** 0A/0B data + auth, 1A/1B ingestion + processing, 1C-slim behavioral detector, 1.7 audit, 2A-RD reads, D2C auth pool + claim + live portal, care-circle 5a/5d.
 > **Interacts with (planned):** [d2c.md](d2c.md) Phase 2 (Twilio SMS alert pipeline + notification prefs) — the coach's SMS teaser rides that pipeline.
@@ -257,15 +257,21 @@ Following the house pattern: each phase ends with a **real-user/real-hardware ex
 ### Phase C0 — Scoping + safety policy (this doc)
 Decide §10; write the coach content policy (the out-of-lane table + scripted responses + published crisis protocol page per R7); counsel skim (Q11); persona brief (Q1).
 
-### Phase C1 — Text chat MVP 🔲
+### Phase C1 — Text chat MVP 🟢 (backend + infra + Flutter built + deployed → dev 2026-07-19; live app at `dev.app.gosteady.co`; generation on Claude Haiku 4.5; exit test pending a live walker login)
+> **Build spec:** [ai-coach-c1-text-chat.md](ai-coach-c1-text-chat.md) (drafted 2026-07-18 — safety policy folded in per Q's structure decision).
+
 Tables, `coach-api`, guardrail pipeline v1, system prompt + eval set, Coach tab (mock → live), memory v1 (transcript + profile + editable UI). Feature-flagged to allowlisted trial users.
 **Exit test:** a real walker user with a live device chats about their real activity ("how did I do this week?") and gets grounded, correct, warm answers; the red-team script set produces zero unsafe responses; every turn appears in audit; kill switch verified.
 
-### Phase C2 — Proactive morning message 🔲
+### Phase C2 — Proactive morning message 🟡 (backend + infra + Flutter built → dev 2026-07-19; generation on Claude Haiku 4.5; proactive sweep dormant behind `COACH_DAILY_ENABLED` — no autonomous sends until flipped)
+> **Build spec:** [ai-coach-c2-proactive-message.md](ai-coach-c2-proactive-message.md) (drafted 2026-07-18 — `coach-daily` as a `behavioral-detector` sibling; SMS via verified toll-free per Q7, superseding the 10DLC note below).
+
 `coach-daily` rules (positive + negative), inbox, **live send from day 1** (§5 D6 — no review queue); SMS teaser if Phase-2 10DLC is ready (else portal-only).
 **Exit test:** on a real device, an unusually active stretch produces a morning note that cites the real numbers, lands at patient-local ~08:00 exactly once, respects pause/prefs, and reads correctly on the phone.
 
-### Phase C3 — Memory deepening + personalization 🔲
+### Phase C3 — Memory deepening + personalization 🟡 (backend + infra + Flutter built → dev 2026-07-19; generation on Claude Haiku 4.5)
+> **Build spec:** [ai-coach-c3-memory-personalization.md](ai-coach-c3-memory-personalization.md) (drafted 2026-07-18 — extends C1/C2; no new Lambda/table/stack).
+
 Goal elicitation ("what would you like to work toward?") + goal-aware messages; tone preference (Oura pattern); weekly recap; memory-quality review tooling.
 **Exit test:** coach references a user-stated goal a week later, unprompted, correctly; user edits a memory fact and the coach respects the edit.
 

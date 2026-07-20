@@ -345,6 +345,126 @@ class AuditEntry {
   final DateTime at;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Coach ("Steady") display models — the 4th-tab AI walking coach
+// (ai-coach-c1-text-chat.md §5.7). Display-model names are deliberately
+// DISTINCT from the wire DTOs in d2c_api_models.dart (Coach*Dto) so the
+// live repo can import both without the CareNote-style `hide` collision.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Who authored a chat turn. `coach` is Steady (openly AI); `user` is the
+/// walker user. Drives bubble alignment + the "AI" glyph on coach turns.
+enum CoachRole { user, coach }
+
+/// Whether a memory fact was typed/edited by the user or written by the
+/// model. The "What Steady knows" screen shows both; an edit sets `user`.
+enum CoachFactSource { user, extracted }
+
+/// The lane a memory fact sits in — a stable profile detail vs an active
+/// goal. Drives the small chip on each fact row.
+enum CoachFactKind { profile, goal }
+
+/// One turn in the coach transcript (user or Steady).
+class CoachMessage {
+  const CoachMessage({
+    required this.id,
+    required this.role,
+    required this.text,
+    required this.createdAt,
+    this.flagged = false,
+  });
+
+  final String id;
+  final CoachRole role;
+  final String text;
+  final DateTime createdAt;
+
+  /// Triage flagged this turn (self-harm / emergency / medical). Surfaces a
+  /// subtle marker; the scripted safe reply is just another coach turn.
+  final bool flagged;
+
+  bool get isCoach => role == CoachRole.coach;
+}
+
+/// One user-visible, user-editable profile/goal fact ("what Steady knows").
+class CoachMemoryFact {
+  const CoachMemoryFact({
+    required this.factId,
+    required this.text,
+    required this.source,
+    required this.kind,
+  });
+
+  final String factId;
+  final String text;
+  final CoachFactSource source;
+  final CoachFactKind kind;
+}
+
+/// The "What Steady knows about you" screen payload: editable facts plus a
+/// short rolling summary the coach keeps in its own words.
+class CoachMemory {
+  const CoachMemory({required this.facts, required this.summary});
+
+  final List<CoachMemoryFact> facts;
+  final String summary;
+}
+
+/// The conversational register Steady uses (C3 tone toggle; umbrella Q1).
+/// `warm` is the C1 default (friendly, encouraging); `direct` is briefer and
+/// more to the point — still warm-plain, never clinical.
+enum CoachTone {
+  warm('warm'),
+  direct('direct');
+
+  final String wire;
+  const CoachTone(this.wire);
+
+  static CoachTone fromWire(Object? raw) {
+    final s = raw?.toString() ?? '';
+    return CoachTone.values.firstWhere(
+      (t) => t.wire == s,
+      // Default to the C1 warm voice on anything unrecognized.
+      orElse: () => CoachTone.warm,
+    );
+  }
+}
+
+/// One proactive "morning note" from Steady (C2) — the daily engine writes at
+/// most one per patient-local day when the user's activity is event-worthy.
+/// Display model; the wire shape is [CoachNoteDto]. Name is deliberately
+/// distinct from the DTO (avoids the CareNote-style `hide` collision).
+class CoachNote {
+  const CoachNote({
+    required this.id,
+    required this.date,
+    required this.text,
+    required this.themeType,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String date; // YYYY-MM-DD (patient-local)
+  final String text;
+  final String themeType; // above_typical_activity | improving_trend | ...
+  final DateTime createdAt;
+}
+
+/// The walker user's coach preferences (C3): the conversational [tone] plus
+/// the C2 SMS-teaser opt-in [smsTeaser] (off by default, separate from the
+/// activity alerts). Display model; the wire shape is [CoachPrefsDto].
+class CoachPrefs {
+  const CoachPrefs({required this.tone, required this.smsTeaser});
+
+  final CoachTone tone;
+  final bool smsTeaser;
+
+  CoachPrefs copyWith({CoachTone? tone, bool? smsTeaser}) => CoachPrefs(
+        tone: tone ?? this.tone,
+        smsTeaser: smsTeaser ?? this.smsTeaser,
+      );
+}
+
 class D2CMockData {
   // ── Care Circle ─────────────────────────────────────────────────
 
@@ -518,6 +638,78 @@ class D2CMockData {
           at: DateTime.now().subtract(const Duration(days: 9)),
         ),
       ];
+
+  // ── Coach ("Steady") ────────────────────────────────────────────
+
+  /// Opening transcript for the demo: one warm, openly-AI greeting from
+  /// Steady that ends on an open question (persona brief, §6.0). The mock
+  /// repository copies this into a mutable static list so sent messages
+  /// append a user turn + a canned coach reply that stick across reloads.
+  static List<CoachMessage> coachThread() => [
+        CoachMessage(
+          id: 'coach_seed_1',
+          role: CoachRole.coach,
+          text: "Hi, I'm Steady, your AI walking coach. I'm here to cheer you "
+              'on and chat about staying active. How have your walks been '
+              'feeling lately?',
+          createdAt: DateTime.now().subtract(const Duration(minutes: 3)),
+        ),
+      ];
+
+  /// Seed "what Steady knows about you" — a mix of user-typed and model-
+  /// extracted facts across the profile/goal lanes, plus a short summary.
+  static CoachMemory coachMemory() => const CoachMemory(
+        summary: "You're easing back into a regular walking routine after "
+            'physical therapy, and you like having company on your walks. '
+            'Your main goal right now is a steady morning loop around the '
+            'block.',
+        facts: [
+          CoachMemoryFact(
+            factId: 'fact_seed_1',
+            text: 'Started a new walking routine after physical therapy.',
+            source: CoachFactSource.extracted,
+            kind: CoachFactKind.profile,
+          ),
+          CoachMemoryFact(
+            factId: 'fact_seed_2',
+            text: 'Wants to walk two laps around the block each morning.',
+            source: CoachFactSource.user,
+            kind: CoachFactKind.goal,
+          ),
+          CoachMemoryFact(
+            factId: 'fact_seed_3',
+            text: 'Enjoys walking with her daughter Sarah on weekends.',
+            source: CoachFactSource.extracted,
+            kind: CoachFactKind.profile,
+          ),
+        ],
+      );
+
+  /// Seed proactive note for the demo (C2): an above-typical celebration that
+  /// cites only numbers the deterministic digest would supply and ends on an
+  /// open question (the C2 copywrite shape, §5.4). Populates the Coach tab's
+  /// "morning note" card so the demo shows a real, warm note.
+  static CoachNote coachInbox() => CoachNote(
+        id: 'INBOX#${_todayYmd()}',
+        date: _todayYmd(),
+        text: "You're having a strong day — 1,247 steps already, a good bit "
+            'above your usual pace. I love the momentum you\'re building. '
+            "What's been helping you get out the door lately?",
+        themeType: 'above_typical_activity',
+        createdAt: DateTime.now().subtract(const Duration(hours: 2)),
+      );
+
+  /// Default coach preferences for the demo (C3): the warm C1 voice, with the
+  /// SMS teaser off — opt-in, not opt-out (C2-D8).
+  static CoachPrefs coachPrefs() =>
+      const CoachPrefs(tone: CoachTone.warm, smsTeaser: false);
+
+  static String _todayYmd() {
+    final d = DateTime.now();
+    return '${d.year.toString().padLeft(4, '0')}-'
+        '${d.month.toString().padLeft(2, '0')}-'
+        '${d.day.toString().padLeft(2, '0')}';
+  }
 
   // ── Dashboard snapshots ─────────────────────────────────────────
 

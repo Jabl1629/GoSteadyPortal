@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../theme/app_theme.dart';
+import 'd2c_routes.dart';
 import 'data/d2c_mock_data.dart';
+import 'data/d2c_repository.dart';
 import 'screens/d2c_dashboard_screen.dart';
 
 /// Dev-only preview harness for the D2C wireframe screens.
@@ -42,6 +44,11 @@ class _D2CDashboardPreviewState extends State<D2CDashboardPreview> {
         : D2CMockData.susanViewedBySarah();
     return D2CDashboardScreen(
       snapshot: snap,
+      coachUnread: _asWalkerUser && !D2CMockRepository.coachOpened,
+      onOpenCoach: () {
+        D2CMockRepository.coachOpened = true;
+        context.go(D2CRoutes.coach);
+      },
       onSwitchViewer: () => setState(() => _asWalkerUser = !_asWalkerUser),
     );
   }

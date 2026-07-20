@@ -4,11 +4,11 @@ import 'package:go_router/go_router.dart';
 import '../../theme/app_theme.dart';
 import '../d2c_routes.dart';
 
-/// The three top-level tabs of the signed-in D2C experience. Everyone
-/// (caregivers + walker users) gets the same three — no role-conditional
-/// nav. Drill-down screens (notification prefs, audit, device settings)
-/// keep this bar with [D2CTab.account] active.
-enum D2CTab { activity, careTeam, account }
+/// The top-level tabs of the signed-in D2C experience. Everyone
+/// (caregivers + walker users) gets the same set — no role-conditional
+/// nav. Drill-down screens (notification prefs, audit, device settings,
+/// "What Steady knows") keep this bar with their parent tab active.
+enum D2CTab { activity, careTeam, coach, account }
 
 /// Persistent bottom navigation shared by Dashboard, Care Team, and
 /// Account so the bar never disappears as you move between tabs.
@@ -45,6 +45,12 @@ class D2CBottomNav extends StatelessWidget {
               onTap: () => context.go(D2CRoutes.careTeam),
             ),
             _NavItem(
+              icon: Icons.forum_outlined,
+              label: 'Coach',
+              active: active == D2CTab.coach,
+              onTap: () => context.go(D2CRoutes.coach),
+            ),
+            _NavItem(
               icon: Icons.person_outline,
               label: 'Account',
               active: active == D2CTab.account,
@@ -77,7 +83,9 @@ class _NavItem extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+        // Tightened from 18 → 11 so four tabs fit the 390–430px phone frame
+        // without overflow (ai-coach-c1-text-chat.md §5.7).
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [

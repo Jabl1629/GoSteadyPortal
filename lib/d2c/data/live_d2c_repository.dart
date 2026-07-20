@@ -423,6 +423,118 @@ class LiveD2CRepository implements D2CRepository {
   Future<void> ackAlert(String patientId, String alertId, {String? notes}) =>
       _api.ackAlert(patientId, alertId, notes: notes);
 
+  // ── Coach "Steady" (ai-coach-c1-text-chat.md §5.7) ─────────────
+
+  @override
+  Future<List<CoachMessage>> getCoachThread() async {
+    final dto = await _api.getCoachThread();
+    return [for (final m in dto.messages) _coachMessageView(m)];
+  }
+
+  @override
+  Future<CoachMessage> sendCoachMessage(String text) async {
+    final reply = await _api.sendCoachMessage(text);
+    // POST /chat returns only {reply, flagged} — the server assigns the turn
+    // id/timestamp but doesn't echo them, so synthesize a local coach turn
+    // (the user turn is rendered optimistically client-side).
+    return CoachMessage(
+      id: 'coach_reply_${DateTime.now().microsecondsSinceEpoch}',
+      role: CoachRole.coach,
+      text: reply.reply,
+      createdAt: DateTime.now(),
+      flagged: reply.flagged,
+    );
+  }
+
+  @override
+  Future<CoachMemory> getCoachMemory() async {
+    final dto = await _api.getCoachMemory();
+    return CoachMemory(
+      facts: [for (final f in dto.facts) _coachFactView(f)],
+      summary: dto.summary,
+    );
+  }
+
+  @override
+  Future<CoachMemoryFact> addCoachFact(String text) async =>
+      _coachFactView(await _api.addCoachFact(text));
+
+  @override
+  Future<CoachMemoryFact> addCoachGoal(String text) async =>
+      _coachFactView(await _api.addCoachFact(text, kind: 'goal'));
+
+  @override
+  Future<CoachMemoryFact> updateCoachFact(String factId, String text) async =>
+      _coachFactView(await _api.updateCoachFact(factId, text));
+
+  @override
+  Future<void> deleteCoachFact(String factId) => _api.deleteCoachFact(factId);
+
+  @override
+  Future<CoachNote?> getCoachInbox() async {
+    final dto = await _api.getCoachInbox();
+    return dto == null ? null : _coachNoteView(dto);
+  }
+
+  @override
+  Future<CoachPrefs> getCoachPrefs() async =>
+      _coachPrefsView(await _api.getCoachPrefs());
+
+  @override
+  Future<CoachPrefs> updateCoachPrefs({String? tone, bool? smsTeaser}) async {
+    await _api.updateCoachPrefs(tone: tone, smsTeaser: smsTeaser);
+    // The PATCH echo may omit the unchanged key, so re-read for the
+    // authoritative tone + SMS pair rather than trusting a partial response.
+    return getCoachPrefs();
+  }
+
+  // C1 re-engagement nudge is a client-side session flag (there is no server
+  // unread state until C2's proactive inbox). Instance-scoped to the signed-in
+  // user; resets on app relaunch, which is the right "welcome back" behavior.
+  bool _coachOpened = false;
+
+  @override
+  Future<bool> coachHasUnread() async => !_coachOpened;
+
+  @override
+  Future<void> markCoachOpened() async {
+    _coachOpened = true;
+  }
+
+  CoachMessage _coachMessageView(CoachTurnDto m) => CoachMessage(
+        id: m.id,
+        role: m.role == CoachTurnRoleWire.user
+            ? CoachRole.user
+            : CoachRole.coach,
+        text: m.text,
+        createdAt: m.createdAt ?? DateTime.now(),
+        flagged: m.flagged,
+      );
+
+  CoachMemoryFact _coachFactView(CoachFactDto f) => CoachMemoryFact(
+        factId: f.factId,
+        text: f.text,
+        source: f.source == CoachFactSourceWire.user
+            ? CoachFactSource.user
+            : CoachFactSource.extracted,
+        kind: f.kind == CoachFactKindWire.goal
+            ? CoachFactKind.goal
+            : CoachFactKind.profile,
+      );
+
+  CoachNote _coachNoteView(CoachNoteDto n) => CoachNote(
+        id: n.id,
+        date: n.date,
+        text: n.text,
+        themeType: n.themeType,
+        createdAt: n.createdAt ?? DateTime.now(),
+      );
+
+  CoachPrefs _coachPrefsView(CoachPrefsDto p) => CoachPrefs(
+        tone: CoachTone.fromWire(p.tone),
+        smsTeaser: p.coachSmsTeaser,
+      );
+
   PendingInvite _inviteView(RosterInvite i) {
     final now = DateTime.now();
     final expiresIn = i.expiresAt == null

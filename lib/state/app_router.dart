@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../auth/auth_service_interface.dart';
 import '../d2c/d2c_preview.dart';
 import '../d2c/data/d2c_repository.dart';
+import '../d2c/live/d2c_live_screens.dart';
 import '../d2c/screens/d2c_account_screens.dart';
 import '../d2c/screens/d2c_care_team_screen.dart';
 import '../d2c/screens/d2c_history_screen.dart';
@@ -143,6 +144,18 @@ GoRouter buildAppRouter({
           repository: D2CMockRepository(),
           viewerIsAdmin: false,
         ),
+      ),
+      // Coach ("Steady") — mock-backed hosts. Kept in sync with the shared
+      // D2CBottomNav's Coach tab so it resolves in this preview hub too.
+      GoRoute(
+        path: '/d2c/preview/coach',
+        builder: (context, state) =>
+            const D2CCoachHost(repository: D2CMockRepository()),
+      ),
+      GoRoute(
+        path: '/d2c/preview/coach/memory',
+        builder: (context, state) =>
+            const D2CCoachMemoryHost(repository: D2CMockRepository()),
       ),
       // Onboarding — QR walk-up
       GoRoute(

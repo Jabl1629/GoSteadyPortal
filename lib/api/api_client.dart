@@ -541,6 +541,100 @@ class ApiClient {
     );
   }
 
+  // ── Coach "Steady" (ai-coach-c1-text-chat.md §5.7) ─────────────
+  // All under the D2C authorizer at `{prefix}/coach/*` — the live D2C
+  // build sets `readPathPrefix = '/api/v1/d2c'`, so these resolve to
+  // `/api/v1/d2c/coach/*` (the deployed contract). Auth attaches via
+  // `_request`. Coach conversations + memory are private to the walker
+  // user (never visible to care-circle members).
+
+  /// `GET {prefix}/coach/thread` — the transcript for the Coach tab.
+  Future<CoachThreadDto> getCoachThread() async {
+    final body = await _get('$_readPrefix/coach/thread');
+    return CoachThreadDto.fromJson(body);
+  }
+
+  /// `POST {prefix}/coach/chat` — one chat turn: `{message}` → `{reply,
+  /// flagged}`. Non-streamed; the UI shows a typing indicator while awaited.
+  Future<CoachChatReplyDto> sendCoachMessage(String message) async {
+    final body = await _request(
+      'POST',
+      '$_readPrefix/coach/chat',
+      body: {'message': message},
+    );
+    return CoachChatReplyDto.fromJson(body);
+  }
+
+  /// `GET {prefix}/coach/memory` — `{facts, summary}` for "What Steady knows".
+  Future<CoachMemoryDto> getCoachMemory() async {
+    final body = await _get('$_readPrefix/coach/memory');
+    return CoachMemoryDto.fromJson(body);
+  }
+
+  /// `POST {prefix}/coach/memory` — add a memory item (`source→user`, 201).
+  /// `kind` is `profile` (default) or `goal` (C3); the server routes goals to
+  /// `GOAL#` items and profile facts to `PROFILE#` items.
+  Future<CoachFactDto> addCoachFact(String text, {String kind = 'profile'}) async {
+    final body = await _request(
+      'POST',
+      '$_readPrefix/coach/memory',
+      body: {'text': text, 'kind': kind},
+    );
+    return CoachFactDto.fromJson(
+      (body['fact'] as Map<String, dynamic>?) ?? const {},
+    );
+  }
+
+  /// `PATCH {prefix}/coach/memory/{factId}` — edit a fact (`source→user`).
+  Future<CoachFactDto> updateCoachFact(String factId, String text) async {
+    final body = await _request(
+      'PATCH',
+      '$_readPrefix/coach/memory/${Uri.encodeComponent(factId)}',
+      body: {'text': text},
+    );
+    return CoachFactDto.fromJson(
+      (body['fact'] as Map<String, dynamic>?) ?? const {},
+    );
+  }
+
+  /// `DELETE {prefix}/coach/memory/{factId}` — delete a memory item (the
+  /// `factId` may be a `PROFILE#`/`GOAL#` item id — the server targets any SK).
+  Future<void> deleteCoachFact(String factId) async {
+    await _request(
+      'DELETE',
+      '$_readPrefix/coach/memory/${Uri.encodeComponent(factId)}',
+    );
+  }
+
+  /// `GET {prefix}/coach/inbox` — the latest proactive note (C2), or null when
+  /// `coach-daily` hasn't written one yet (`{"note": null}`).
+  Future<CoachNoteDto?> getCoachInbox() async {
+    final body = await _get('$_readPrefix/coach/inbox');
+    final note = body['note'];
+    if (note is! Map<String, dynamic>) return null;
+    return CoachNoteDto.fromJson(note);
+  }
+
+  /// `GET {prefix}/coach/prefs` — the walker user's tone + SMS-teaser opt-in (C3).
+  Future<CoachPrefsDto> getCoachPrefs() async {
+    final body = await _get('$_readPrefix/coach/prefs');
+    return CoachPrefsDto.fromJson(body);
+  }
+
+  /// `PATCH {prefix}/coach/prefs` — update tone and/or the SMS-teaser opt-in.
+  /// Sends only the provided keys. The response echo may omit an unchanged
+  /// key, so callers needing the full pair should re-read via [getCoachPrefs].
+  Future<void> updateCoachPrefs({String? tone, bool? smsTeaser}) async {
+    await _request(
+      'PATCH',
+      '$_readPrefix/coach/prefs',
+      body: {
+        if (tone != null) 'tone': tone,
+        if (smsTeaser != null) 'coachSmsTeaser': smsTeaser,
+      },
+    );
+  }
+
   // ── QR re-login (d2c-qr-relogin) — all UNAUTHENTICATED ─────────
   // Get back into a claimed device from its persistent QR: list masked
   // household numbers, text a login code to one, and complete SMS-OTP —

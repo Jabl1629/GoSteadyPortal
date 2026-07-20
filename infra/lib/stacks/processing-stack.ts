@@ -7,6 +7,7 @@ import * as iot from 'aws-cdk-lib/aws-iot';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as events_targets from 'aws-cdk-lib/aws-events-targets';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -57,6 +58,7 @@ export class ProcessingStack extends cdk.Stack {
   public readonly alertHandler: lambda.Function;
   public readonly connectionCoordinator: lambda.Function;
   public readonly behavioralDetector: lambda.Function;
+  public readonly coachDaily: lambda.Function;
 
   constructor(scope: Construct, id: string, props: ProcessingStackProps) {
     super(scope, id, props);
@@ -501,6 +503,110 @@ export class ProcessingStack extends cdk.Stack {
       },
     );
     behavioralErrorPatternAlarm.addAlarmAction(new cloudwatch_actions.SnsAction(opsTopic));
+
+    // ════════════════════════════════════════════════════════════════
+    // AI Coach C2 — coach-daily proactive message (ai-coach-c2-proactive-message.md)
+    // ════════════════════════════════════════════════════════════════
+    //
+    // Structural sibling of behavioral-detector: hourly cron, D2C
+    // facility→patient iteration, in-handler local-hour gate. Reads Activity
+    // + CoachMemory, writes the CoachMessages inbox (≤1/patient-local-day),
+    // reuses coach-api's _shared/coach_llm for copywrite. SMS teaser is
+    // opt-in default-OFF; generative sends fail-closed (no broken notes).
+    const coachMessagesRef = dynamodb.Table.fromTableName(this, 'CoachMessagesRef', `gosteady-${p}-coach-messages`);
+    const coachMemoryRef = dynamodb.Table.fromTableName(this, 'CoachMemoryRef', `gosteady-${p}-coach-memory`);
+    const usersRefForCoach = dynamodb.Table.fromTableName(this, 'UsersRefForCoach', `gosteady-${p}-users`);
+    const twilioSecretRefCoach = secretsmanager.Secret.fromSecretNameV2(
+      this, 'TwilioSecretRefCoach', `gosteady/${p}/twilio`,
+    );
+
+    const coachDaily = new ProcessingLambda(this, 'CoachDaily', {
+      config,
+      functionName: `gosteady-${p}-coach-daily`,
+      handlerDir: path.join(lambdaDir, 'coach-daily'),
+      description: 'AI Coach C2: hourly cron — proactive afternoon note + weekly recap',
+      memoryMb: 512,
+      timeoutSeconds: 60,
+      environment: {
+        ENVIRONMENT: p,
+        ORGANIZATIONS_TABLE: organizationsTableRef.tableName,
+        PATIENTS_TABLE: patientsTable.tableName,
+        ACTIVITY_TABLE: activityTable.tableName,
+        COACH_MESSAGES_TABLE: coachMessagesRef.tableName,
+        COACH_MEMORY_TABLE: coachMemoryRef.tableName,
+        USERS_TABLE: usersRefForCoach.tableName,
+        TWILIO_SECRET_ARN: twilioSecretRefCoach.secretArn,
+        D2C_APP_BASE_URL: `https://${config.d2cAppDomain}`,
+        COACH_ENABLED: config.coachEnabled ? 'true' : 'false',
+        // Proactive sweep dormant until explicitly enabled (no autonomous sends
+        // on deploy). Flip to 'true' after review to go live.
+        COACH_DAILY_ENABLED: 'false',
+        // Claude Haiku 4.5 (voice + triage) — the invocable Claude tier for this
+        // account (Sonnet 5 + Opus 4.8 are AWS-Sales-gated). Access granted 2026-07-19.
+        COACH_MODEL_ID: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+        COACH_TRIAGE_MODEL_ID: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+        // Tuning surface (overridable without code change):
+        COACH_LOCAL_HOUR: '13',       // ~afternoon window (Q7); A/B vs '8'
+        COACH_RECAP_DOW: '6',          // Sunday weekly recap (C3)
+        COACH_MIN_GAP_HOURS: '48',     // ~every other day
+      },
+      powertoolsLayer,
+      tracingActive: true,
+    });
+    this.coachDaily = coachDaily.function;
+
+    activityTable.grantReadData(this.coachDaily);
+    patientsTable.grantReadData(this.coachDaily);
+    organizationsTableRef.grantReadData(this.coachDaily);
+    coachMessagesRef.grantReadWriteData(this.coachDaily);
+    coachMemoryRef.grantReadData(this.coachDaily);
+    usersRefForCoach.grantReadData(this.coachDaily);
+    twilioSecretRefCoach.grantRead(this.coachDaily);
+    identityKey.grantEncryptDecrypt(this.coachDaily);          // CoachMessages/Memory CMK
+    securityStack.auditKey.grantEncryptDecrypt(this.coachDaily);
+    // GSI/index access (fromTableName grants exclude index ARNs).
+    this.coachDaily.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'CoachDailyGSIRead',
+      actions: ['dynamodb:Query', 'dynamodb:Scan'],
+      resources: [
+        `arn:aws:dynamodb:${region}:${account}:table/gosteady-${p}-patients/index/*`,
+        `arn:aws:dynamodb:${region}:${account}:table/gosteady-${p}-activity/index/*`,
+      ],
+    }));
+    // Bedrock — us geo inference profiles (same policy as coach-api).
+    this.coachDaily.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['bedrock:InvokeModel'],
+      resources: [
+        `arn:aws:bedrock:*:${account}:inference-profile/us.anthropic.*`,
+        'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5',
+        'arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-4-8',
+        'arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
+        // Amazon Nova kept as a no-form fallback.
+        `arn:aws:bedrock:*:${account}:inference-profile/us.amazon.*`,
+        'arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0',
+      ],
+    }));
+
+    // EventBridge hourly schedule — the patient-local-hour gate is in-handler.
+    new events.Rule(this, 'CoachDailySchedule', {
+      ruleName: `gosteady-${p}-coach-daily-hourly`,
+      description: 'AI Coach C2: invoke coach-daily once per hour',
+      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      targets: [new events_targets.LambdaFunction(this.coachDaily)],
+    });
+
+    const coachDailyErrorsAlarm = new cloudwatch.Alarm(this, 'CoachDailyErrors', {
+      alarmName: `gosteady-${p}-coach-daily-errors`,
+      alarmDescription:
+        'coach-daily Lambda Errors > 0 in 1h. Check /aws/lambda/gosteady-{env}-coach-daily.',
+      metric: this.coachDaily.metricErrors({ period: cdk.Duration.hours(1), statistic: 'Sum' }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    coachDailyErrorsAlarm.addAlarmAction(new cloudwatch_actions.SnsAction(opsTopic));
 
     // ── Outputs ──────────────────────────────────────────────────
     new cdk.CfnOutput(this, 'ActivityProcessorArn', {

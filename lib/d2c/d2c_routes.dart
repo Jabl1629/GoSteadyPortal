@@ -20,4 +20,10 @@ class D2CRoutes {
   static String get history => '$prefix/history';
   static String get careTeam => '$prefix/care-team';
   static String get account => '$prefix/account';
+
+  /// The Coach ("Steady") tab + its "What Steady knows about you" memory
+  /// sub-route (ai-coach-c1-text-chat.md §5.7). Getters — resolved against
+  /// [prefix] so both the preview hub and the live app route correctly.
+  static String get coach => '$prefix/coach';
+  static String get coachMemory => '$prefix/coach/memory';
 }

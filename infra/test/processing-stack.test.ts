@@ -59,6 +59,7 @@ describe('ProcessingStack — Phase 1B revision', () => {
       alertActionsTimeoutSeconds: 10,
       patientMgmtMemoryMb: 256,
       patientMgmtTimeoutSeconds: 15,
+      coachEnabled: false,
   };
 
   const security = new SecurityStack(app, 'TestSecurityForProcessing', { config });

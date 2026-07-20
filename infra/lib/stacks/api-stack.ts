@@ -1245,6 +1245,113 @@ export class ApiStack extends cdk.Stack {
     });
     careCircleErrorsAlarm.addAlarmAction(snsAction);
 
+    // ════════════════════════════════════════════════════════════════
+    // AI Coach C1 — Steady text chat + memory (ai-coach-c1-text-chat.md)
+    // ════════════════════════════════════════════════════════════════
+    //
+    // The repo's first Bedrock consumer. All routes bind the D2C pool
+    // authorizer. Reactive chat only (proactive coach-daily is C2). Reads
+    // Activity for the deterministic digest; writes CoachMessages / CoachMemory
+    // (CMK). Gated by config.coachEnabled (global kill switch) + a per-patient
+    // `coachEnabled` attr + an optional COACH_ALLOWLIST trial cohort.
+    const coachApi = new ProcessingLambda(this, 'CoachApi', {
+      config,
+      functionName: `gosteady-${env}-coach-api`,
+      handlerDir: path.join(__dirname, '..', '..', 'lambda', 'coach-api'),
+      description: 'AI Coach (Steady) — D2C text chat + memory',
+      memoryMb: config.patientMgmtMemoryMb,
+      timeoutSeconds: config.patientMgmtTimeoutSeconds,
+      powertoolsLayer,
+      tracingActive: true,
+      environment: {
+        ENVIRONMENT: env,
+        COACH_MESSAGES_TABLE: dataStack.coachMessagesTable.tableName,
+        COACH_MEMORY_TABLE: dataStack.coachMemoryTable.tableName,
+        ACTIVITY_TABLE: dataStack.activityTable.tableName,
+        PATIENTS_TABLE: dataStack.patientsTable.tableName,
+        USERS_TABLE: dataStack.usersTable.tableName,
+        COACH_ENABLED: config.coachEnabled ? 'true' : 'false',
+        // Claude Haiku 4.5 (voice + triage) — Anthropic access granted 2026-07-19
+        // (use-case form + subscription). Sonnet 5 AND Opus 4.8 are both gated
+        // behind AWS Sales for this account; Haiku is the invocable Claude tier.
+        // Upgrade COACH_MODEL_ID to Sonnet/Opus once Sales clears them.
+        COACH_MODEL_ID: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+        COACH_TRIAGE_MODEL_ID: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+        // COACH_ALLOWLIST left unset = all patients; set to a comma list of
+        // patientIds to gate the initial trial cohort.
+      },
+    });
+    // RW: coach tables (turns + memory facts). Read: Activity (digest) +
+    // Patients (walker resolution via cognitoUserId + the kill-switch attr).
+    dataStack.coachMessagesTable.grantReadWriteData(coachApi.function);
+    dataStack.coachMemoryTable.grantReadWriteData(coachApi.function);
+    dataStack.activityTable.grantReadData(coachApi.function);
+    dataStack.patientsTable.grantReadData(coachApi.function);
+    dataStack.usersTable.grantReadWriteData(coachApi.function);  // C3: coach prefs (tone)
+    identityKey.grantEncryptDecrypt(coachApi.function);
+    auditKey.grantEncryptDecrypt(coachApi.function);
+    // Bedrock InvokeModel — Opus 4.8 (chat) + Haiku 4.5 (triage) via the us
+    // geo inference profiles. A us. profile fans out to per-region foundation
+    // models, so both the profile ARN and the underlying FM ARNs must be
+    // allowed. Scoped to the two model families (OQ-1: tighten regions at
+    // launch once the calling region is fixed).
+    coachApi.function.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['bedrock:InvokeModel'],
+        resources: [
+          // us geo inference profiles + the foundation models they fan out to.
+          `arn:aws:bedrock:*:${this.account}:inference-profile/us.anthropic.*`,
+          'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5',
+          'arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-4-8',
+          'arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
+          // Amazon Nova kept as a no-form fallback.
+          `arn:aws:bedrock:*:${this.account}:inference-profile/us.amazon.*`,
+          'arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0',
+        ],
+      }),
+    );
+
+    const coachApiIntegration = new HttpLambdaIntegration(
+      'CoachApiIntegration',
+      coachApi.function,
+    );
+    const coachRoutes: Array<[apigwv2.HttpMethod, string]> = [
+      [apigwv2.HttpMethod.POST, '/api/v1/d2c/coach/chat'],
+      [apigwv2.HttpMethod.GET, '/api/v1/d2c/coach/thread'],
+      [apigwv2.HttpMethod.GET, '/api/v1/d2c/coach/inbox'],       // C2 proactive note
+      [apigwv2.HttpMethod.GET, '/api/v1/d2c/coach/memory'],
+      [apigwv2.HttpMethod.POST, '/api/v1/d2c/coach/memory'],
+      [apigwv2.HttpMethod.PATCH, '/api/v1/d2c/coach/memory/{factId}'],
+      [apigwv2.HttpMethod.DELETE, '/api/v1/d2c/coach/memory/{factId}'],
+      [apigwv2.HttpMethod.GET, '/api/v1/d2c/coach/prefs'],       // C3 tone/SMS prefs
+      [apigwv2.HttpMethod.PATCH, '/api/v1/d2c/coach/prefs'],
+    ];
+    for (const [method, routePath] of coachRoutes) {
+      this.httpApi.addRoutes({
+        path: routePath,
+        methods: [method],
+        integration: coachApiIntegration,
+        authorizer: d2cAuthorizer,
+      });
+    }
+
+    const coachApiErrorsAlarm = new cloudwatch.Alarm(this, 'CoachApiErrors', {
+      alarmName: `gosteady-${env}-coach-api-errors`,
+      alarmDescription:
+        'coach-api Lambda Errors > 0 in 5 min — uncaught exception in the ' +
+        'AI Coach chat/memory handler. Check /aws/lambda/gosteady-{env}-coach-api.',
+      metric: coachApi.function.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    coachApiErrorsAlarm.addAlarmAction(snsAction);
+
     // ── 2A-DL outputs ──────────────────────────────────────────────
     new cdk.CfnOutput(this, 'DeviceApiName', {
       value: deviceApi.function.functionName,

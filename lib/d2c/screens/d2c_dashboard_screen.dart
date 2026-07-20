@@ -28,6 +28,8 @@ class D2CDashboardScreen extends StatelessWidget {
     required this.snapshot,
     this.onSwitchViewer,
     this.onAckAlert,
+    this.coachUnread = false,
+    this.onOpenCoach,
   });
 
   final D2CDashboardSnapshot snapshot;
@@ -41,6 +43,15 @@ class D2CDashboardScreen extends StatelessWidget {
   /// permitted for owners AND Care Circle members (d2c-care-circle.md D3).
   /// Null in the preview build (button stays visual-only).
   final void Function(WalkerAlert alert)? onAckAlert;
+
+  /// When true (and the viewer is the walker user), a "new message from
+  /// Steady" nudge appears near the top of the activity feed to pull the
+  /// user into the Coach tab — the re-engagement hook (umbrella's Whoop
+  /// lesson: the morning message is the pull). Cleared once Coach opens.
+  final bool coachUnread;
+
+  /// Tapping the coach nudge → open the Coach tab (the host marks it read).
+  final VoidCallback? onOpenCoach;
 
   bool get _isWalkerUser => snapshot.viewer.isWalkerUser;
 
@@ -98,6 +109,10 @@ class D2CDashboardScreen extends StatelessWidget {
               children: [
                 _GreetingCard(snapshot: snapshot),
                 const SizedBox(height: 18),
+                if (coachUnread && _isWalkerUser && onOpenCoach != null) ...[
+                  _CoachNudge(onTap: onOpenCoach!),
+                  const SizedBox(height: 18),
+                ],
                 _StatRow(today: snapshot.today, view: view),
                 const SizedBox(height: 12),
                 _WeekContextLine(today: snapshot.today, view: view),
@@ -188,6 +203,108 @@ class D2CDashboardScreen extends StatelessWidget {
         ),
         const SizedBox(width: 4),
       ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Coach nudge — "new message from Steady", pulls the walker user into the
+// Coach tab (ai-coach-c1-text-chat.md §5.7). Gently pops in; clears once
+// Coach is opened. Colors verified WCAG-AA on the sage tint (§5.7.1).
+// ─────────────────────────────────────────────────────────────────────
+
+class _CoachNudge extends StatelessWidget {
+  const _CoachNudge({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 340),
+      curve: Curves.easeOutBack,
+      tween: Tween(begin: 0.0, end: 1.0),
+      builder: (context, t, child) => Opacity(
+        opacity: t.clamp(0.0, 1.0),
+        child: Transform.scale(scale: 0.97 + 0.03 * t, child: child),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(18),
+          child: Ink(
+            decoration: BoxDecoration(
+              color: AppTheme.sage.withOpacity(0.10),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: AppTheme.sage.withOpacity(0.22)),
+            ),
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            child: Row(
+              children: [
+                // Circular Steady avatar with an unread dot.
+                Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Container(
+                      width: 42,
+                      height: 42,
+                      decoration: const BoxDecoration(
+                        color: AppTheme.sage,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.auto_awesome,
+                          size: 20, color: Colors.white),
+                    ),
+                    Positioned(
+                      right: -1,
+                      top: -1,
+                      child: Container(
+                        width: 13,
+                        height: 13,
+                        decoration: BoxDecoration(
+                          color: AppTheme.statusAlert,
+                          shape: BoxShape.circle,
+                          border:
+                              Border.all(color: AppTheme.warmWhite, width: 2),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(width: 13),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'New message from Steady',
+                        style: TextStyle(
+                          color: AppTheme.textDark,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      SizedBox(height: 2),
+                      Text(
+                        'Your AI walking coach has a hello for you',
+                        style: TextStyle(
+                          color: AppTheme.textSoft,
+                          fontSize: 12.5,
+                          height: 1.3,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Icon(Icons.chevron_right_rounded,
+                    size: 22, color: AppTheme.sage),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

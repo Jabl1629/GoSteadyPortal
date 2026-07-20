@@ -205,6 +205,13 @@ export interface GoSteadyEnvConfig {
    * without timing out before the rollback path runs).
    */
   readonly patientMgmtTimeoutSeconds: number;
+  /**
+   * AI Coach global kill switch (ai-coach-c1-text-chat.md §5.9). When false,
+   * coach-api rejects chat turns without a redeploy. Per-patient opt-out is a
+   * `coachEnabled` attr on the Patient row; the trial cohort is further gated
+   * by the coach-api COACH_ALLOWLIST env var.
+   */
+  readonly coachEnabled: boolean;
 }
 
 /**
@@ -267,6 +274,8 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     // Phase 2A-UM-P (2026-05-24) — patient-mgmt defaults.
     patientMgmtMemoryMb: 256,
     patientMgmtTimeoutSeconds: 15,
+    // AI Coach C1 (2026-07-18) — on in dev for the trial build.
+    coachEnabled: true,
   },
   prod: {
     envName: 'Production',
@@ -327,5 +336,7 @@ export const ENVIRONMENTS: Record<string, GoSteadyEnvConfig> = {
     // Phase 2A-UM-P (2026-05-24) — same in dev + prod.
     patientMgmtMemoryMb: 256,
     patientMgmtTimeoutSeconds: 15,
+    // AI Coach C1 (2026-07-18) — default OFF in prod until launch.
+    coachEnabled: false,
   },
 };

@@ -7,6 +7,7 @@ import '../theme/app_theme.dart';
 import 'd2c_preview.dart';
 import 'd2c_routes.dart';
 import 'data/d2c_repository.dart';
+import 'live/d2c_live_screens.dart';
 import 'screens/d2c_account_screens.dart';
 import 'screens/d2c_care_team_screen.dart';
 import 'screens/d2c_history_screen.dart';
@@ -107,6 +108,18 @@ GoRouter _buildRouter(MockAuthService auth) {
           repository: D2CMockRepository(),
           viewerIsAdmin: true,
         ),
+      ),
+
+      // ── Coach ("Steady") — mock-backed hosts (same as the live app) ─
+      GoRoute(
+        path: D2CRoutes.coach,
+        builder: (_, __) =>
+            const D2CCoachHost(repository: D2CMockRepository()),
+      ),
+      GoRoute(
+        path: D2CRoutes.coachMemory,
+        builder: (_, __) =>
+            const D2CCoachMemoryHost(repository: D2CMockRepository()),
       ),
 
       // ── Account + drill-downs ─────────────────────────────────────

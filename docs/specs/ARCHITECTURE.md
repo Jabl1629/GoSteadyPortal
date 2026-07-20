@@ -1512,6 +1512,12 @@ Phase 2B replaces the Flutter portal's mock data with live AWS-backed reads + wr
 
 ---
 
+### D2C AI Coach — "Steady" 🟡 **C1–C3 built + deployed (dev) 2026-07-19**
+
+An in-app AI walking coach for D2C walker/rollator users — text chat (C1) + proactive morning message (C2) + goal-aware memory/personalization (C3). Trial scope is C1–C3; C4 (voice) is post-trial. Rides **existing** stacks (no new stack): **Data** gains 2 CMK-encrypted tables (`coach-messages`, a raw table with a 12-mo TTL; `coach-memory`, via the `IdentityTable` construct, no TTL); **Api** gains `coach-api` (8 D2C `/coach/*` routes behind `d2cAuthorizer`); **Processing** gains `coach-daily` (hourly EventBridge sweep, deployed **dormant** behind `COACH_DAILY_ENABLED` — no autonomous sends until flipped). Generation runs on **Amazon Bedrock — Claude Haiku 4.5** (`bedrock-runtime converse`; Sonnet 5 / Opus 4.8 remain AWS-Sales-gated on this account, so upgrading the voice is an env-only flip once cleared). Safety is deterministic and model-agnostic (keyword triage → scripted 988/911 responses → output lint). The live D2C app (Coach tab included) is deployed to `dev.app.gosteady.co`. Full specs: [ai-coach.md](ai-coach.md) (umbrella) + [C1](ai-coach-c1-text-chat.md) / [C2](ai-coach-c2-proactive-message.md) / [C3](ai-coach-c3-memory-personalization.md).
+
+---
+
 ### ❌ Cut from Roadmap
 
 The following phases are **removed from the active plan** and reclassified as conditional future work. They will only be reopened on a triggering event (e.g., signed partner contract requiring the capability).

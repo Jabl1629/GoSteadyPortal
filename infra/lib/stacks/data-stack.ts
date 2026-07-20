@@ -56,6 +56,12 @@ export class DataStack extends cdk.Stack {
   /** Alert History — PK migrated serialNumber → patientId; 24-mo TTL on expiresAt. */
   public readonly alertTable: dynamodb.Table;
 
+  // ── Coach tables (AI Coach C1 — ai-coach-c1-text-chat.md) ─────────
+  /** CoachMessages — transcript + (C2) inbox; CMK + 12-mo TTL. */
+  public readonly coachMessagesTable: dynamodb.Table;
+  /** CoachMemory — profile facts + summary; CMK, no TTL (user-controlled). */
+  public readonly coachMemoryTable: dynamodb.Table;
+
   constructor(scope: Construct, id: string, props: DataStackProps) {
     super(scope, id, props);
 
@@ -146,6 +152,40 @@ export class DataStack extends cdk.Stack {
       partitionKey: { name: 'patientId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'assignedAt', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // ── Coach tables (AI Coach C1 — ai-coach-c1-text-chat.md §5.1/§5.2) ──
+    // CoachMemory: profile facts + rolling summary; user-controlled, NO TTL
+    // (Q8/L9) → IdentityTable (CMK). PK patientId, SK itemId
+    // ('PROFILE#<id>' / 'GOAL#<id>' facts + a 'SUMMARY' singleton).
+    const coachMemory = new IdentityTable(this, 'CoachMemory', {
+      config,
+      tableSuffix: 'coach-memory',
+      partitionKey: { name: 'patientId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'itemId', type: dynamodb.AttributeType.STRING },
+      identityKey,
+    });
+    this.coachMemoryTable = coachMemory.table;
+
+    // CoachMessages: chat transcript + (C2) proactive inbox. Sensitive
+    // disclosures → CMK, plus a 12-mo TTL on `expiresAt` (Q8/L9). The
+    // IdentityTable construct has no TTL prop, so this is a raw table
+    // mirroring care-invites (auth-stack). PK patientId, SK 'TURN#<ts>#<id>'
+    // (chat) / 'INBOX#<date>' (reserved for C2).
+    const coachIsProd = p === 'prod';
+    this.coachMessagesTable = new dynamodb.Table(this, 'CoachMessages', {
+      tableName: `gosteady-${p}-coach-messages`,
+      partitionKey: { name: 'patientId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      billingMode:
+        config.dynamoBillingMode === 'PAY_PER_REQUEST'
+          ? dynamodb.BillingMode.PAY_PER_REQUEST
+          : dynamodb.BillingMode.PROVISIONED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: config.pitrEnabled },
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: identityKey,
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: coachIsProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
     // ──────────────────────────────────────────────────────────────

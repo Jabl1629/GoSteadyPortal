@@ -370,3 +370,202 @@ class LoginCodeVerifyResult {
         session: (json['session'] as String?) ?? '',
       );
 }
+
+// ── Coach ("Steady") wire DTOs (ai-coach-c1-text-chat.md §5.7) ─────────
+//
+// Routes: all under the D2C authorizer at `/api/v1/d2c/coach/*`. These
+// mirror the deployed contract exactly; the live repo maps them onto the
+// distinctly-named display models (Coach* in d2c_mock_data.dart), so there
+// is no dual-definition collision (the audit's CareNote lesson).
+
+/// Author of a transcript turn on the wire (`user` | `coach`).
+enum CoachTurnRoleWire {
+  user('user'),
+  coach('coach');
+
+  final String wireValue;
+  const CoachTurnRoleWire(this.wireValue);
+
+  static CoachTurnRoleWire fromWire(Object? raw) {
+    final s = raw?.toString() ?? '';
+    return CoachTurnRoleWire.values.firstWhere(
+      (v) => v.wireValue == s,
+      // An unrecognized role reads as `coach` — a system-authored turn is
+      // the safer default to render than impersonating the user.
+      orElse: () => CoachTurnRoleWire.coach,
+    );
+  }
+}
+
+/// Provenance of a memory fact on the wire (`user` | `extracted`).
+enum CoachFactSourceWire {
+  user('user'),
+  extracted('extracted');
+
+  final String wireValue;
+  const CoachFactSourceWire(this.wireValue);
+
+  static CoachFactSourceWire fromWire(Object? raw) {
+    final s = raw?.toString() ?? '';
+    return CoachFactSourceWire.values.firstWhere(
+      (v) => v.wireValue == s,
+      orElse: () => CoachFactSourceWire.extracted,
+    );
+  }
+}
+
+/// Lane of a memory fact on the wire (`profile` | `goal`).
+enum CoachFactKindWire {
+  profile('profile'),
+  goal('goal');
+
+  final String wireValue;
+  const CoachFactKindWire(this.wireValue);
+
+  static CoachFactKindWire fromWire(Object? raw) {
+    final s = raw?.toString() ?? '';
+    return CoachFactKindWire.values.firstWhere(
+      (v) => v.wireValue == s,
+      orElse: () => CoachFactKindWire.profile,
+    );
+  }
+}
+
+/// One transcript turn from `GET /coach/thread`.
+class CoachTurnDto {
+  final String id;
+  final CoachTurnRoleWire role;
+  final String text;
+  final DateTime? createdAt;
+  final bool flagged;
+
+  const CoachTurnDto({
+    required this.id,
+    required this.role,
+    required this.text,
+    required this.createdAt,
+    required this.flagged,
+  });
+
+  factory CoachTurnDto.fromJson(Map<String, dynamic> json) => CoachTurnDto(
+        id: (json['id'] as String?) ?? '',
+        role: CoachTurnRoleWire.fromWire(json['role']),
+        text: (json['text'] as String?) ?? '',
+        createdAt: DateTime.tryParse((json['createdAt'] as String?) ?? ''),
+        flagged: (json['flagged'] as bool?) ?? false,
+      );
+}
+
+/// `GET /coach/thread` → the paginated transcript for the tab.
+class CoachThreadDto {
+  final List<CoachTurnDto> messages;
+
+  const CoachThreadDto({required this.messages});
+
+  factory CoachThreadDto.fromJson(Map<String, dynamic> json) {
+    final raw = (json['messages'] as List<dynamic>?) ?? const [];
+    return CoachThreadDto(
+      messages: raw
+          .map((e) => CoachTurnDto.fromJson(e as Map<String, dynamic>))
+          .toList(growable: false),
+    );
+  }
+}
+
+/// `POST /coach/chat` → the coach's non-streamed reply for one turn.
+class CoachChatReplyDto {
+  final String reply;
+  final bool flagged;
+
+  const CoachChatReplyDto({required this.reply, required this.flagged});
+
+  factory CoachChatReplyDto.fromJson(Map<String, dynamic> json) =>
+      CoachChatReplyDto(
+        reply: (json['reply'] as String?) ?? '',
+        flagged: (json['flagged'] as bool?) ?? false,
+      );
+}
+
+/// One profile/goal fact from `GET /coach/memory` (and the `fact` sub-object
+/// of the `POST`/`PATCH` memory responses).
+class CoachFactDto {
+  final String factId;
+  final String text;
+  final CoachFactSourceWire source;
+  final CoachFactKindWire kind;
+
+  const CoachFactDto({
+    required this.factId,
+    required this.text,
+    required this.source,
+    required this.kind,
+  });
+
+  factory CoachFactDto.fromJson(Map<String, dynamic> json) => CoachFactDto(
+        factId: (json['factId'] as String?) ?? '',
+        text: (json['text'] as String?) ?? '',
+        source: CoachFactSourceWire.fromWire(json['source']),
+        kind: CoachFactKindWire.fromWire(json['kind']),
+      );
+}
+
+/// `GET /coach/memory` → editable facts + the rolling summary.
+class CoachMemoryDto {
+  final List<CoachFactDto> facts;
+  final String summary;
+
+  const CoachMemoryDto({required this.facts, required this.summary});
+
+  factory CoachMemoryDto.fromJson(Map<String, dynamic> json) {
+    final raw = (json['facts'] as List<dynamic>?) ?? const [];
+    return CoachMemoryDto(
+      facts: raw
+          .map((e) => CoachFactDto.fromJson(e as Map<String, dynamic>))
+          .toList(growable: false),
+      summary: (json['summary'] as String?) ?? '',
+    );
+  }
+}
+
+/// One proactive note from `GET /coach/inbox` (C2). `coach-daily` writes at
+/// most one `INBOX#<local-date>` item per patient-local day; the route
+/// returns the newest (or `{"note": null}` when none exists yet).
+class CoachNoteDto {
+  final String id; // the INBOX#<date> sort key
+  final String date; // YYYY-MM-DD (patient-local)
+  final String text;
+  final String themeType; // above_typical_activity | improving_trend | ...
+  final DateTime? createdAt;
+
+  const CoachNoteDto({
+    required this.id,
+    required this.date,
+    required this.text,
+    required this.themeType,
+    required this.createdAt,
+  });
+
+  factory CoachNoteDto.fromJson(Map<String, dynamic> json) => CoachNoteDto(
+        id: (json['id'] as String?) ?? '',
+        date: (json['date'] as String?) ?? '',
+        text: (json['text'] as String?) ?? '',
+        themeType: (json['themeType'] as String?) ?? '',
+        createdAt: DateTime.tryParse((json['createdAt'] as String?) ?? ''),
+      );
+}
+
+/// `GET /coach/prefs` (and the echo on `PATCH`) → the walker user's coach
+/// preferences: the C3 conversational [tone] + the C2 SMS-teaser opt-in.
+/// The `PATCH` echo may omit an unchanged key, so callers that need the full
+/// pair should re-read rather than trust a partial echo.
+class CoachPrefsDto {
+  final String tone; // "warm" | "direct"
+  final bool coachSmsTeaser; // opt-in; off by default (C2-D8)
+
+  const CoachPrefsDto({required this.tone, required this.coachSmsTeaser});
+
+  factory CoachPrefsDto.fromJson(Map<String, dynamic> json) => CoachPrefsDto(
+        tone: (json['tone'] as String?) ?? 'warm',
+        coachSmsTeaser: (json['coachSmsTeaser'] as bool?) ?? false,
+      );
+}

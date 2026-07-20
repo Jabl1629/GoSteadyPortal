@@ -54,14 +54,38 @@ describe('DataStack', () => {
       alertActionsTimeoutSeconds: 10,
       patientMgmtMemoryMb: 256,
       patientMgmtTimeoutSeconds: 15,
+      coachEnabled: false,
   };
 
   const security = new SecurityStack(app, 'TestSecurityForData', { config });
   const stack = new DataStack(app, 'TestData', { config, securityStack: security });
   const template = Template.fromStack(stack);
 
-  test('creates 7 DynamoDB tables total (4 identity + 3 telemetry)', () => {
-    template.resourceCountIs('AWS::DynamoDB::Table', 7);
+  test('creates 9 DynamoDB tables total (4 identity + 3 telemetry + 2 coach)', () => {
+    template.resourceCountIs('AWS::DynamoDB::Table', 9);
+  });
+
+  test('creates CoachMemory table (CMK, PK patientId + SK itemId, no TTL)', () => {
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      TableName: 'gosteady-test-coach-memory',
+      KeySchema: [
+        { AttributeName: 'patientId', KeyType: 'HASH' },
+        { AttributeName: 'itemId', KeyType: 'RANGE' },
+      ],
+      SSESpecification: { SSEEnabled: true, SSEType: 'KMS' },
+    });
+  });
+
+  test('creates CoachMessages table (CMK + expiresAt TTL, PK patientId + SK sk)', () => {
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      TableName: 'gosteady-test-coach-messages',
+      KeySchema: [
+        { AttributeName: 'patientId', KeyType: 'HASH' },
+        { AttributeName: 'sk', KeyType: 'RANGE' },
+      ],
+      SSESpecification: { SSEEnabled: true, SSEType: 'KMS' },
+      TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+    });
   });
 
   test('creates Organizations table (CMK-encrypted, single-table hierarchy)', () => {
