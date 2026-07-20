@@ -108,6 +108,42 @@ AUDIT_D2C_AGREEMENT_ACKNOWLEDGED = "d2c.agreement_acknowledged"
 # QR re-login (d2c-qr-relogin) — masked, never the raw phone.
 AUDIT_D2C_LOGIN_CODE_SENT = "d2c.login_code_sent"
 AUDIT_D2C_LOGIN_CODE_VERIFIED = "d2c.login_code_verified"
+# Timezone capture (d2c-timezone-capture.md) — tz string only, not PII.
+AUDIT_D2C_TIMEZONE_SET = "d2c.patient.timezone_set"
+AUDIT_D2C_TIMEZONE_HEALED = "d2c.patient.timezone_healed"
+
+
+def _apply_timezone(
+    client_id: str, facility_id: str, patient_id: str, tz: str, *, force: bool
+) -> bool:
+    """Stamp the IANA tz on the Patient row (day-bucketing) AND the synthetic
+    facility org row (behavioral-alert timing) — D2C has one facility per
+    household (d2c-timezone-capture.md D4). `force=True` overwrites (active
+    claim, claimer's location authoritative); `force=False` fills only an unset
+    (null/`UTC`) zone (passive self-heal). Returns True iff anything was
+    written. A conditional miss (already a real zone) is a no-op, not an error.
+    """
+    wrote = False
+    for table, key in (
+        (_patients, {"patientId": patient_id}),
+        (_orgs, {"clientId": client_id, "sk": f"facility#{facility_id}"}),
+    ):
+        kwargs: dict[str, Any] = {
+            "Key": key,
+            "UpdateExpression": "SET #tz = :tz",
+            "ExpressionAttributeNames": {"#tz": "timezone"},
+            "ExpressionAttributeValues": {":tz": tz},
+        }
+        if not force:
+            kwargs["ConditionExpression"] = "attribute_not_exists(#tz) OR #tz = :utc"
+            kwargs["ExpressionAttributeValues"][":utc"] = "UTC"
+        try:
+            table.update_item(**kwargs)
+            wrote = True
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+    return wrote
 
 # Pure claim helpers (household anchor + identity split + contact masking) live
 # in claim_logic.py so they're unit-testable without boto3/powertools.
@@ -116,6 +152,7 @@ from claim_logic import (  # noqa: E402
     mask_contact,
     resolve_household,
     resolve_identity,
+    valid_iana_tz,
 )
 
 
@@ -126,6 +163,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
     try:
         if route == "POST /api/v1/claim":
             return _claim(event)
+        if route == "PATCH /api/v1/d2c/patients/{id}/timezone":
+            return _set_timezone(event)
         if route == "GET /api/v1/public/walkers/{walkerId}":
             return _public_lookup(event)
         if route == "GET /api/v1/public/walkers/{walkerId}/recipients":
@@ -146,6 +185,7 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
     require_authenticated(claims)
     sub = claims["userId"]
     body = _parse_body(event)
+    tz = valid_iana_tz(body.get("timezone"))  # d2c-timezone-capture.md
     walker_id = (body.get("walkerId") or "").strip()
     if not walker_id:
         raise ApiError(code="INVALID_REQUEST", message="walkerId required", status=400)
@@ -300,6 +340,20 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
             patient_item["cognitoUserId"] = sub
         _patients.put_item(Item=patient_item)
 
+    # Timezone (d2c-timezone-capture.md): stamp the browser IANA zone captured
+    # at setup onto the patient (day-bucketing) + synthetic facility (alert
+    # timing). The active claimer's current location is authoritative → force.
+    if tz:
+        _apply_timezone(client_id, facility_id, patient_id, tz, force=True)
+        emit_audit(
+            event=AUDIT_D2C_TIMEZONE_SET,
+            actor={"userId": sub, "role": "household_owner", "clientId": client_id},
+            subject={"patientId": patient_id, "clientId": client_id},
+            action="event",
+            extra={"timezone": tz},
+            request_id=_request_id(event),
+        )
+
     # 3. RoleAssignments row (household Admin). `isWalkerUser` marks whether
     #    THIS account user is the walker (true=solo, false=caregiver). scoped*
     #    ids are OMITTED (DynamoDB rejects empty sets; absent = unrestricted in
@@ -370,6 +424,55 @@ def _claim(event: dict[str, Any]) -> dict[str, Any]:
 
     return ok_response({"patient": _patient_view(patient_item), "alreadyClaimed": False},
                        status=201)
+
+
+# ── PATCH /api/v1/d2c/patients/{id}/timezone ───────────────────────────
+
+def _set_timezone(event: dict[str, Any]) -> dict[str, Any]:
+    """Walker self-heals their own Patient (+ synthetic facility) timezone from
+    the browser's detected IANA zone (d2c-timezone-capture.md §4.4). Only the
+    walker (`isWalkerUser`) who owns the Patient row (`cognitoUserId == sub`)
+    may call it, and only an unset (null/`UTC`) zone is filled — a real zone is
+    never overwritten (idempotent → `healed:false`)."""
+    claims = extract_claims(event)
+    require_authenticated(claims)
+    if not claims.get("isWalkerUser"):
+        raise ApiError(code="FORBIDDEN",
+                       message="Only the walker can set their timezone",
+                       status=403)
+    sub = claims["userId"]
+    patient_id = ((event.get("pathParameters") or {}).get("id") or "").strip()
+    if not patient_id:
+        raise ApiError(code="INVALID_REQUEST", message="patient id required",
+                       status=400)
+    tz = valid_iana_tz(_parse_body(event).get("timezone"))
+    if not tz:
+        raise ApiError(code="INVALID_TIMEZONE",
+                       message="valid IANA timezone required", status=400)
+    patient = _patients.get_item(Key={"patientId": patient_id}).get("Item")
+    if not patient:
+        raise ApiError(code="PATIENT_NOT_FOUND", message="Patient not found",
+                       status=404)
+    # Ownership: the walker owns their own Patient row (cognitoUserId == sub);
+    # this also blocks a caregiver-owner (whose patient has a different/no sub).
+    if patient.get("cognitoUserId") != sub:
+        raise ApiError(code="FORBIDDEN", message="Not your patient", status=403)
+    healed = _apply_timezone(
+        str(patient.get("clientId") or ""),
+        str(patient.get("facilityId") or ""),
+        patient_id, tz, force=False,
+    )
+    if healed:
+        emit_audit(
+            event=AUDIT_D2C_TIMEZONE_HEALED,
+            actor={"userId": sub, "role": "household_owner",
+                   "clientId": patient.get("clientId")},
+            subject={"patientId": patient_id, "clientId": patient.get("clientId")},
+            action="event",
+            extra={"timezone": tz},
+            request_id=_request_id(event),
+        )
+    return ok_response({"healed": healed, "timezone": tz})
 
 
 # ── GET /public/walkers/{walkerId} ─────────────────────────────────────

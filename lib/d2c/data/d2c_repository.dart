@@ -86,6 +86,12 @@ abstract class D2CRepository {
   /// permitted for members per d2c-care-circle.md D3.
   Future<void> ackAlert(String patientId, String alertId, {String? notes});
 
+  /// Best-effort self-heal of the walker's Patient timezone from the browser's
+  /// detected IANA zone (d2c-timezone-capture.md §4.4). The server only fills
+  /// an unset (null/`UTC`) zone and requires the caller to be the walker; this
+  /// must never block or fail the dashboard.
+  Future<void> setPatientTimezone(String patientId, String timeZone);
+
   // ── Coach "Steady" (ai-coach-c1-text-chat.md §5.7) ─────────────
   // The coach conversation + memory are private to the walker user.
 
@@ -296,6 +302,9 @@ class D2CMockRepository implements D2CRepository {
 
   @override
   Future<void> ackAlert(String patientId, String alertId, {String? notes}) async {}
+
+  @override
+  Future<void> setPatientTimezone(String patientId, String timeZone) async {}
 
   // ── Coach "Steady" (in-memory mock state so demo edits stick) ──
   // Mirrors the CareCircle `_members`/`_invites` static-list pattern: the

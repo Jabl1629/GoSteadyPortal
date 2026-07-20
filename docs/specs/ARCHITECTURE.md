@@ -1518,6 +1518,8 @@ An in-app AI activity coach for D2C walker/rollator users — text chat (C1) + p
 
 **D2C walker-alert suppression (2026-07-20, prod + dev).** The walker/device user's own dashboard hides the behavioral activity-judgment alerts about themselves (`no_activity_today` / `below_typical_activity` / `declining_trend`) — those read as clinical to the person being monitored and are the caregiver's concern; device-health alerts (offline / battery) stay visible. Enforced server-side in `patient-api` (`queries.hide_walker_alerts`, keyed on the D2C-only `custom:isWalkerUser` claim, normalized in `_shared/api_authz.extract_claims`) with a mirror in the Flutter dashboard; non-walker Care Circle caregivers are unaffected. The signal is made reliable by a `d2c-pre-token` self-heal (absent `isWalkerUser` on a legacy owner row → derived from role). Firm default, no per-user toggle. E2E: `infra/scripts/e2e-walker-alerts.py`.
 
+**D2C timezone capture (2026-07-20, prod + dev).** D2C patients were created with no `timezone` → day-bucketing (session `date`, "Today's walks") and behavioral-alert timing all defaulted to UTC, wrong for non-UTC users (surfaced as "Today's walks" showing last night's sessions). Now the browser's IANA zone (`Intl…timeZone`) is captured **automatically**: stamped on the Patient (day-bucketing) + synthetic facility (alert timing) at claim, and self-healed on dashboard load for existing patients — gated on `custom:isWalkerUser` (a cross-tz family viewer can't clobber it) and fill-unset-only (no travel flapping). New route `PATCH /api/v1/d2c/patients/{id}/timezone` on `d2c-claim`. Full spec: [`d2c-timezone-capture.md`](d2c-timezone-capture.md).
+
 ---
 
 ### ❌ Cut from Roadmap

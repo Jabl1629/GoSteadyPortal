@@ -19,6 +19,7 @@ from claim_logic import (  # noqa: E402
     mask_contact,
     resolve_household,
     resolve_identity,
+    valid_iana_tz,
 )
 
 
@@ -158,6 +159,35 @@ class BuildLoginRecipients(unittest.TestCase):
         public, id_to_phone = build_login_recipients([], self.WID, self.PEPPER)
         self.assertEqual(public, [])
         self.assertEqual(id_to_phone, {})
+
+
+class ValidIanaTz(unittest.TestCase):
+    """Timezone-capture validation (d2c-timezone-capture.md D7) — only a
+    ZoneInfo-loadable IANA zone survives; anything else is dropped so it can't
+    poison day-bucketing (the server keeps its UTC fallback)."""
+
+    def test_valid_iana_zones(self):
+        for tz in ("America/Denver", "America/New_York", "Europe/London",
+                   "Asia/Tokyo", "UTC"):
+            self.assertEqual(valid_iana_tz(tz), tz)
+
+    def test_trims_whitespace(self):
+        self.assertEqual(valid_iana_tz("  America/Denver  "), "America/Denver")
+
+    def test_rejects_unknown_zone(self):
+        self.assertIsNone(valid_iana_tz("America/Atlantis"))
+        self.assertIsNone(valid_iana_tz("Denver"))
+
+    def test_rejects_offsets_and_garbage(self):
+        # The browser gives IANA names; offset strings / free text must NOT slip
+        # through. (Some legacy abbreviations like "MST" ARE loadable IANA keys
+        # and legitimately pass — the browser never sends them, so that's fine.)
+        for bad in ("-06:00", "UTC-6", "not-a-zone", "America/Nowhere", "12345"):
+            self.assertIsNone(valid_iana_tz(bad), f"{bad!r} should be rejected")
+
+    def test_rejects_empty_and_non_string(self):
+        for bad in ("", "   ", None, 123, {"tz": "x"}):
+            self.assertIsNone(valid_iana_tz(bad))
 
 
 if __name__ == "__main__":

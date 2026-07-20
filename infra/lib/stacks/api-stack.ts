@@ -1084,6 +1084,16 @@ export class ApiStack extends cdk.Stack {
       integration: d2cClaimIntegration,
       authorizer: d2cAuthorizer,
     });
+    // Walker self-heal of their own Patient timezone (d2c-timezone-capture.md
+    // §4.4) — D2C pool authorizer; the handler gates on isWalkerUser + owner
+    // and only fills an unset zone. Reuses d2c-claim's Patients + Organizations
+    // R/W grants (no new IAM).
+    this.httpApi.addRoutes({
+      path: '/api/v1/d2c/patients/{id}/timezone',
+      methods: [apigwv2.HttpMethod.PATCH],
+      integration: d2cClaimIntegration,
+      authorizer: d2cAuthorizer,
+    });
     // Public setup-lookup — NO authorizer (the QR landing page is
     // unauthenticated; it leaks nothing, and claim still needs a JWT).
     this.httpApi.addRoutes({

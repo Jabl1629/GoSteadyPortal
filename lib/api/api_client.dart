@@ -153,6 +153,19 @@ class ApiClient {
     return AckAlertResponse.fromJson(body);
   }
 
+  /// `PATCH /api/v1/d2c/patients/{id}/timezone` — self-heal the walker's
+  /// Patient timezone from the browser's detected IANA zone
+  /// (d2c-timezone-capture.md §4.4). Server-gated: caller must BE the walker
+  /// and own the patient, and the write only fills an unset (null/`UTC`) zone —
+  /// it never overwrites a real one. Best-effort from the dashboard load.
+  Future<void> setPatientTimezone(String patientId, String timeZone) async {
+    await _request(
+      'PATCH',
+      '$_readPrefix/patients/$patientId/timezone',
+      body: {'timezone': timeZone},
+    );
+  }
+
   // ── 2A-DL writes (deployed; wired in 2B-FAC-W follow-ups) ──────
 
   Future<DeviceResponse> provisionDevice(String serial, String patientId) async {
@@ -423,6 +436,7 @@ class ApiClient {
     String walkerId, {
     String? displayName,
     String? agreementVersion,
+    String? timeZone,
   }) async {
     final body = await _request(
       'POST',
@@ -435,6 +449,10 @@ class ApiClient {
         // setup (d2c-user-agreement.md). Stamped onto the owner's role row.
         if (agreementVersion != null && agreementVersion.isNotEmpty)
           'agreementVersion': agreementVersion,
+        // Browser IANA timezone captured at setup (d2c-timezone-capture.md);
+        // stamped on the Patient + synthetic facility so day-bucketing +
+        // behavioral-alert timing are local, not UTC.
+        if (timeZone != null && timeZone.isNotEmpty) 'timezone': timeZone,
       },
     );
     return ClaimResponse.fromJson(body);

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -11,6 +12,7 @@ import '../../api/d2c_api_models.dart';
 import '../../auth/auth_service_interface.dart';
 import '../../config/d2c_legal.dart';
 import '../../models/user.dart';
+import '../../util/timezone.dart';
 import '../rendering/metric_registry.dart';
 import 'd2c_mock_data.dart';
 import 'd2c_repository.dart';
@@ -78,9 +80,13 @@ class LiveD2CRepository implements D2CRepository {
   @override
   Future<ClaimResponse> claim(String walkerId, {String? displayName}) async {
     // Reaching claim means the walker passed the setup agreement gate
-    // (D2CAgreementPanel); record the acknowledged version server-side.
+    // (D2CAgreementPanel); record the acknowledged version server-side. Also
+    // capture the browser's IANA timezone (d2c-timezone-capture.md) so the new
+    // Patient buckets days locally, not UTC.
     final resp = await _api.claimDevice(walkerId,
-        displayName: displayName, agreementVersion: D2CLegal.agreementVersion);
+        displayName: displayName,
+        agreementVersion: D2CLegal.agreementVersion,
+        timeZone: detectIanaTimeZone());
     // The household clientId is now persisted server-side; force a token
     // refresh so custom:clientId reflects the new household (dtc_{householdId})
     // before the dashboard reads — the pre-claim bootstrap token carried
@@ -231,6 +237,12 @@ class LiveD2CRepository implements D2CRepository {
     // activity-judgment alerts about themselves. Device-health alerts pass
     // through. Reused below for the viewer framing copy.
     final viewerIsWalker = _auth.currentUser?.isWalkerUser ?? false;
+
+    // Best-effort timezone self-heal (d2c-timezone-capture.md §4.5): if the
+    // viewer IS the walker and this Patient's stored zone is still unset, fill
+    // it from the browser so days bucket locally. Fire-and-forget.
+    _maybeHealTimezone(patientId, patient.timezone, viewerIsWalker);
+
     final openAlerts = [
       for (final a in openAlertRows)
         if (!(viewerIsWalker &&
@@ -456,6 +468,10 @@ class LiveD2CRepository implements D2CRepository {
   Future<void> ackAlert(String patientId, String alertId, {String? notes}) =>
       _api.ackAlert(patientId, alertId, notes: notes);
 
+  @override
+  Future<void> setPatientTimezone(String patientId, String timeZone) =>
+      _api.setPatientTimezone(patientId, timeZone);
+
   // ── Coach "Steady" (ai-coach-c1-text-chat.md §5.7) ─────────────
 
   @override
@@ -644,6 +660,21 @@ class LiveD2CRepository implements D2CRepository {
 
   String _ymd(DateTime d) =>
       '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  /// Fire-and-forget timezone self-heal (d2c-timezone-capture.md §4.5). Only
+  /// the walker heals their own patient, and only when the stored zone is still
+  /// unset (null/empty/`UTC`); the server re-checks all of this and only fills
+  /// an unset zone, so this is a best-effort nudge. Swallows every error — a
+  /// tz write must never surface on, or block, the dashboard.
+  void _maybeHealTimezone(String patientId, String? storedTz, bool viewerIsWalker) {
+    if (!viewerIsWalker) return;
+    final stored = storedTz?.trim();
+    final isUnset = stored == null || stored.isEmpty || stored == 'UTC';
+    if (!isUnset) return;
+    final detected = detectIanaTimeZone();
+    if (detected == null || detected == stored) return;
+    unawaited(_api.setPatientTimezone(patientId, detected).catchError((_) {}));
+  }
 
   bool _isSameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;

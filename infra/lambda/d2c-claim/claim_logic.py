@@ -12,6 +12,22 @@ import hashlib
 import hmac as _hmac
 import uuid
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+
+def valid_iana_tz(raw: Any) -> str | None:
+    """A `ZoneInfo`-loadable IANA timezone string (e.g. `"America/Denver"`), or
+    None if empty / not a string / an unknown zone (d2c-timezone-capture.md D7).
+    Guards against a spoofed claim or PATCH body poisoning day-bucketing — an
+    invalid value is dropped, leaving the server's UTC fallback in place."""
+    tz = raw.strip() if isinstance(raw, str) else ""
+    if not tz:
+        return None
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+    return tz
 
 
 def resolve_household(existing_role: dict[str, Any] | None, sub: str) -> tuple[str, str, bool]:
