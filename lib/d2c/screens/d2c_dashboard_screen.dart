@@ -969,7 +969,7 @@ class _SectionLabel extends StatelessWidget {
 // the same satisfaction loop Strava + Whoop nail — "here's the thing
 // you did, here's what it counted for."
 
-class _RecentWalksSection extends StatelessWidget {
+class _RecentWalksSection extends StatefulWidget {
   const _RecentWalksSection({
     required this.walks,
     required this.isWalkerUser,
@@ -981,8 +981,22 @@ class _RecentWalksSection extends StatelessWidget {
   final DeviceTypeView view;
 
   @override
+  State<_RecentWalksSection> createState() => _RecentWalksSectionState();
+}
+
+class _RecentWalksSectionState extends State<_RecentWalksSection> {
+  // Collapse long days to a preview; the rest reveal on tap (an active day can
+  // log many short sessions, and burying them behind a hard cap hid them).
+  static const _previewCount = 4;
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
-    final shown = walks.take(4).toList();
+    final walks = widget.walks;
+    final canExpand = walks.length > _previewCount;
+    final shown = (_expanded || !canExpand)
+        ? walks
+        : walks.take(_previewCount).toList();
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
@@ -1016,14 +1030,69 @@ class _RecentWalksSection extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           for (var i = 0; i < shown.length; i++) ...[
-            _WalkRow(walk: shown[i], view: view),
+            _WalkRow(walk: shown[i], view: widget.view),
             if (i < shown.length - 1)
               Divider(
                 height: 1,
                 color: AppTheme.border.withOpacity(0.5),
               ),
           ],
+          if (canExpand)
+            _ShowAllToggle(
+              expanded: _expanded,
+              totalCount: walks.length,
+              onTap: () => setState(() => _expanded = !_expanded),
+            ),
         ],
+      ),
+    );
+  }
+}
+
+/// The "Show all N / Show less" control under a collapsed [_RecentWalksSection].
+/// Full-width, ≥44px tap target (elderly users), sage to read as actionable.
+class _ShowAllToggle extends StatelessWidget {
+  const _ShowAllToggle({
+    required this.expanded,
+    required this.totalCount,
+    required this.onTap,
+  });
+
+  final bool expanded;
+  final int totalCount;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        width: double.infinity,
+        constraints: const BoxConstraints(minHeight: 44),
+        alignment: Alignment.center,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              expanded ? 'Show less' : 'Show all $totalCount',
+              style: const TextStyle(
+                color: AppTheme.sage,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 2),
+            Icon(
+              expanded
+                  ? Icons.keyboard_arrow_up_rounded
+                  : Icons.keyboard_arrow_down_rounded,
+              color: AppTheme.sage,
+              size: 20,
+            ),
+          ],
+        ),
       ),
     );
   }
