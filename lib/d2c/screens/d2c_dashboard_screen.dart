@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../theme/app_theme.dart';
-import '../d2c_routes.dart';
 import '../data/d2c_mock_data.dart';
 import '../rendering/metric_registry.dart';
 import '../widgets/d2c_bottom_nav.dart';
@@ -121,7 +119,22 @@ class D2CDashboardScreen extends StatelessWidget {
                 const SizedBox(height: 12),
                 _WeekContextLine(today: snapshot.today, view: view),
                 const SizedBox(height: 22),
-                _DayTrendCard(days: snapshot.last7Days, view: view),
+                // Two explicit, self-labelled trend cards (was one ambiguous
+                // hero-metric chart). Each is tappable per-day and expands that
+                // day's sessions inline.
+                _MetricTrendCard(
+                  title: 'Active minutes',
+                  unit: 'min',
+                  days: snapshot.last7Days,
+                  value: (d) => d.activeMinutes,
+                ),
+                const SizedBox(height: 16),
+                _MetricTrendCard(
+                  title: 'Distance traveled',
+                  unit: 'ft',
+                  days: snapshot.last7Days,
+                  value: (d) => d.distanceFt,
+                ),
                 if (snapshot.recentWalks.isNotEmpty) ...[
                   const SizedBox(height: 26),
                   _RecentWalksSection(
@@ -799,24 +812,58 @@ class _WeekContextLine extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 7-day trend bar chart strip with today annotation
+// Per-metric 7-day trend card — tappable days + expandable day detail
 // ─────────────────────────────────────────────────────────────────────
 
-class _DayTrendCard extends StatelessWidget {
-  const _DayTrendCard({required this.days, required this.view});
+/// One labelled 7-day bar chart for a single metric (active minutes,
+/// distance). Replaces the old single hero-metric chart, which never named the
+/// metric it plotted, annotated only today, and whose bars weren't tappable.
+///
+/// Tapping a day selects it: the header restates that day's value with its
+/// unit, the bar highlights, and that day's sessions expand underneath (time ·
+/// duration · distance per session). Defaults to today. Every day column is a
+/// full-height tap target (~42×94), comfortably past the 44px minimum, and the
+/// detail rows are flex-laid so nothing overflows a 375px phone.
+class _MetricTrendCard extends StatefulWidget {
+  const _MetricTrendCard({
+    required this.title,
+    required this.unit,
+    required this.days,
+    required this.value,
+  });
+
+  /// Names the metric explicitly — "Active minutes", "Distance traveled".
+  final String title;
+
+  /// Unit shown beside the selected day's value ("min", "ft").
+  final String unit;
+
+  /// Oldest-first; the last entry is today.
   final List<DayStep> days;
-  final DeviceTypeView view;
+
+  /// Pulls this card's metric off a day.
+  final int Function(DayStep) value;
+
+  @override
+  State<_MetricTrendCard> createState() => _MetricTrendCardState();
+}
+
+class _MetricTrendCardState extends State<_MetricTrendCard> {
+  /// null → follow "today" (the last bar), so a refresh with new data keeps
+  /// pointing at today rather than a stale index.
+  int? _selected;
 
   @override
   Widget build(BuildContext context) {
-    final heroIsActiveMin = view.hero == ActivityMetric.activeMinutes;
-    int val(DayStep d) => heroIsActiveMin ? d.activeMinutes : d.steps;
-    final maxVal = days.map(val).fold<int>(0, (a, b) => a > b ? a : b);
-    final todayLabel =
-        days.isEmpty ? '' : NumberFormat('#,##0').format(val(days.last));
-    final maxBarHeight = 70.0;
+    final days = widget.days;
+    if (days.isEmpty) return const SizedBox.shrink();
+    final idx = (_selected ?? days.length - 1).clamp(0, days.length - 1);
+    final selected = days[idx];
+    final maxVal = days.map(widget.value).fold<int>(0, (a, b) => a > b ? a : b);
+    final fmt = NumberFormat('#,##0');
+
     return Container(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(AppTheme.cardRadius),
@@ -825,110 +872,242 @@ class _DayTrendCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          Text(
+            widget.title,
+            style: const TextStyle(
+              color: AppTheme.textDark,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 4),
+          // The selected day's value, named and united — this is what makes
+          // the chart self-explanatory at a glance.
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
             children: [
-              const Text(
-                'Last 7 days',
-                style: TextStyle(
+              Text(
+                fmt.format(widget.value(selected)),
+                style: const TextStyle(
                   color: AppTheme.textDark,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
+                  fontSize: 26,
+                  fontWeight: FontWeight.w700,
+                  height: 1.1,
                 ),
               ),
-              GestureDetector(
-                onTap: () => context.go(D2CRoutes.history),
-                child: const Text(
-                  'See more',
-                  style: TextStyle(
-                    color: AppTheme.sage,
+              const SizedBox(width: 5),
+              Text(
+                widget.unit,
+                style: const TextStyle(
+                  color: AppTheme.textSoft,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  selected.dateLabel.isEmpty
+                      ? selected.weekday
+                      : selected.dateLabel,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: AppTheme.textSoft,
                     fontSize: 13,
-                    fontWeight: FontWeight.w600,
                   ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 28),
-          SizedBox(
-            height: maxBarHeight + 40,
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                for (var i = 0; i < days.length; i++) ...[
-                  Expanded(
-                    child: _DayBar(
-                      day: days[i],
-                      value: val(days[i]),
-                      maxValue: maxVal,
-                      maxHeight: maxBarHeight,
-                      isToday: i == days.length - 1,
-                      todayLabel: i == days.length - 1 ? todayLabel : null,
-                    ),
+          const SizedBox(height: 16),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              for (var i = 0; i < days.length; i++)
+                Expanded(
+                  child: _DayBar(
+                    day: days[i],
+                    value: widget.value(days[i]),
+                    maxValue: maxVal,
+                    selected: i == idx,
+                    onTap: () => setState(() => _selected = i),
                   ),
-                ],
-              ],
-            ),
+                ),
+            ],
           ),
+          const SizedBox(height: 12),
+          _DayDetail(day: selected),
         ],
       ),
     );
   }
 }
 
+/// One tappable day column: bar + weekday label. Bottom-aligned so bars share
+/// a baseline; a zero day still renders a faint stub so it reads as tappable.
 class _DayBar extends StatelessWidget {
   const _DayBar({
     required this.day,
     required this.value,
     required this.maxValue,
-    required this.maxHeight,
-    required this.isToday,
-    this.todayLabel,
+    required this.selected,
+    required this.onTap,
   });
 
   final DayStep day;
   final int value;
   final int maxValue;
-  final double maxHeight;
-  final bool isToday;
-  final String? todayLabel;
+  final bool selected;
+  final VoidCallback onTap;
+
+  static const double _maxBarHeight = 72;
 
   @override
   Widget build(BuildContext context) {
-    final h = maxValue == 0 ? 0.0 : (value / maxValue) * maxHeight;
-    final color = isToday ? AppTheme.sage : AppTheme.sage.withOpacity(0.32);
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.end,
-      children: [
-        SizedBox(
-          height: 16,
-          child: isToday && todayLabel != null
-              ? Text(
-                  todayLabel!,
+    final scaled =
+        maxValue == 0 ? 0.0 : (value / maxValue) * _maxBarHeight;
+    // Floor a non-zero day at 4px so a light day is still visible; a true zero
+    // gets a 3px stub (present, clearly empty).
+    final barHeight = value > 0 ? scaled.clamp(4.0, _maxBarHeight) : 3.0;
+    final color =
+        selected ? AppTheme.sage : AppTheme.sage.withOpacity(0.30);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              height: _maxBarHeight,
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: Container(
+                  height: barHeight,
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              day.weekday,
+              maxLines: 1,
+              overflow: TextOverflow.clip,
+              style: TextStyle(
+                color: selected ? AppTheme.textDark : AppTheme.textSoft,
+                fontSize: 11,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The tapped day's sessions — time · duration · distance per row. Flex-laid
+/// (no fixed widths) so long values can't overflow a narrow phone.
+class _DayDetail extends StatelessWidget {
+  const _DayDetail({required this.day});
+
+  final DayStep day;
+
+  @override
+  Widget build(BuildContext context) {
+    final sessions = day.sessions;
+    final isToday = day.dateLabel == 'Today';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: AppTheme.warmWhite,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: sessions.isEmpty
+          ? Text(
+              isToday
+                  ? 'No walks recorded yet today.'
+                  : 'No walks recorded that day.',
+              style: const TextStyle(
+                color: AppTheme.textSoft,
+                fontSize: 13,
+                height: 1.4,
+              ),
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${sessions.length} session${sessions.length == 1 ? '' : 's'}',
                   style: const TextStyle(
                     color: AppTheme.textDark,
-                    fontSize: 11.5,
+                    fontSize: 12.5,
                     fontWeight: FontWeight.w700,
                   ),
-                )
-              : null,
-        ),
-        Container(
-          width: 24,
-          height: h,
-          decoration: BoxDecoration(
-            color: color,
-            borderRadius: BorderRadius.circular(7),
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          day.weekday,
-          style: TextStyle(
-            color: isToday ? AppTheme.textDark : AppTheme.textSoft,
+                ),
+                const SizedBox(height: 8),
+                const _DetailRow(
+                  time: 'Time',
+                  duration: 'Duration',
+                  distance: 'Distance',
+                  isHeader: true,
+                ),
+                for (final s in sessions) ...[
+                  Divider(height: 13, color: AppTheme.border.withOpacity(0.5)),
+                  _DetailRow(
+                    time: s.startTimeOfDay,
+                    duration: '${s.durationMinutes} min',
+                    distance: '${NumberFormat('#,##0').format(s.distanceFt)} ft',
+                  ),
+                ],
+              ],
+            ),
+    );
+  }
+}
+
+class _DetailRow extends StatelessWidget {
+  const _DetailRow({
+    required this.time,
+    required this.duration,
+    required this.distance,
+    this.isHeader = false,
+  });
+
+  final String time;
+  final String duration;
+  final String distance;
+  final bool isHeader;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = isHeader
+        ? const TextStyle(
+            color: AppTheme.textSoft,
             fontSize: 11,
-            fontWeight: isToday ? FontWeight.w700 : FontWeight.w500,
-          ),
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.3,
+          )
+        : const TextStyle(
+            color: AppTheme.textDark,
+            fontSize: 13.5,
+          );
+    return Row(
+      children: [
+        Expanded(flex: 4, child: Text(time, style: style)),
+        Expanded(
+          flex: 3,
+          child: Text(duration, textAlign: TextAlign.right, style: style),
+        ),
+        Expanded(
+          flex: 3,
+          child: Text(distance, textAlign: TextAlign.right, style: style),
         ),
       ],
     );

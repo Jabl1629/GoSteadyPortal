@@ -107,10 +107,25 @@ class DayStep {
     required this.weekday,
     required this.steps,
     this.activeMinutes = 0,
+    this.distanceFt = 0,
+    this.dateLabel = '',
+    this.sessions = const [],
   });
   final String weekday; // "Mon", "Tue", ...
   final int steps;
   final int activeMinutes;
+
+  /// Total distance for the day, feet. Plotted by the Distance trend card.
+  final int distanceFt;
+
+  /// Human date for the day ("Mon, Jul 14") — shown as the header of the
+  /// tapped-day detail panel. Empty for legacy/mock rows that predate it.
+  final String dateLabel;
+
+  /// That day's completed sessions, newest-first — revealed when the day is
+  /// tapped in a trend card. Empty on a rest day (or for callers that don't
+  /// carry per-day detail).
+  final List<WalkSession> sessions;
 }
 
 /// One completed walking session (Strava-style activity feed row).
@@ -747,14 +762,149 @@ class D2CMockData {
         is7DayHigh: false,        // Thu was higher (1,310)
         streakDaysAboveAverage: 3, // Sun/Mon/Tue above 976
       ),
+      // Per-day totals + that day's sessions, so the two trend cards (active
+      // minutes / distance) and their tap-to-expand detail all have something
+      // real to show. Each day's totals equal the sum of its sessions; Tue is
+      // today and mirrors `recentWalks` below exactly.
       last7Days: const [
-        DayStep(weekday: 'Wed', steps: 980),
-        DayStep(weekday: 'Thu', steps: 1310),
-        DayStep(weekday: 'Fri', steps: 850),
-        DayStep(weekday: 'Sat', steps: 410),
-        DayStep(weekday: 'Sun', steps: 1180),
-        DayStep(weekday: 'Mon', steps: 1102),
-        DayStep(weekday: 'Tue', steps: 1247),
+        DayStep(
+          weekday: 'Wed',
+          dateLabel: 'Wed, Jul 15',
+          steps: 980,
+          activeMinutes: 26,
+          distanceFt: 740,
+          sessions: [
+            WalkSession(
+                startTimeOfDay: '3:12 PM',
+                durationMinutes: 15,
+                steps: 560,
+                distanceFt: 425),
+            WalkSession(
+                startTimeOfDay: '8:20 AM',
+                durationMinutes: 11,
+                steps: 420,
+                distanceFt: 315),
+          ],
+        ),
+        DayStep(
+          weekday: 'Thu',
+          dateLabel: 'Thu, Jul 16',
+          steps: 1310,
+          activeMinutes: 34,
+          distanceFt: 990,
+          sessions: [
+            WalkSession(
+                startTimeOfDay: '5:02 PM',
+                durationMinutes: 12,
+                steps: 430,
+                distanceFt: 325),
+            WalkSession(
+                startTimeOfDay: '12:40 PM',
+                durationMinutes: 13,
+                steps: 500,
+                distanceFt: 380),
+            WalkSession(
+                startTimeOfDay: '7:55 AM',
+                durationMinutes: 9,
+                steps: 380,
+                distanceFt: 285),
+          ],
+        ),
+        DayStep(
+          weekday: 'Fri',
+          dateLabel: 'Fri, Jul 17',
+          steps: 850,
+          activeMinutes: 22,
+          distanceFt: 640,
+          sessions: [
+            WalkSession(
+                startTimeOfDay: '4:30 PM',
+                durationMinutes: 12,
+                steps: 470,
+                distanceFt: 355),
+            WalkSession(
+                startTimeOfDay: '9:10 AM',
+                durationMinutes: 10,
+                steps: 380,
+                distanceFt: 285),
+          ],
+        ),
+        DayStep(
+          weekday: 'Sat',
+          dateLabel: 'Sat, Jul 18',
+          steps: 410,
+          activeMinutes: 11,
+          distanceFt: 310,
+          sessions: [
+            WalkSession(
+                startTimeOfDay: '11:25 AM',
+                durationMinutes: 11,
+                steps: 410,
+                distanceFt: 310),
+          ],
+        ),
+        DayStep(
+          weekday: 'Sun',
+          dateLabel: 'Sun, Jul 19',
+          steps: 1180,
+          activeMinutes: 30,
+          distanceFt: 890,
+          sessions: [
+            WalkSession(
+                startTimeOfDay: '2:45 PM',
+                durationMinutes: 16,
+                steps: 640,
+                distanceFt: 480),
+            WalkSession(
+                startTimeOfDay: '8:05 AM',
+                durationMinutes: 14,
+                steps: 540,
+                distanceFt: 410),
+          ],
+        ),
+        DayStep(
+          weekday: 'Mon',
+          dateLabel: 'Mon, Jul 20',
+          steps: 1102,
+          activeMinutes: 28,
+          distanceFt: 830,
+          sessions: [
+            WalkSession(
+                startTimeOfDay: '1:30 PM',
+                durationMinutes: 15,
+                steps: 590,
+                distanceFt: 445),
+            WalkSession(
+                startTimeOfDay: '7:20 AM',
+                durationMinutes: 13,
+                steps: 512,
+                distanceFt: 385),
+          ],
+        ),
+        DayStep(
+          weekday: 'Tue',
+          dateLabel: 'Today',
+          steps: 1247,
+          activeMinutes: 32,
+          distanceFt: 942,
+          sessions: [
+            WalkSession(
+                startTimeOfDay: '2:18 PM',
+                durationMinutes: 8,
+                steps: 412,
+                distanceFt: 310),
+            WalkSession(
+                startTimeOfDay: '11:04 AM',
+                durationMinutes: 14,
+                steps: 583,
+                distanceFt: 441),
+            WalkSession(
+                startTimeOfDay: '7:42 AM',
+                durationMinutes: 10,
+                steps: 252,
+                distanceFt: 191),
+          ],
+        ),
       ],
       recentWalks: const [
         // Newest first; today's sessions only.

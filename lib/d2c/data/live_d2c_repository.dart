@@ -137,13 +137,18 @@ class LiveD2CRepository implements D2CRepository {
     final heroIsActiveMin =
         deviceTypeView(deviceType).hero == ActivityMetric.activeMinutes;
 
-    // ── Daily buckets (zero-filled 7-day window). Carry BOTH metrics so the
-    // trend chart can plot the hero one per deviceType. ──
+    // ── Daily buckets (zero-filled 7-day window). Carry every metric the trend
+    // cards plot (active minutes + distance, and steps for the hero stat), plus
+    // the day's own sessions so tapping a bar can expand that day's detail. ──
     final stepsByDate = <String, int>{};
     final activeMinByDate = <String, int>{};
+    final distanceByDate = <String, double>{};
+    final sessionsByDate = <String, List<ActivitySession>>{};
     for (final s in weekSessions) {
       stepsByDate[s.date] = (stepsByDate[s.date] ?? 0) + s.steps;
       activeMinByDate[s.date] = (activeMinByDate[s.date] ?? 0) + s.activeMinutes;
+      distanceByDate[s.date] = (distanceByDate[s.date] ?? 0) + s.distanceFt;
+      (sessionsByDate[s.date] ??= []).add(s);
     }
     final today0 = DateTime(now.year, now.month, now.day);
     final last7Dates = [
@@ -162,17 +167,25 @@ class LiveD2CRepository implements D2CRepository {
         heroIsActiveMin ? (activeMinByDate[ymd] ?? 0) : (stepsByDate[ymd] ?? 0);
     final todayHero = heroIsActiveMin ? todayMinutes : todaySteps;
 
-    final last7Days = [
-      for (final d in last7Dates)
-        DayStep(
-          weekday: _weekdayLabel(d.weekday),
-          // Today's bucket uses the (more current) 24h total.
-          steps: _isSameDay(d, today0) ? todaySteps : (stepsByDate[_ymd(d)] ?? 0),
-          activeMinutes: _isSameDay(d, today0)
-              ? todayMinutes
-              : (activeMinByDate[_ymd(d)] ?? 0),
+    // Today's bucket uses the (more current) 24h totals + the calendar-day
+    // filtered session list, so the tapped-day detail for today matches
+    // "Today's walks" exactly.
+    final last7Days = <DayStep>[];
+    for (final d in last7Dates) {
+      final isToday = _isSameDay(d, today0);
+      final ymd = _ymd(d);
+      last7Days.add(DayStep(
+        weekday: _weekdayLabel(d.weekday),
+        dateLabel: isToday ? 'Today' : _dateLabel(d),
+        steps: isToday ? todaySteps : (stepsByDate[ymd] ?? 0),
+        activeMinutes: isToday ? todayMinutes : (activeMinByDate[ymd] ?? 0),
+        distanceFt:
+            isToday ? todayDistFt : (distanceByDate[ymd] ?? 0).round(),
+        sessions: _toWalkSessions(
+          isToday ? todaySessions : (sessionsByDate[ymd] ?? const []),
         ),
-    ];
+      ));
+    }
 
     // Prior 6 days (excludes today) → rolling average of the HERO metric for
     // the "above/below your usual" context.
@@ -216,21 +229,8 @@ class LiveD2CRepository implements D2CRepository {
     }
 
     // ── Recent walks (today, newest-first) ──
-    final sortedToday = [...todaySessions]
-      ..sort((a, b) => b.sessionStart.compareTo(a.sessionStart));
-    final recentWalks = [
-      for (final s in sortedToday)
-        WalkSession(
-          startTimeOfDay: _formatTimeOfDay(s.sessionStart.toLocal()),
-          durationMinutes: s.activeMinutes > 0
-              ? s.activeMinutes
-              : s.sessionEnd.difference(s.sessionStart).inMinutes,
-          steps: s.steps,
-          distanceFt: s.distanceFt.round(),
-          activeMinutes: s.activeMinutes,
-          gaitSpeedFts: s.gaitSpeedFts,
-        ),
-    ];
+    // Same mapping the per-day trend detail uses, so the two always agree.
+    final recentWalks = _toWalkSessions(todaySessions);
 
     // ── Open alerts ──
     // Walker-only suppression (mirrors the backend read filter keyed on
@@ -682,6 +682,36 @@ class LiveD2CRepository implements D2CRepository {
 
   String _weekdayLabel(int weekday) =>
       const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][weekday - 1];
+
+  static const _monthLabels = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+
+  /// "Mon, Jul 14" — the header of a tapped day's detail panel.
+  String _dateLabel(DateTime d) =>
+      '${_weekdayLabel(d.weekday)}, ${_monthLabels[d.month - 1]} ${d.day}';
+
+  /// Map raw activity rows → display sessions, newest-first. Shared by
+  /// "Today's walks" and each trend card's tapped-day detail so the two
+  /// renderings of the same session can never drift.
+  List<WalkSession> _toWalkSessions(List<ActivitySession> sessions) {
+    final sorted = [...sessions]
+      ..sort((a, b) => b.sessionStart.compareTo(a.sessionStart));
+    return [
+      for (final s in sorted)
+        WalkSession(
+          startTimeOfDay: _formatTimeOfDay(s.sessionStart.toLocal()),
+          durationMinutes: s.activeMinutes > 0
+              ? s.activeMinutes
+              : s.sessionEnd.difference(s.sessionStart).inMinutes,
+          steps: s.steps,
+          distanceFt: s.distanceFt.round(),
+          activeMinutes: s.activeMinutes,
+          gaitSpeedFts: s.gaitSpeedFts,
+        ),
+    ];
+  }
 
   String _formatTimeOfDay(DateTime d) {
     final ampm = d.hour < 12 ? 'AM' : 'PM';
