@@ -119,9 +119,10 @@ class D2CDashboardScreen extends StatelessWidget {
                 const SizedBox(height: 12),
                 _WeekContextLine(today: snapshot.today, view: view),
                 const SizedBox(height: 22),
-                // Active minutes + distance under one shared Today/7-day/
-                // 30-day zoom. The Today level supersedes the old standalone
-                // "Today's walks" tile, which is why that section is gone.
+                // Active minutes + distance under one shared zoom stack
+                // (day / 7-day / 30-day) over a single anchor date. The day
+                // level supersedes the old standalone "Today's walks" tile,
+                // which is why that section is gone.
                 _TrendSection(
                   days: snapshot.last30Days.isNotEmpty
                       ? snapshot.last30Days
@@ -796,11 +797,12 @@ class _WeekContextLine extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Trend section — one shared Today / 7-day / 30-day zoom over two charts
+// Trend section — one shared zoom stack over two metric charts
 // ─────────────────────────────────────────────────────────────────────
 
-/// Zoom levels, coarsest last. The three form a stack: a 30-day bar is a week,
-/// a 7-day bar is a day, and a day is the deepest level (intra-day buckets).
+/// Zoom levels, finest first. They form a stack over a single **anchor date**:
+/// month shows the 30 days ending at the anchor (bucketed by week), week shows
+/// the 7 days ending at it, day shows the anchor itself.
 enum _TrendZoom { day, week, month }
 
 /// A single plotted bar, whatever the zoom.
@@ -808,8 +810,7 @@ class _TrendBar {
   const _TrendBar({
     required this.label,
     required this.value,
-    this.anchorDay,
-    this.anchorWeek,
+    this.drillTo,
     this.isCurrent = false,
     this.labelVisible = true,
   });
@@ -817,13 +818,11 @@ class _TrendBar {
   final String label;
   final int value;
 
-  /// Set at week zoom — tapping drills into this day.
-  final DateTime? anchorDay;
+  /// The date to re-anchor on when tapped, or null if this bar can't be drilled
+  /// into (the intra-day level is the deepest).
+  final DateTime? drillTo;
 
-  /// Set at month zoom — tapping drills into this week.
-  final DateTime? anchorWeek;
-
-  /// The bar covering "now" (today / this week) — rendered darker.
+  /// The bar covering today — rendered darker.
   final bool isCurrent;
 
   /// Day zoom plots 12 buckets but labels every other one, so the axis stays
@@ -831,27 +830,17 @@ class _TrendBar {
   final bool labelVisible;
 }
 
-class _WeekBucket {
-  const _WeekBucket({required this.start, required this.days});
-  final DateTime start;
-  final List<DayStep> days;
-
-  /// Average per DAY, not the week total — the current week is usually partial,
-  /// and a total would make it read as a collapse next to full weeks.
-  int avg(int Function(DayStep) value) {
-    if (days.isEmpty) return 0;
-    final sum = days.fold<int>(0, (a, d) => a + value(d));
-    return (sum / days.length).round();
-  }
-}
-
-/// Owns the zoom + focus shared by both metric charts, so "Active minutes" and
+/// Owns the zoom + anchor shared by both metric charts, so "Active minutes" and
 /// "Distance traveled" always describe the same period and can be compared.
 ///
-/// Navigation: the toggle picks a zoom (resetting focus to the current period);
-/// tapping a bar drills one level in (week → day, month → week). A back chip
-/// appears whenever the view is focused on something other than the current
-/// period, and zooms back out to where you came from.
+/// Navigation:
+///  - the toggle changes zoom and **keeps the anchor**, so switching levels
+///    stays on the date you were looking at;
+///  - tapping a bar drills in (week → that day, month → that week);
+///  - ‹ › page the window (±1 day / ±7 days), clamped to the data we actually
+///    hold — the activity API only serves windows ending now, capped at 30 days
+///    (`ranges.py`), so anything older needs the planned Phase 1C rollups;
+///  - "Today" returns to the current period.
 class _TrendSection extends StatefulWidget {
   const _TrendSection({required this.days});
 
@@ -863,9 +852,11 @@ class _TrendSection extends StatefulWidget {
 }
 
 class _TrendSectionState extends State<_TrendSection> {
-  _TrendZoom _zoom = _TrendZoom.week; // spec: default to 7-day
-  DateTime? _focusDay;
-  DateTime? _focusWeekStart;
+  _TrendZoom _zoom = _TrendZoom.week; // default to 7-day
+
+  /// The date the view is focused on; null means "today". Every zoom reads
+  /// through this, which is what keeps the label honest when you page back.
+  DateTime? _anchor;
 
   List<DayStep> get _days => widget.days;
 
@@ -874,46 +865,64 @@ class _TrendSectionState extends State<_TrendSection> {
   static bool _sameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
 
-  /// Monday-anchored week start — calendar weeks read more naturally than
-  /// rolling 7-day chunks once you're comparing several of them.
-  static DateTime _weekStart(DateTime d) =>
-      _dayOnly(d).subtract(Duration(days: d.weekday - 1));
+  static const _months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
 
-  /// Days plotted at week zoom: the focused calendar week, or (default) the
-  /// trailing 7 days ending today.
-  List<DayStep> _weekWindow() {
-    final start = _focusWeekStart;
-    if (start == null) {
-      return _days.length <= 7 ? _days : _days.sublist(_days.length - 7);
-    }
-    final end = start.add(const Duration(days: 7));
+  static String _monthDay(DateTime d) => '${_months[d.month - 1]} ${d.day}';
+
+  DateTime get _today => _days.isNotEmpty && _days.last.date != null
+      ? _days.last.date!
+      : _dayOnly(DateTime.now());
+
+  DateTime get _anchorDate => _anchor ?? _today;
+
+  bool get _isCurrent => _sameDay(_anchorDate, _today);
+
+  /// Oldest day we hold — the hard floor for paging back.
+  DateTime get _oldest =>
+      _days.isNotEmpty && _days.first.date != null ? _days.first.date! : _today;
+
+  /// Days in the window ending at the anchor, inclusive.
+  List<DayStep> _window(int length) {
+    final end = _anchorDate;
+    final start = end.subtract(Duration(days: length - 1));
     return [
       for (final d in _days)
         if (d.date != null &&
             !d.date!.isBefore(start) &&
-            d.date!.isBefore(end))
+            !d.date!.isAfter(end))
           d,
     ];
   }
 
-  DayStep _focusedDay() {
-    final f = _focusDay;
-    if (f != null) {
-      for (final d in _days) {
-        if (d.date != null && _sameDay(d.date!, f)) return d;
-      }
+  DayStep _anchoredDay() {
+    for (final d in _days) {
+      if (d.date != null && _sameDay(d.date!, _anchorDate)) return d;
     }
     return _days.last;
   }
 
-  List<_WeekBucket> _weekBuckets() {
-    final map = <DateTime, List<DayStep>>{};
-    for (final d in _days) {
-      if (d.date == null) continue;
-      (map[_weekStart(d.date!)] ??= []).add(d);
+  /// The 30-day window split into trailing 7-day chunks, oldest-first. Trailing
+  /// chunks (not calendar weeks) so the newest chunk always ends at the anchor —
+  /// no half-empty current week distorting the comparison.
+  List<List<DayStep>> _weekChunks() {
+    final w = _window(30);
+    final chunks = <List<DayStep>>[];
+    for (var end = w.length; end > 0; end -= 7) {
+      chunks.insert(0, w.sublist(end - 7 < 0 ? 0 : end - 7, end));
     }
-    final keys = map.keys.toList()..sort();
-    return [for (final k in keys) _WeekBucket(start: k, days: map[k]!)];
+    return chunks;
+  }
+
+  /// Average per day over a set of days — never a period total. A weekly or
+  /// monthly *total* isn't comparable (windows differ in length, and the newest
+  /// is usually partial), so every multi-day figure here is per-day.
+  static int _avgPerDay(List<DayStep> days, int Function(DayStep) value) {
+    if (days.isEmpty) return 0;
+    final sum = days.fold<int>(0, (a, d) => a + value(d));
+    return (sum / days.length).round();
   }
 
   static String _hourLabel(int hour) {
@@ -922,13 +931,6 @@ class _TrendSectionState extends State<_TrendSection> {
     return hour < 12 ? '${hour}a' : '${hour - 12}p';
   }
 
-  static String _monthDay(DateTime d) =>
-      '${const [
-        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
-      ][d.month - 1]} ${d.day}';
-
-  /// Bars for the current zoom, valued by this card's metric.
   List<_TrendBar> _bars(
     int Function(DayStep) dayValue,
     int Function(WalkSession) sessionValue,
@@ -938,7 +940,7 @@ class _TrendSectionState extends State<_TrendSection> {
         // 12 two-hour buckets. Deepest level, so bars aren't tap targets —
         // which is what lets them be this thin without hurting usability.
         final buckets = List<int>.filled(12, 0);
-        for (final s in _focusedDay().sessions) {
+        for (final s in _anchoredDay().sessions) {
           buckets[(s.startHour ~/ 2).clamp(0, 11)] += sessionValue(s);
         }
         return [
@@ -951,150 +953,165 @@ class _TrendSectionState extends State<_TrendSection> {
         ];
       case _TrendZoom.week:
         return [
-          for (final d in _weekWindow())
+          for (final d in _window(7))
             _TrendBar(
               label: d.weekday,
               value: dayValue(d),
-              anchorDay: d.date,
-              isCurrent: d.dateLabel == 'Today',
+              drillTo: d.date,
+              isCurrent: d.date != null && _sameDay(d.date!, _today),
             ),
         ];
       case _TrendZoom.month:
-        final now = _dayOnly(DateTime.now());
         return [
-          for (final b in _weekBuckets())
-            _TrendBar(
-              label: _monthDay(b.start),
-              value: b.avg(dayValue),
-              anchorWeek: b.start,
-              isCurrent: !now.isBefore(b.start) &&
-                  now.isBefore(b.start.add(const Duration(days: 7))),
-            ),
+          for (final chunk in _weekChunks())
+            if (chunk.isNotEmpty)
+              _TrendBar(
+                // Bars are per-day averages, so a chunk is labelled by when it
+                // starts rather than pretending to be a single date.
+                label: _monthDay(chunk.first.date ?? _today),
+                value: _avgPerDay(chunk, dayValue),
+                drillTo: chunk.last.date,
+                isCurrent: chunk.any(
+                    (d) => d.date != null && _sameDay(d.date!, _today)),
+              ),
         ];
     }
   }
 
+  /// Day zoom shows that day's total (a single day needs no averaging); week and
+  /// month show the per-day average.
   int _headerValue(int Function(DayStep) dayValue) {
     switch (_zoom) {
       case _TrendZoom.day:
-        return dayValue(_focusedDay());
+        return dayValue(_anchoredDay());
       case _TrendZoom.week:
-        final w = _weekWindow();
-        return w.fold<int>(0, (a, d) => a + dayValue(d));
+        return _avgPerDay(_window(7), dayValue);
       case _TrendZoom.month:
-        if (_days.isEmpty) return 0;
-        final sum = _days.fold<int>(0, (a, d) => a + dayValue(d));
-        return (sum / _days.length).round();
+        return _avgPerDay(_window(30), dayValue);
     }
   }
 
-  /// Names the period the header value covers.
+  String _unit(String unit) => _zoom == _TrendZoom.day ? unit : '$unit/day';
+
   String get _periodLabel {
     switch (_zoom) {
       case _TrendZoom.day:
-        final d = _focusedDay();
+        final d = _anchoredDay();
+        if (_isCurrent) return 'Today';
         return d.dateLabel.isEmpty ? d.weekday : d.dateLabel;
       case _TrendZoom.week:
-        final s = _focusWeekStart;
-        return s == null ? 'Last 7 days' : 'Week of ${_monthDay(s)}';
+        if (_isCurrent) return 'Last 7 days';
+        final w = _window(7);
+        if (w.isEmpty) return '';
+        return '${_monthDay(w.first.date ?? _today)} – '
+            '${_monthDay(w.last.date ?? _today)}';
       case _TrendZoom.month:
-        return 'Last 30 days';
+        if (_isCurrent) return 'Last 30 days';
+        final w = _window(30);
+        if (w.isEmpty) return '';
+        return '${_monthDay(w.first.date ?? _today)} – '
+            '${_monthDay(w.last.date ?? _today)}';
     }
   }
 
-  /// A 30-day bar is an average, so its unit needs saying so.
-  String _unitSuffix(String unit) =>
-      _zoom == _TrendZoom.month ? '$unit/day' : unit;
+  /// The day-zoom segment names the day it will show — "Today" only when that's
+  /// actually true, otherwise the date you've selected.
+  String get _daySegmentLabel =>
+      _isCurrent ? 'Today' : _monthDay(_anchorDate);
 
-  bool get _isDrilled =>
-      (_zoom == _TrendZoom.day && _focusDay != null) ||
-      (_zoom == _TrendZoom.week && _focusWeekStart != null);
+  /// One page = a day at day zoom, a week otherwise.
+  int get _step => _zoom == _TrendZoom.day ? 1 : 7;
 
-  void _selectZoom(_TrendZoom z) => setState(() {
-        _zoom = z;
-        // A toggle press means "show me the current period at this zoom".
-        _focusDay = null;
-        _focusWeekStart = null;
-      });
-
-  void _onBarTap(_TrendBar bar) {
-    if (bar.anchorDay != null) {
-      // week → day. `_focusWeekStart` is deliberately left alone so backing out
-      // returns to whichever week view you came from (trailing 7 or calendar).
-      setState(() {
-        _focusDay = bar.anchorDay;
-        _zoom = _TrendZoom.day;
-      });
-    } else if (bar.anchorWeek != null) {
-      setState(() {
-        _focusWeekStart = bar.anchorWeek;
-        _zoom = _TrendZoom.week;
-      });
-    }
+  bool get _canGoBack {
+    // Need at least one held day older than the window we'd land on.
+    final landing = _anchorDate.subtract(Duration(days: _step));
+    final needed = _zoom == _TrendZoom.day
+        ? landing
+        : landing.subtract(Duration(days: _zoom == _TrendZoom.month ? 29 : 6));
+    return !needed.isBefore(_oldest);
   }
 
-  void _back() => setState(() {
-        if (_zoom == _TrendZoom.day) {
-          _focusDay = null;
-          _zoom = _TrendZoom.week;
-        } else {
-          _focusWeekStart = null;
-          _zoom = _TrendZoom.month;
-        }
-      });
+  bool get _canGoForward => _anchorDate.isBefore(_today);
+
+  void _page(int direction) {
+    var next = _anchorDate.add(Duration(days: _step * direction));
+    if (next.isAfter(_today)) next = _today;
+    if (next.isBefore(_oldest)) next = _oldest;
+    setState(() => _anchor = _sameDay(next, _today) ? null : next);
+  }
 
   @override
   Widget build(BuildContext context) {
     if (_days.isEmpty) return const SizedBox.shrink();
     final showSessions = _zoom == _TrendZoom.day;
-    final day = _focusedDay();
+    final day = _anchoredDay();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          children: [
-            Expanded(child: _ZoomToggle(zoom: _zoom, onChanged: _selectZoom)),
-            if (_isDrilled) ...[
-              const SizedBox(width: 10),
-              _BackChip(onTap: _back),
-            ],
-          ],
+        _ZoomToggle(
+          zoom: _zoom,
+          dayLabel: _daySegmentLabel,
+          // Keep the anchor when changing zoom, so switching levels stays on
+          // the date you're looking at instead of jumping back to now.
+          onChanged: (z) => setState(() => _zoom = z),
+        ),
+        const SizedBox(height: 10),
+        _NavRow(
+          onBack: _canGoBack ? () => _page(-1) : null,
+          onForward: _canGoForward ? () => _page(1) : null,
+          onToday: _isCurrent ? null : () => setState(() => _anchor = null),
+          stepLabel: _zoom == _TrendZoom.day ? 'day' : 'week',
         ),
         const SizedBox(height: 14),
         _MetricTrendCard(
           title: 'Active minutes',
-          unit: _unitSuffix('min'),
+          unit: _unit('min'),
           periodLabel: _periodLabel,
           headerValue: _headerValue((d) => d.activeMinutes),
           bars: _bars(
             (d) => d.activeMinutes,
             (s) => s.activeMinutes > 0 ? s.activeMinutes : s.durationMinutes,
           ),
-          onBarTap: _onBarTap,
+          onBarTap: _drill,
           sessions: showSessions ? day.sessions : null,
-          emptyIsToday: day.dateLabel == 'Today',
+          emptyIsToday: _isCurrent,
         ),
         const SizedBox(height: 16),
         _MetricTrendCard(
           title: 'Distance traveled',
-          unit: _unitSuffix('ft'),
+          unit: _unit('ft'),
           periodLabel: _periodLabel,
           headerValue: _headerValue((d) => d.distanceFt),
           bars: _bars((d) => d.distanceFt, (s) => s.distanceFt),
-          onBarTap: _onBarTap,
+          onBarTap: _drill,
           sessions: showSessions ? day.sessions : null,
-          emptyIsToday: day.dateLabel == 'Today',
+          emptyIsToday: _isCurrent,
         ),
       ],
     );
   }
+
+  void _drill(_TrendBar bar) {
+    final target = bar.drillTo;
+    if (target == null) return;
+    setState(() {
+      _anchor = _sameDay(target, _today) ? null : target;
+      _zoom = _zoom == _TrendZoom.month ? _TrendZoom.week : _TrendZoom.day;
+    });
+  }
 }
 
-/// Three-way segmented range control. Each segment is a 44px tap target.
+/// Three-way segmented range control. Each segment is a 44px tap target; the
+/// first names the day it will show (date, or "Today" when that's true).
 class _ZoomToggle extends StatelessWidget {
-  const _ZoomToggle({required this.zoom, required this.onChanged});
+  const _ZoomToggle({
+    required this.zoom,
+    required this.dayLabel,
+    required this.onChanged,
+  });
 
   final _TrendZoom zoom;
+  final String dayLabel;
   final ValueChanged<_TrendZoom> onChanged;
 
   @override
@@ -1108,7 +1125,7 @@ class _ZoomToggle extends StatelessWidget {
       padding: const EdgeInsets.all(3),
       child: Row(
         children: [
-          _seg('Today', _TrendZoom.day),
+          _seg(dayLabel, _TrendZoom.day),
           _seg('7 days', _TrendZoom.week),
           _seg('30 days', _TrendZoom.month),
         ],
@@ -1128,12 +1145,17 @@ class _ZoomToggle extends StatelessWidget {
           child: Container(
             height: 38,
             alignment: Alignment.center,
-            child: Text(
-              label,
-              style: TextStyle(
-                color: selected ? Colors.white : AppTheme.textDark,
-                fontSize: 13.5,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                label,
+                maxLines: 1,
+                style: TextStyle(
+                  color: selected ? Colors.white : AppTheme.textDark,
+                  fontSize: 13.5,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
               ),
             ),
           ),
@@ -1143,50 +1165,109 @@ class _ZoomToggle extends StatelessWidget {
   }
 }
 
-/// Zoom-out affordance, shown only when focused on a past day/week.
-class _BackChip extends StatelessWidget {
-  const _BackChip({required this.onTap});
+/// ‹ › window paging plus a "Today" reset. Arrows disable at the edges of the
+/// data we hold (30 days — see the class doc on [_TrendSection]).
+class _NavRow extends StatelessWidget {
+  const _NavRow({
+    required this.onBack,
+    required this.onForward,
+    required this.onToday,
+    required this.stepLabel,
+  });
 
-  final VoidCallback onTap;
+  final VoidCallback? onBack;
+  final VoidCallback? onForward;
+
+  /// Null when already on the current period (chip hidden).
+  final VoidCallback? onToday;
+  final String stepLabel;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Container(
-          height: 44,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppTheme.border),
-          ),
-          child: const Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.arrow_back_rounded, size: 16, color: AppTheme.sage),
-              SizedBox(width: 5),
-              Text(
-                'Back',
-                style: TextStyle(
-                  color: AppTheme.sage,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
+    return Row(
+      children: [
+        _arrow(
+          icon: Icons.chevron_left_rounded,
+          onTap: onBack,
+          tooltip: 'Previous $stepLabel',
+        ),
+        const SizedBox(width: 8),
+        _arrow(
+          icon: Icons.chevron_right_rounded,
+          onTap: onForward,
+          tooltip: 'Next $stepLabel',
+        ),
+        const Spacer(),
+        if (onToday != null)
+          Material(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(11),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(11),
+              onTap: onToday,
+              child: Container(
+                height: 44,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(11),
+                  border: Border.all(color: AppTheme.sage.withOpacity(0.5)),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.today_rounded, size: 15, color: AppTheme.sage),
+                    SizedBox(width: 6),
+                    Text(
+                      'Today',
+                      style: TextStyle(
+                        color: AppTheme.sage,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _arrow({
+    required IconData icon,
+    required VoidCallback? onTap,
+    required String tooltip,
+  }) {
+    final enabled = onTap != null;
+    final button = Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(11),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(11),
+        onTap: onTap,
+        child: Container(
+          width: 46,
+          height: 44,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(11),
+            border: Border.all(color: AppTheme.border),
+          ),
+          child: Icon(
+            icon,
+            size: 22,
+            color: enabled ? AppTheme.textDark : AppTheme.border,
           ),
         ),
       ),
     );
+    return enabled ? Tooltip(message: tooltip, child: button) : button;
   }
 }
 
-/// One metric's chart: a named value for the period, the bars, and (at day
-/// zoom only) that day's sessions underneath.
+/// One metric's chart: a named per-period value, the bars, and (at day zoom
+/// only) that day's sessions underneath.
 class _MetricTrendCard extends StatelessWidget {
   const _MetricTrendCard({
     required this.title,
@@ -1214,6 +1295,8 @@ class _MetricTrendCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final maxVal = bars.fold<int>(0, (a, b) => a > b.value ? a : b.value);
     final fmt = NumberFormat('#,##0');
+    // Few enough bars to label each one; the 12 intra-day buckets are too tight.
+    final showBarValues = bars.length <= 7;
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
       decoration: BoxDecoration(
@@ -1268,7 +1351,7 @@ class _MetricTrendCard extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
@@ -1277,9 +1360,8 @@ class _MetricTrendCard extends StatelessWidget {
                   child: _TrendBarColumn(
                     bar: b,
                     maxValue: maxVal,
-                    onTap: (b.anchorDay != null || b.anchorWeek != null)
-                        ? () => onBarTap(b)
-                        : null,
+                    showValue: showBarValues,
+                    onTap: b.drillTo == null ? null : () => onBarTap(b),
                   ),
                 ),
             ],
@@ -1294,19 +1376,22 @@ class _MetricTrendCard extends StatelessWidget {
   }
 }
 
-/// One bar + its axis label. Tappable only when it can be drilled into.
+/// One bar, its value, and its axis label. Tappable only when it can be
+/// drilled into.
 class _TrendBarColumn extends StatelessWidget {
   const _TrendBarColumn({
     required this.bar,
     required this.maxValue,
+    required this.showValue,
     this.onTap,
   });
 
   final _TrendBar bar;
   final int maxValue;
+  final bool showValue;
   final VoidCallback? onTap;
 
-  static const double _maxBarHeight = 72;
+  static const double _maxBarHeight = 66;
 
   @override
   Widget build(BuildContext context) {
@@ -1322,6 +1407,26 @@ class _TrendBarColumn extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // Value above each bar — a bar with no number attached doesn't tell
+          // you anything on its own.
+          if (showValue)
+            SizedBox(
+              height: 15,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  NumberFormat('#,##0').format(bar.value),
+                  maxLines: 1,
+                  style: TextStyle(
+                    color:
+                        bar.isCurrent ? AppTheme.textDark : AppTheme.textSoft,
+                    fontSize: 10.5,
+                    fontWeight:
+                        bar.isCurrent ? FontWeight.w700 : FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
           SizedBox(
             height: _maxBarHeight,
             child: Align(
