@@ -231,14 +231,15 @@ class _PatientView extends StatelessWidget {
   Widget build(BuildContext context) {
     final patient = bundle.patient;
     final units = data.allUnits();
-    final unitDisplay = units
-        .firstWhere(
-          (u) => u.id == patient.unitId,
-          orElse: () => units.isNotEmpty
-              ? units.first
-              : throw StateError('no units in repository'),
-        )
-        .displayName;
+    // Internal users (e.g. the Pilot residents view) have no census cache, so
+    // allUnits() is empty — fall back to the patient's own unitId instead of
+    // throwing (user-analytics.md §pilot view). Customers keep the named unit.
+    final String unitDisplay = units.isEmpty
+        ? patient.unitId
+        : units
+            .firstWhere((u) => u.id == patient.unitId,
+                orElse: () => units.first)
+            .displayName;
 
     final active = notifications.activeOf(bundle.notifications);
 

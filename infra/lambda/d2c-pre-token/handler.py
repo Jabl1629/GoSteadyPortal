@@ -26,7 +26,9 @@ Python 3.12, ARM64. boto3 + stdlib only.
 """
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import boto3
@@ -35,6 +37,30 @@ _ddb = boto3.resource("dynamodb")
 _table = _ddb.Table(os.environ["ROLE_ASSIGNMENTS_TABLE"])
 
 VALID_ROLES = {"household_owner", "family_viewer"}
+
+# ── Audit emission (docs/specs/user-analytics.md) ──────────────────────
+# Stdlib-only Lambda → emit the audit-shape JSON line directly (matches the
+# Phase 1.7 `{ $.audit IS TRUE }` subscription filter). Only `auth.token_refresh`
+# is emitted here — the D2C *login* is emitted by d2c-custom-auth on OTP verify
+# (emitting login here too would double-count). Densifies the #4 active-time
+# proxy. Best-effort: never break auth (user-analytics L5).
+AUDIT_AUTH_TOKEN_REFRESH = "auth.token_refresh"
+TRIGGER_REFRESH = "TokenGeneration_RefreshTokens"
+
+
+def _emit_token_refresh(sub: str, client_id: str, role: str) -> None:
+    try:
+        print(json.dumps({
+            "audit": True,
+            "schema_version": 1,
+            "event": AUDIT_AUTH_TOKEN_REFRESH,
+            "actor": {"userId": sub, "clientId": client_id, "role": role},
+            "subject": {},
+            "action": "event",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }, default=str))
+    except Exception:  # noqa: BLE001 — analytics must never break auth
+        pass
 
 
 def resolve_is_walker_user(row: dict[str, Any] | None, role: str) -> str:
@@ -90,4 +116,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
             "accessTokenGeneration": {"claimsToAddOrOverride": claims},
         }
     }
+
+    # Auth funnel (user-analytics.md): a refresh keeps an active session alive —
+    # emit token_refresh so the coarse #4 active-time proxy has a heartbeat.
+    if event.get("triggerSource", "") == TRIGGER_REFRESH:
+        _emit_token_refresh(sub, client_id, role)
+
     return event

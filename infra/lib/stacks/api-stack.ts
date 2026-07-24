@@ -685,6 +685,10 @@ export class ApiStack extends cdk.Stack {
       [apigwv2.HttpMethod.GET, '/api/v1/patients/{id}/alerts'],
       [apigwv2.HttpMethod.GET, '/api/v1/me/patients'],
       [apigwv2.HttpMethod.GET, '/api/v1/facilities/{facilityId}/censuses/{censusId}/patients'],
+      // Internal-only cross-tenant "Pilot residents" roster (user-analytics.md
+      // §pilot view). patient-api already has the Patients/Activity/Devices/
+      // DeviceAssignments read grants; handler gates on is_internal.
+      [apigwv2.HttpMethod.GET, '/api/v1/admin/residents'],
     ];
     for (const [method, p] of patientRoutes) {
       this.httpApi.addRoutes({
@@ -740,6 +744,114 @@ export class ApiStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     patientApiErrorPatternAlarm.addAlarmAction(snsAction);
+
+    // ════════════════════════════════════════════════════════════════
+    // User Analytics — internal usage dashboard (docs/specs/user-analytics.md)
+    // ════════════════════════════════════════════════════════════════
+    //
+    // Single analytics-api Lambda + 3 INTERNAL-ONLY GET routes:
+    //   GET /api/v1/admin/analytics/overview?range=       (population KPIs)
+    //   GET /api/v1/admin/analytics/users?range=          (per-user table)
+    //   GET /api/v1/admin/analytics/users/{userId}?range= (single-user drill-down)
+    //
+    // The handler gates on role internal_admin/internal_support (like
+    // /admin/devices). Reads Activity Series (offloads #1) via a bounded scan +
+    // the audit log group via ONE CloudWatch Logs Insights query (logins #2, OTP
+    // funnel #3, active-time #4, coach turns #5). No new store; on-demand only
+    // (L2). Every read emits analytics.*.read (count-only subject; auto-elevated
+    // internal_access by the audit forwarder). Its log group is subscribed for
+    // audit forwarding in audit-stack.ts sourceHandlers.
+    const auditLogGroupArn =
+      `arn:aws:logs:${this.region}:${this.account}:log-group:gosteady-${env}-audit:*`;
+
+    const analyticsApi = new ProcessingLambda(this, 'AnalyticsApi', {
+      config,
+      functionName: `gosteady-${env}-analytics-api`,
+      handlerDir: path.join(__dirname, '..', '..', 'lambda', 'analytics-api'),
+      description:
+        'Internal user/population analytics — 3 GET reads; Logs Insights + Activity scan; audit emission',
+      memoryMb: config.patientApiMemoryMb,
+      // Insights start→poll + a bounded scan need headroom; stay just under the
+      // API Gateway HTTP API 30 s integration cap. ANALYTICS_QUERY_TIMEOUT_S
+      // (15 s) bounds the Insights poll so scans + shaping fit the remainder.
+      timeoutSeconds: 29,
+      powertoolsLayer,
+      tracingActive: true,
+      environment: {
+        ENVIRONMENT: env,
+        ACTIVITY_TABLE: dataStack.activityTable.tableName,
+        PATIENTS_TABLE: dataStack.patientsTable.tableName,
+        USERS_TABLE: dataStack.usersTable.tableName,
+        DEVICE_ASSIGNMENTS_TABLE: dataStack.deviceAssignmentsTable.tableName,
+        DEVICES_TABLE: dataStack.deviceTable.tableName,
+        ROLE_ASSIGNMENTS_TABLE: authStack.roleAssignmentsTable.tableName,
+        AUDIT_LOG_GROUP: `gosteady-${env}-audit`,
+        ANALYTICS_QUERY_TIMEOUT_S: '15',
+      },
+    });
+    // Read-only DDB grants (Activity offloads + Patients join + Users roster +
+    // DeviceAssignments for the per-user Device ID + Devices for its last-seen +
+    // RoleAssignments for the walker-vs-care-circle isWalkerUser flag).
+    dataStack.activityTable.grantReadData(analyticsApi.function);
+    dataStack.patientsTable.grantReadData(analyticsApi.function);
+    dataStack.usersTable.grantReadData(analyticsApi.function);
+    dataStack.deviceAssignmentsTable.grantReadData(analyticsApi.function);
+    dataStack.deviceTable.grantReadData(analyticsApi.function);
+    authStack.roleAssignmentsTable.grantReadData(analyticsApi.function);
+    // Patients + Users + RoleAssignments are CMK-encrypted (IdentityKey) → decrypt to scan.
+    identityKey.grantDecrypt(analyticsApi.function);
+    // emit_audit symmetry (same justification as patient-api).
+    auditKey.grantEncryptDecrypt(analyticsApi.function);
+    // CloudWatch Logs Insights over the audit log group. StartQuery is scoped to
+    // the audit LG ARN; GetQueryResults / StopQuery take a queryId, not a
+    // resource, so they can't be resource-scoped (AWS-documented).
+    analyticsApi.function.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'AuditLogInsightsStart',
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:StartQuery'],
+      resources: [auditLogGroupArn],
+    }));
+    analyticsApi.function.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'AuditLogInsightsResults',
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:GetQueryResults', 'logs:StopQuery'],
+      resources: ['*'],
+    }));
+
+    const analyticsApiIntegration = new HttpLambdaIntegration(
+      'AnalyticsApiIntegration',
+      analyticsApi.function,
+    );
+    const analyticsRoutes: Array<[apigwv2.HttpMethod, string]> = [
+      [apigwv2.HttpMethod.GET, '/api/v1/admin/analytics/overview'],
+      [apigwv2.HttpMethod.GET, '/api/v1/admin/analytics/users'],
+      [apigwv2.HttpMethod.GET, '/api/v1/admin/analytics/users/{userId}'],
+    ];
+    for (const [method, p] of analyticsRoutes) {
+      this.httpApi.addRoutes({
+        path: p,
+        methods: [method],
+        integration: analyticsApiIntegration,
+        authorizer: userPoolAuthorizer,
+      });
+    }
+
+    // analytics-api errors alarm (mirrors the per-handler 1.6 pattern).
+    const analyticsApiErrorsAlarm = new cloudwatch.Alarm(this, 'AnalyticsApiErrors', {
+      alarmName: `gosteady-${env}-analytics-api-errors`,
+      alarmDescription:
+        'analytics-api Lambda Errors > 0 in 5 min — uncaught exception in an ' +
+        'internal analytics read. Check /aws/lambda/gosteady-{env}-analytics-api.',
+      metric: analyticsApi.function.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    analyticsApiErrorsAlarm.addAlarmAction(snsAction);
 
     // ════════════════════════════════════════════════════════════════
     // Phase 2A-AA — Alert Actions

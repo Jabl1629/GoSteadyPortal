@@ -131,6 +131,15 @@ class ApiClient {
     return CensusRosterResponse.fromJson(body);
   }
 
+  /// `GET /api/v1/admin/residents` — internal-only cross-tenant roster of active
+  /// D2C participants ("Pilot residents"; user-analytics.md §pilot view). Fixed
+  /// `/api/v1` path (internal always on the facility pool), not [_readPrefix].
+  /// Each row links into the existing per-patient reads (which serve internal).
+  Future<ResidentsResponse> getResidents() async {
+    final body = await _get('/api/v1/admin/residents');
+    return ResidentsResponse.fromJson(body);
+  }
+
   // ── 2A-AA writes (deployed 2026-05-23; wired in 2B-FAC-W) ───────
 
   /// `PATCH {prefix}/alerts/{patientId}/{compoundSk}` — alert ack.
@@ -208,6 +217,24 @@ class ApiClient {
     }
     final body = await _get('/api/v1/admin/devices', query: query);
     return FleetDevicesResponse.fromJson(body);
+  }
+
+  // ── Internal user analytics (docs/specs/user-analytics.md) ────────
+
+  /// `GET /api/v1/admin/analytics/overview?range=24h|7d|30d` — population KPIs.
+  /// Internal-only (server gates on internal_admin/internal_support).
+  Future<AnalyticsOverview> getAnalyticsOverview({String range = '7d'}) async {
+    final body = await _get('/api/v1/admin/analytics/overview',
+        query: {'range': range});
+    return AnalyticsOverview.fromJson(body);
+  }
+
+  /// `GET /api/v1/admin/analytics/users?range=24h|7d|30d` — per-user table.
+  /// Internal-only.
+  Future<AnalyticsUsersResponse> getAnalyticsUsers({String range = '7d'}) async {
+    final body = await _get('/api/v1/admin/analytics/users',
+        query: {'range': range});
+    return AnalyticsUsersResponse.fromJson(body);
   }
 
   /// `POST /api/v1/devices/{serial}/force-reset` — admin override →

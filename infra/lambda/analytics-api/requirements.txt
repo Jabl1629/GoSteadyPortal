@@ -1,0 +1,3 @@
+# Powertools sourced from Lambda layer (Phase 1.6). boto3 from runtime.
+# Nothing to pip-install — aggregate.py is pure stdlib; queries.py + handler.py
+# use boto3 (runtime) + _shared (vendored by ProcessingLambda).

@@ -55,6 +55,7 @@ import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
 
 import boto3
@@ -66,6 +67,59 @@ CODE_TTL_NOTE = "5 minutes"  # informational; actual TTL is the session lifetime
 MAX_ATTEMPTS = 3
 TWILIO_SECRET_ARN = os.environ.get("TWILIO_SECRET_ARN", "")
 TWILIO_API = "https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+
+# ── Audit emission (docs/specs/user-analytics.md) ──────────────────────
+# This Lambda is deliberately stdlib-only (no _shared bundle — tiny/fast on
+# the auth hot path), so it emits the audit-shape JSON line DIRECTLY. A pure
+# single-line JSON with `audit:true` is exactly what the Phase 1.7
+# subscription filter (`{ $.audit IS TRUE }`) matches; the audit-forwarder
+# parses it and stamps internal_access/severity. Event-name literals mirror
+# _shared/audit_catalog.py (kept in sync there). Best-effort: an emit must
+# NEVER break the OTP flow (user-analytics L5).
+AUDIT_AUTH_OTP_REQUESTED = "auth.otp_requested"
+AUDIT_AUTH_OTP_VERIFY_FAILED = "auth.otp_verify_failed"
+AUDIT_AUTH_LOGIN = "auth.login"
+
+
+def _emit_audit(event_name: str, *, actor: dict[str, Any] | None = None,
+                extra: dict[str, Any] | None = None) -> None:
+    try:
+        payload: dict[str, Any] = {
+            "audit": True,
+            "schema_version": 1,
+            "event": event_name,
+            "actor": actor or {},
+            "subject": {},
+            "action": "event",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        if extra is not None:
+            payload["extra"] = extra
+        print(json.dumps(payload, default=str))
+    except Exception:  # noqa: BLE001 — analytics must never break auth
+        pass
+
+
+def _actor(event: dict[str, Any]) -> dict[str, Any]:
+    """Audit actor from the custom-auth event. userId = Cognito username (sub);
+    the stable per-user key the analytics funnel correlates on."""
+    attrs = (event.get("request") or {}).get("userAttributes") or {}
+    actor: dict[str, Any] = {}
+    uid = event.get("userName") or attrs.get("sub")
+    if uid:
+        actor["userId"] = uid
+    cid = attrs.get("custom:clientId")
+    if cid:
+        actor["clientId"] = cid
+    role = attrs.get("custom:role")
+    if role:
+        actor["role"] = role
+    return actor
+
+
+def _phone_hint(event: dict[str, Any]) -> str:
+    attrs = (event.get("request") or {}).get("userAttributes") or {}
+    return _mask_phone(attrs.get("phone_number", ""))
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG001
@@ -95,6 +149,9 @@ def _define(event: dict[str, Any]) -> dict[str, Any]:
     if last.get("challengeName") == "CUSTOM_CHALLENGE" and last.get("challengeResult"):
         resp["issueTokens"] = True
         resp["failAuthentication"] = False
+        # Tokens are issued here — the definitive "successful login" moment.
+        _emit_audit(AUDIT_AUTH_LOGIN, actor=_actor(event),
+                    extra={"method": "sms_otp", "phoneHint": _phone_hint(event)})
         return event
 
     if len(session) >= MAX_ATTEMPTS:
@@ -129,6 +186,11 @@ def _create(event: dict[str, Any]) -> dict[str, Any]:
         phone = (event["request"].get("userAttributes") or {}).get("phone_number")
         if phone:
             _send_sms(phone, code)
+            # A FRESH code was generated + sent (the reuse branch above does
+            # not re-send, so this fires once per auth flow). Query-time
+            # dedup collapses same-user requests within 15 min (funnel #3).
+            _emit_audit(AUDIT_AUTH_OTP_REQUESTED, actor=_actor(event),
+                        extra={"phoneHint": _mask_phone(phone)})
 
     resp["privateChallengeParameters"] = {"answer": code}
     resp["challengeMetadata"] = f"CODE-{code}"
@@ -140,7 +202,12 @@ def _create(event: dict[str, Any]) -> dict[str, Any]:
 def _verify(event: dict[str, Any]) -> dict[str, Any]:
     expected = (event["request"].get("privateChallengeParameters") or {}).get("answer")
     submitted = (event["request"].get("challengeAnswer") or "").strip()
-    event["response"]["answerCorrect"] = bool(expected) and submitted == expected
+    correct = bool(expected) and submitted == expected
+    event["response"]["answerCorrect"] = correct
+    if not correct:
+        # Wrong code (one per failed attempt, up to MAX_ATTEMPTS).
+        _emit_audit(AUDIT_AUTH_OTP_VERIFY_FAILED, actor=_actor(event),
+                    extra={"phoneHint": _phone_hint(event)})
     return event
 
 

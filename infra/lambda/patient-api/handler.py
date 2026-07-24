@@ -45,6 +45,7 @@ from _shared.audit_catalog import (
     AUDIT_PATIENT_ACTIVITY_READ,
     AUDIT_PATIENT_DETAIL_READ,
     AUDIT_PATIENT_LIST_READ,
+    AUDIT_RESIDENTS_LIST_READ,
 )
 from _shared.observability import emit_audit, get_logger
 from _shared.pause_check import days_remaining, is_currently_paused
@@ -60,12 +61,14 @@ from queries import (
     batch_get_patients,
     get_active_assignment,
     get_device,
+    get_last_activity_at,
     get_patient,
     hide_walker_alerts,
     query_activity_window,
     query_alerts,
     query_patients_by_census,
     query_patients_by_client,
+    scan_active_d2c_patients,
 )
 from ranges import parse_range, range_to_window
 
@@ -590,6 +593,59 @@ def _action_census_roster(
     return ok_response(body)
 
 
+def _action_residents(
+    event: dict[str, Any], claims: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /api/v1/admin/residents — internal-only cross-tenant roster of active
+    D2C participants (the "Pilot residents" view, user-analytics.md §pilot view).
+
+    Every D2C household is its own client, so this scans across tenants — an
+    internal-only capability. Each row joins the active device (serial + status +
+    lastSeen heartbeat) and the last offload, and links to the existing
+    per-resident detail/activity/alerts reads (which already serve internal by
+    patientId). Audited (cross-tenant → auto-elevated internal_access)."""
+    if not is_internal(claims):
+        raise ApiError(
+            code="INSUFFICIENT_PERMISSIONS",
+            message="Residents roster is internal-only",
+            status=403,
+        )
+
+    scan = scan_active_d2c_patients(_patients)
+    rows: list[dict[str, Any]] = []
+    for p in scan["rows"]:
+        pid = p.get("patientId", "")
+        serial = device_status = device_last_seen = None
+        asn = get_active_assignment(_assignments, pid)
+        if asn:
+            serial = asn.get("serialNumber")
+            device = get_device(_devices, serial) if serial else None
+            if device:
+                device_status = device.get("status")
+                device_last_seen = device.get("lastSeen") or device.get("firstHeartbeatAt")
+        rows.append({
+            "patientId": pid,
+            "displayName": p.get("displayName"),
+            "clientId": p.get("clientId"),
+            "status": p.get("status"),
+            "timezone": p.get("timezone"),
+            "deviceSerial": serial,
+            "deviceStatus": device_status,
+            "deviceLastSeen": device_last_seen,
+            "lastActivityAt": get_last_activity_at(_activity, pid),
+        })
+    # Most-recently-active residents first; those with no offload yet sort last.
+    rows.sort(key=lambda r: r.get("lastActivityAt") or "", reverse=True)
+
+    _audit(
+        AUDIT_RESIDENTS_LIST_READ, claims,
+        subject={"residentCount": len(rows)},
+        extra={"truncated": scan["truncated"]},
+        request_id=_request_id(event),
+    )
+    return ok_response({"residents": rows, "count": len(rows), "truncated": scan["truncated"]})
+
+
 # ── Audit + request helpers ────────────────────────────────────────────
 
 
@@ -639,6 +695,7 @@ def _route(api_event: dict[str, Any]) -> tuple[str, dict[str, str]]:
         ("GET", "GET /api/v1/patients/{id}/alerts"): "get_alerts",
         ("GET", "GET /api/v1/me/patients"): "me_patients",
         ("GET", "GET /api/v1/facilities/{facilityId}/censuses/{censusId}/patients"): "census_roster",
+        ("GET", "GET /api/v1/admin/residents"): "residents",
     }
     action = table.get((method, route_key))
     if not action:
@@ -679,6 +736,8 @@ def handler(api_event: dict[str, Any], context: Any) -> dict[str, Any]:
             return _action_get_alerts(api_event, claims, params.get("id", ""))
         if action == "me_patients":
             return _action_me_patients(api_event, claims)
+        if action == "residents":
+            return _action_residents(api_event, claims)
         if action == "census_roster":
             return _action_census_roster(
                 api_event, claims,

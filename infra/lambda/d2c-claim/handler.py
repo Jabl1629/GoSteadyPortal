@@ -43,6 +43,7 @@ from botocore.exceptions import ClientError
 from _shared.api_authz import extract_claims, require_authenticated
 from _shared.api_error import ApiError, error_response, ok_response
 from _shared.audit_catalog import (
+    AUDIT_AUTH_LOGIN,
     AUDIT_DEVICE_ACTIVATION_SENT,
     AUDIT_DEVICE_ASSIGNED,
     AUDIT_DEVICE_CLAIMED,
@@ -688,6 +689,13 @@ def _verify_login_code(event: dict[str, Any]) -> dict[str, Any]:
                actor={"clientId": client_id},
                subject={"clientId": client_id},
                action="event", extra={"mask": mask_phone(phone)},
+               request_id=_request_id(event))
+    # Unify all login completions under auth.login (user-analytics.md D7) so the
+    # #2 metric counts QR re-logins alongside SMS-OTP + password, split by method.
+    emit_audit(event=AUDIT_AUTH_LOGIN,
+               actor={"clientId": client_id},
+               subject={"clientId": client_id},
+               action="event", extra={"method": "qr_relogin", "mask": mask_phone(phone)},
                request_id=_request_id(event))
     return ok_response({
         "status": "ok",

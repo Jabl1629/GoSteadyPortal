@@ -22,8 +22,10 @@ Architecture: docs/specs/ARCHITECTURE.md §4 Multi-Tenancy & Access Model
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import boto3
@@ -69,6 +71,57 @@ ERR_NO_ROLE_ASSIGNED = "NO_ROLE_ASSIGNED"
 ERR_MFA_REQUIRED = "MFA_REQUIRED"
 ERR_TENANCY_VIOLATION = "TENANCY_VIOLATION"
 ERR_INVALID_ROLE = "INVALID_ROLE"
+
+# ── Audit emission (docs/specs/user-analytics.md) ──────────────────────
+# This Lambda is stdlib-only (bare `logging`, no _shared bundle), so it emits
+# the audit-shape JSON line DIRECTLY: a pure single-line JSON with `audit:true`
+# is what the Phase 1.7 subscription filter (`{ $.audit IS TRUE }`) matches and
+# the audit-forwarder parses (it stamps internal_access/severity — an
+# internal_* login is auto-elevated). Event literals mirror
+# _shared/audit_catalog.py. Best-effort: an emit must NEVER break auth (L5).
+# NOTE: only OUR authorization denials (role/tenancy/MFA) are visible here —
+# credential-level failures (wrong password) happen earlier in Cognito and
+# never reach this trigger.
+AUDIT_AUTH_LOGIN = "auth.login"
+AUDIT_AUTH_LOGIN_FAILED = "auth.login_failed"
+AUDIT_AUTH_TOKEN_REFRESH = "auth.token_refresh"
+TRIGGER_SIGN_IN = "TokenGeneration_Authentication"
+TRIGGER_REFRESH = "TokenGeneration_RefreshTokens"
+
+
+def _emit_audit(event_name: str, actor: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) -> None:
+    try:
+        payload: Dict[str, Any] = {
+            "audit": True,
+            "schema_version": 1,
+            "event": event_name,
+            "actor": actor or {},
+            "subject": {},
+            "action": "event",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        if extra is not None:
+            payload["extra"] = extra
+        print(json.dumps(payload, default=str))
+    except Exception:  # noqa: BLE001 — analytics must never break auth
+        pass
+
+
+def _emit_login_failed(user_id: str, role: Optional[str], reason: str) -> None:
+    actor: Dict[str, Any] = {"userId": user_id}
+    if role:
+        actor["role"] = role
+    _emit_audit(AUDIT_AUTH_LOGIN_FAILED, actor, {"reason": reason, "method": "password"})
+
+
+def _emit_auth_success(user_id: str, role: str, client_id: str, trigger: str) -> None:
+    actor = {"userId": user_id, "role": role, "clientId": client_id}
+    if trigger == TRIGGER_SIGN_IN:
+        _emit_audit(AUDIT_AUTH_LOGIN, actor, {"method": "password"})
+    elif trigger == TRIGGER_REFRESH:
+        _emit_audit(AUDIT_AUTH_TOKEN_REFRESH, actor)
+    # Other trigger sources (HostedAuth / NewPasswordChallenge / device auth)
+    # are neither a fresh sign-in nor a refresh for our funnel — no emit.
 
 # ──────────────────────────────────────────────────────────────────────
 # AWS clients (initialized at module load — reused across warm invocations)
@@ -301,19 +354,22 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "RoleAssignment missing — denying auth",
             extra={"userId": user_id, "errorCode": ERR_NO_ROLE_ASSIGNED},
         )
+        _emit_login_failed(user_id, None, ERR_NO_ROLE_ASSIGNED)
         raise ValueError(ERR_NO_ROLE_ASSIGNED)
 
     role = role_assignment.get("role", "")
     client_id = role_assignment.get("clientId", "")
 
-    # ── Step 2: validate role enum ──────────────────────────────────
-    _validate_role(role)
-
-    # ── Step 3: validate tenancy invariants ─────────────────────────
-    _validate_tenancy(role, client_id)
-
-    # ── Step 4: enforce MFA for privileged roles ────────────────────
-    _validate_mfa(role, event)
+    # ── Steps 2-4: validate role enum / tenancy / MFA ───────────────
+    try:
+        _validate_role(role)
+        _validate_tenancy(role, client_id)
+        _validate_mfa(role, event)
+    except ValueError as exc:
+        # Authenticated at the Cognito layer but denied a token by OUR rules.
+        # `str(exc)` is `CODE:detail`; keep just the code as the funnel reason.
+        _emit_login_failed(user_id, role or None, str(exc).split(":", 1)[0])
+        raise
 
     # ── Step 5: build claims + response ────────────────────────────
     claims = _build_claims(role_assignment)
@@ -330,5 +386,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "censusesCount": len(claims["custom:censuses"].split(",")) if claims["custom:censuses"] else 0,
         },
     )
+
+    # ── Auth funnel (user-analytics.md): login on sign-in, refresh on refresh ──
+    _emit_auth_success(user_id, role, client_id, trigger)
 
     return response

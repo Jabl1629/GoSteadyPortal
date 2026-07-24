@@ -191,8 +191,21 @@ export class AuditStack extends cdk.Stack {
       // D2C Phase 1 (2026-05-30): d2c-claim emits d2c.household_created +
       // d2c.device_claimed + the device.* provision audits (claimed /
       // assigned / activation_sent / provision_rollback). Bundled with
-      // the D2C deploy (Migration Pattern 18.8).
+      // the D2C deploy (Migration Pattern 18.8). Also emits auth.login
+      // (method=qr_relogin) as of user-analytics (already subscribed here).
       `gosteady-${env}-d2c-claim`,
+      // User analytics (2026-07-21, docs/specs/user-analytics.md): the auth
+      // funnel + the new internal analytics read endpoint. The two D2C auth
+      // triggers were NOT previously subscribed (their audit emissions are
+      // new). cognito-pre-token is already listed above — its new
+      // auth.login / auth.login_failed / auth.token_refresh emissions flow
+      // through the existing filter. Bundled per the D9 gap-avoidance rule.
+      //  - d2c-custom-auth: auth.otp_requested / auth.login(sms_otp) / auth.otp_verify_failed
+      //  - d2c-pre-token:   auth.token_refresh (D2C refresh trigger)
+      //  - analytics-api:   analytics.overview.read / analytics.users.read
+      `gosteady-${env}-d2c-custom-auth`,
+      `gosteady-${env}-d2c-pre-token`,
+      `gosteady-${env}-analytics-api`,
     ];
 
     const forwarderDestination = new logsDestinations.LambdaDestination(forwarder.function);

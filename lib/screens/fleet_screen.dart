@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
 import '../api/api_client.dart';
 import '../api/api_exception.dart';
@@ -232,6 +233,18 @@ class _FleetScreenState extends State<FleetScreen> {
               padding: EdgeInsets.symmetric(horizontal: 12),
               child: Center(child: _ReadOnlyBadge()),
             ),
+          TextButton.icon(
+            onPressed: () => context.go('/residents'),
+            icon: const Icon(Icons.groups_outlined, size: 18),
+            label: const Text('Residents'),
+            style: TextButton.styleFrom(foregroundColor: AppTheme.textSoft),
+          ),
+          TextButton.icon(
+            onPressed: () => context.go('/analytics'),
+            icon: const Icon(Icons.insights_outlined, size: 18),
+            label: const Text('Analytics'),
+            style: TextButton.styleFrom(foregroundColor: AppTheme.textSoft),
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Refresh',

@@ -54,106 +54,38 @@ class PatientListRow {
 /// extra space. When the viewport is narrower than the minimum, the
 /// table is wrapped in a horizontal scroller so phone-sized viewports
 /// still work.
+///
+/// [showSteps] / [colorMetrics] parameterize the table for the internal
+/// Pilot residents view (user-analytics.md §pilot view): rollator devices
+/// report no steps, so `showSteps: false` drops the Steps + Step-trend
+/// columns; and while low/high active-minute bands are still being learned,
+/// `colorMetrics: false` renders the active-minutes cells in plain black
+/// instead of the reference-band tiers. Both default to the Census behaviour.
 class PatientListView extends StatelessWidget {
   const PatientListView({
     super.key,
     required this.rows,
     required this.selectedPatientId,
     required this.onSelect,
+    this.showSteps = true,
+    this.colorMetrics = true,
   });
 
   final List<PatientListRow> rows;
   final String? selectedPatientId;
   final ValueChanged<String> onSelect;
-
-  // Fixed column widths — sum is the table's natural minimum width.
-  // `flex` columns absorb extra horizontal space when the viewport is
-  // wider than the minimum (kept 0 for numeric columns so they don't
-  // stretch into oceans of whitespace).
-  static const List<_ColumnSpec> _columns = [
-    _ColumnSpec(
-      'Name',
-      170,
-      _CellAlign.start,
-      tooltip: 'Name and notification severity.',
-      flex: 3,
-    ),
-    _ColumnSpec(
-      'Location',
-      195,
-      _CellAlign.start,
-      tooltip: 'Unit assignment and room number.',
-      flex: 3,
-    ),
-    _ColumnSpec(
-      'Notifications',
-      100,
-      _CellAlign.center,
-      tooltip: 'Unreviewed notifications awaiting caregiver review.',
-    ),
-    _ColumnSpec(
-      'Active minutes today',
-      115,
-      _CellAlign.end,
-      tooltip:
-          'Minutes actively moving today, per the cap\'s '
-          'IMU + step-detection algorithm.',
-    ),
-    _ColumnSpec(
-      'Active minutes 7d avg',
-      120,
-      _CellAlign.end,
-      tooltip: 'Mean daily active minutes over the last 7 days.',
-    ),
-    _ColumnSpec(
-      'Active minutes trend',
-      90,
-      _CellAlign.center,
-      tooltip:
-          'Last 7 days vs the prior 7 days. Arrow appears when the change '
-          'exceeds ±5%.',
-    ),
-    _ColumnSpec(
-      'Steps today',
-      90,
-      _CellAlign.end,
-      tooltip: 'Total steps detected today.',
-    ),
-    _ColumnSpec(
-      'Step trend',
-      80,
-      _CellAlign.center,
-      tooltip:
-          'Last 7 days vs the prior 7 days. Arrow appears when the change '
-          'exceeds ±5%.',
-    ),
-    _ColumnSpec(
-      'Gait Speed (ft/sec)',
-      105,
-      _CellAlign.end,
-      tooltip:
-          'Walking speed over the last 3 days, averaged. Values shown in '
-          'feet per second.',
-    ),
-    _ColumnSpec(
-      'Gait trend',
-      80,
-      _CellAlign.center,
-      tooltip:
-          '3-day average vs the prior 30-day baseline. Arrow appears when '
-          'the change exceeds ±3%.',
-    ),
-  ];
-
-  static double get _tableMinWidth =>
-      _columns.fold<double>(0, (s, c) => s + c.width);
+  final bool showSteps;
+  final bool colorMetrics;
 
   @override
   Widget build(BuildContext context) {
+    final columns = _buildColumns(showSteps: showSteps);
+    final tableMinWidth = columns.fold<double>(0, (s, c) => s + c.width);
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final available = constraints.maxWidth;
-        final shouldScroll = available < _tableMinWidth;
+        final shouldScroll = available < tableMinWidth;
 
         final table = Container(
           decoration: BoxDecoration(
@@ -166,7 +98,7 @@ class PatientListView extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              _HeaderRow(columns: _columns, useFlex: !shouldScroll),
+              _HeaderRow(columns: columns, useFlex: !shouldScroll),
               for (var i = 0; i < rows.length; i++)
                 MaybeVisible(
                   detectorKey:
@@ -174,8 +106,9 @@ class PatientListView extends StatelessWidget {
                   onFirstVisible: rows[i].onFirstVisible,
                   child: _DataRow(
                     row: rows[i],
-                    columns: _columns,
+                    columns: columns,
                     useFlex: !shouldScroll,
+                    colorMetrics: colorMetrics,
                     selected: rows[i].patient.id == selectedPatientId,
                     isLast: i == rows.length - 1,
                     onTap: () => onSelect(rows[i].patient.id),
@@ -190,7 +123,7 @@ class PatientListView extends StatelessWidget {
           // let the user swipe horizontally.
           return SingleChildScrollView(
             scrollDirection: Axis.horizontal,
-            child: SizedBox(width: _tableMinWidth, child: table),
+            child: SizedBox(width: tableMinWidth, child: table),
           );
         }
         // Wide viewport: table grows to fill the available width via
@@ -201,15 +134,106 @@ class PatientListView extends StatelessWidget {
   }
 }
 
+// Column set — identified by `id` so the data + header rows stay aligned
+// when optional columns (Steps / Step trend) are dropped. `flex` columns
+// absorb extra horizontal space when the viewport is wider than the minimum
+// (kept 0 for numeric columns so they don't stretch into oceans of whitespace).
+List<_ColumnSpec> _buildColumns({required bool showSteps}) => [
+      const _ColumnSpec(
+        'name',
+        'Name',
+        170,
+        _CellAlign.start,
+        tooltip: 'Name and notification severity.',
+        flex: 3,
+      ),
+      const _ColumnSpec(
+        'location',
+        'Location',
+        195,
+        _CellAlign.start,
+        tooltip: 'Unit assignment and room number.',
+        flex: 3,
+      ),
+      const _ColumnSpec(
+        'notifications',
+        'Notifications',
+        100,
+        _CellAlign.center,
+        tooltip: 'Unreviewed notifications awaiting caregiver review.',
+      ),
+      const _ColumnSpec(
+        'am_today',
+        'Active minutes today',
+        115,
+        _CellAlign.end,
+        tooltip: 'Minutes actively moving today, per the cap\'s '
+            'IMU + step-detection algorithm.',
+      ),
+      const _ColumnSpec(
+        'am_7d',
+        'Active minutes 7d avg',
+        120,
+        _CellAlign.end,
+        tooltip: 'Mean daily active minutes over the last 7 days.',
+      ),
+      const _ColumnSpec(
+        'am_trend',
+        'Active minutes trend',
+        90,
+        _CellAlign.center,
+        tooltip:
+            'Last 7 days vs the prior 7 days. Arrow appears when the change '
+            'exceeds ±5%.',
+      ),
+      if (showSteps) ...[
+        const _ColumnSpec(
+          'steps_today',
+          'Steps today',
+          90,
+          _CellAlign.end,
+          tooltip: 'Total steps detected today.',
+        ),
+        const _ColumnSpec(
+          'step_trend',
+          'Step trend',
+          80,
+          _CellAlign.center,
+          tooltip:
+              'Last 7 days vs the prior 7 days. Arrow appears when the change '
+              'exceeds ±5%.',
+        ),
+      ],
+      const _ColumnSpec(
+        'gait',
+        'Gait Speed (ft/sec)',
+        105,
+        _CellAlign.end,
+        tooltip:
+            'Walking speed over the last 3 days, averaged. Values shown in '
+            'feet per second.',
+      ),
+      const _ColumnSpec(
+        'gait_trend',
+        'Gait trend',
+        80,
+        _CellAlign.center,
+        tooltip: '3-day average vs the prior 30-day baseline. Arrow appears '
+            'when the change exceeds ±3%.',
+      ),
+    ];
+
 enum _CellAlign { start, center, end }
 
 class _ColumnSpec {
+  final String id;
   final String label;
   final double width;
   final _CellAlign align;
   final String tooltip;
   final int flex;
   const _ColumnSpec(
+    this.id,
     this.label,
     this.width,
     this.align, {
@@ -239,18 +263,18 @@ class _HeaderRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: Row(
         children: [
-          for (var i = 0; i < columns.length; i++)
+          for (final col in columns)
             _slot(
-              col: columns[i],
+              col: col,
               useFlex: useFlex,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 child: Tooltip(
-                  message: columns[i].tooltip,
+                  message: col.tooltip,
                   waitDuration: const Duration(milliseconds: 350),
                   child: Text(
-                    columns[i].label,
-                    textAlign: _toTextAlign(columns[i].align),
+                    col.label,
+                    textAlign: _toTextAlign(col.align),
                     style: const TextStyle(
                       color: AppTheme.textSoft,
                       fontSize: 11,
@@ -286,6 +310,7 @@ class _DataRow extends StatefulWidget {
     required this.row,
     required this.columns,
     required this.useFlex,
+    required this.colorMetrics,
     required this.selected,
     required this.isLast,
     required this.onTap,
@@ -294,6 +319,7 @@ class _DataRow extends StatefulWidget {
   final PatientListRow row;
   final List<_ColumnSpec> columns;
   final bool useFlex;
+  final bool colorMetrics;
   final bool selected;
   final bool isLast;
   final VoidCallback onTap;
@@ -308,11 +334,6 @@ class _DataRowState extends State<_DataRow> {
   @override
   Widget build(BuildContext context) {
     final r = widget.row;
-    final stats = r.stats;
-    final unitOnly = r.unitDisplay.replaceAll('Assisted Living — ', 'AL ');
-
-    final activeMin7d = stats.activeMinutes7dAvg.round();
-    final gaitFps = stats.gaitSpeed3dAvg; // already ft/s (0.16.0-gait+)
 
     Color rowBg;
     if (widget.selected) {
@@ -343,106 +364,18 @@ class _DataRowState extends State<_DataRow> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              _cell(
-                index: 0,
-                child: _ResidentCell(
-                  name: r.patient.displayName,
-                  severity: r.highestSeverity,
-                  paused: r.patient.notificationsPaused?.isActive ?? false,
-                ),
-              ),
-              _cell(
-                index: 1,
-                child: Text(
-                  '$unitOnly  ·  Rm ${r.patient.room}',
-                  style: const TextStyle(
-                    color: AppTheme.textSoft,
-                    fontSize: 13,
+              for (final col in widget.columns)
+                _slot(
+                  col: col,
+                  useFlex: widget.useFlex,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Align(
+                      alignment: _toAlignment(col.align),
+                      child: _content(col.id, r),
+                    ),
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
-              ),
-              _cell(
-                index: 2,
-                child: r.isLoading
-                    ? const _SkeletonBar(width: 70)
-                    : _NeedsReviewCell(
-                        count: r.activeNotifications.length,
-                        severity: r.highestSeverity,
-                        headlineLabel: _headlineLabel(r.activeNotifications),
-                      ),
-              ),
-              _cell(
-                index: 3,
-                child: r.isLoading
-                    ? const _SkeletonBar(width: 28)
-                    : _MetricText(
-                        value: stats.activeMinutesToday.toString(),
-                        color: _activeMinColor(stats.activeMinutesToday),
-                      ),
-              ),
-              _cell(
-                index: 4,
-                child: r.isLoading
-                    ? const _SkeletonBar(width: 28)
-                    : _MetricText(
-                        value: activeMin7d.toString(),
-                        color: _activeMinColor(activeMin7d),
-                      ),
-              ),
-              _cell(
-                index: 5,
-                child: r.isLoading
-                    ? const _SkeletonBar(width: 36)
-                    : _TrendCell(
-                        trend: stats.activeMinutesTrend7d,
-                        recent: stats.activeMinutes7dAvg,
-                        prior: stats.activeMinutesPrior7dAvg,
-                      ),
-              ),
-              _cell(
-                index: 6,
-                child: r.isLoading
-                    ? const _SkeletonBar(width: 40)
-                    : _MetricText(
-                        value: NumberFormat('#,##0').format(stats.stepsToday),
-                        color: _stepsColor(stats.stepsToday),
-                      ),
-              ),
-              _cell(
-                index: 7,
-                child: r.isLoading
-                    ? const _SkeletonBar(width: 36)
-                    : _TrendCell(
-                        trend: stats.stepsTrend7d,
-                        recent: stats.stepsRecentAvg,
-                        prior: stats.stepsPriorAvg,
-                      ),
-              ),
-              _cell(
-                index: 8,
-                child: r.isLoading
-                    ? const _SkeletonBar(width: 28)
-                    : _MetricText(
-                        value: stats.gaitSpeed3dAvg > 0
-                            ? gaitFps.toStringAsFixed(2)
-                            : '—',
-                        color: stats.gaitSpeed3dAvg > 0
-                            ? AppTheme.textDark
-                            : AppTheme.textSoft,
-                      ),
-              ),
-              _cell(
-                index: 9,
-                child: r.isLoading
-                    ? const _SkeletonBar(width: 36)
-                    : _TrendCell(
-                        trend: stats.gaitSpeedTrend,
-                        recent: stats.gaitSpeed3dAvg,
-                        prior: stats.gaitSpeedPriorAvg,
-                      ),
-              ),
             ],
           ),
         ),
@@ -450,16 +383,100 @@ class _DataRowState extends State<_DataRow> {
     );
   }
 
-  Widget _cell({required int index, required Widget child}) {
-    final col = widget.columns[index];
-    return _slot(
-      col: col,
-      useFlex: widget.useFlex,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: Align(alignment: _toAlignment(col.align), child: child),
-      ),
-    );
+  /// Renders one cell's content by column id. Keeping the mapping here (not
+  /// positional) is what lets optional columns drop without misaligning.
+  Widget _content(String id, PatientListRow r) {
+    final stats = r.stats;
+    switch (id) {
+      case 'name':
+        return _ResidentCell(
+          name: r.patient.displayName,
+          severity: r.highestSeverity,
+          paused: r.patient.notificationsPaused?.isActive ?? false,
+        );
+      case 'location':
+        // D2C/internal residents have no room — show just the location label
+        // (the cap serial) without a dangling "· Rm".
+        final unitOnly = r.unitDisplay.replaceAll('Assisted Living — ', 'AL ');
+        return Text(
+          r.patient.room.isEmpty ? unitOnly : '$unitOnly  ·  Rm ${r.patient.room}',
+          style: const TextStyle(color: AppTheme.textSoft, fontSize: 13),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        );
+      case 'notifications':
+        return r.isLoading
+            ? const _SkeletonBar(width: 70)
+            : _NeedsReviewCell(
+                count: r.activeNotifications.length,
+                severity: r.highestSeverity,
+                headlineLabel: _headlineLabel(r.activeNotifications),
+              );
+      case 'am_today':
+        return r.isLoading
+            ? const _SkeletonBar(width: 28)
+            : _MetricText(
+                value: stats.activeMinutesToday.toString(),
+                color: widget.colorMetrics
+                    ? _activeMinColor(stats.activeMinutesToday)
+                    : AppTheme.textDark,
+              );
+      case 'am_7d':
+        final activeMin7d = stats.activeMinutes7dAvg.round();
+        return r.isLoading
+            ? const _SkeletonBar(width: 28)
+            : _MetricText(
+                value: activeMin7d.toString(),
+                color: widget.colorMetrics
+                    ? _activeMinColor(activeMin7d)
+                    : AppTheme.textDark,
+              );
+      case 'am_trend':
+        return r.isLoading
+            ? const _SkeletonBar(width: 36)
+            : _TrendCell(
+                trend: stats.activeMinutesTrend7d,
+                recent: stats.activeMinutes7dAvg,
+                prior: stats.activeMinutesPrior7dAvg,
+              );
+      case 'steps_today':
+        return r.isLoading
+            ? const _SkeletonBar(width: 40)
+            : _MetricText(
+                value: NumberFormat('#,##0').format(stats.stepsToday),
+                color: widget.colorMetrics
+                    ? _stepsColor(stats.stepsToday)
+                    : AppTheme.textDark,
+              );
+      case 'step_trend':
+        return r.isLoading
+            ? const _SkeletonBar(width: 36)
+            : _TrendCell(
+                trend: stats.stepsTrend7d,
+                recent: stats.stepsRecentAvg,
+                prior: stats.stepsPriorAvg,
+              );
+      case 'gait':
+        final gaitFps = stats.gaitSpeed3dAvg; // already ft/s (0.16.0-gait+)
+        return r.isLoading
+            ? const _SkeletonBar(width: 28)
+            : _MetricText(
+                value: stats.gaitSpeed3dAvg > 0 ? gaitFps.toStringAsFixed(2) : '—',
+                color: stats.gaitSpeed3dAvg > 0
+                    ? AppTheme.textDark
+                    : AppTheme.textSoft,
+              );
+      case 'gait_trend':
+        return r.isLoading
+            ? const _SkeletonBar(width: 36)
+            : _TrendCell(
+                trend: stats.gaitSpeedTrend,
+                recent: stats.gaitSpeed3dAvg,
+                prior: stats.gaitSpeedPriorAvg,
+              );
+      default:
+        return const SizedBox.shrink();
+    }
   }
 }
 
@@ -472,9 +489,9 @@ class _DataRowState extends State<_DataRow> {
 
 Color _activeMinColor(int min) {
   if (min < 10) return AppTheme.statusAlert; // very low
-  if (min < 20) return AppTheme.statusWarn;  // low
-  if (min >= 40) return AppTheme.statusOk;   // high
-  return AppTheme.textDark;                  // typical
+  if (min < 20) return AppTheme.statusWarn; // low
+  if (min >= 40) return AppTheme.statusOk; // high
+  return AppTheme.textDark; // typical
 }
 
 Color _stepsColor(int steps) {
@@ -701,4 +718,3 @@ class _SkeletonBar extends StatelessWidget {
     );
   }
 }
-

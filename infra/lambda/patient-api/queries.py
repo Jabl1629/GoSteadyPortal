@@ -186,6 +186,50 @@ def query_patients_by_census(
     }
 
 
+def scan_active_d2c_patients(
+    patients_table: Any, *, cap: int = 500
+) -> dict[str, Any]:
+    """Cross-tenant roster of ACTIVE D2C patients — the internal "Pilot residents"
+    view (docs/specs/user-analytics.md §pilot view). Every D2C household is its
+    own `dtc_*` client, so there's no single-client query that spans them; this
+    scans Patients and keeps `status=active` rows whose `clientId` begins `dtc_`.
+
+    Internal-only caller (tenancy bypass) — the scan crosses tenants by design.
+    Bounded (pilot scale); returns {"rows": [...], "truncated": bool}. The
+    by-client-status GSI is the scale path once the pilot outgrows a scan.
+    """
+    rows: list[dict[str, Any]] = []
+    kwargs: dict[str, Any] = {
+        "FilterExpression": Attr("clientId").begins_with("dtc_") & Attr("status").eq("active"),
+        "ProjectionExpression": "patientId, displayName, clientId, facilityId, censusId, #tz, #st",
+        "ExpressionAttributeNames": {"#tz": "timezone", "#st": "status"},
+    }
+    truncated = False
+    while True:
+        res = patients_table.scan(**kwargs)
+        rows.extend(res.get("Items", []))
+        lek = res.get("LastEvaluatedKey")
+        if not lek or len(rows) >= cap:
+            truncated = bool(lek) and len(rows) >= cap
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    return {"rows": rows[:cap], "truncated": truncated}
+
+
+def get_last_activity_at(activity_table: Any, patient_id: str) -> str | None:
+    """Timestamp (session_end UTC) of the patient's most recent offload, or None.
+    Base-table Query, newest-first, Limit 1 — the roster's "last walk" signal."""
+    res = activity_table.query(
+        KeyConditionExpression=Key("patientId").eq(patient_id),
+        ScanIndexForward=False,
+        Limit=1,
+        ProjectionExpression="#ts",
+        ExpressionAttributeNames={"#ts": "timestamp"},
+    )
+    items = res.get("Items", [])
+    return items[0].get("timestamp") if items else None
+
+
 def batch_get_patients(patients_table: Any, patient_ids: list[str]) -> list[dict[str, Any]]:
     """
     BatchGetItem on Patients keyed by patientIds. Used by family_viewer.

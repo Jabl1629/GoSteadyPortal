@@ -93,6 +93,20 @@ AUDIT_AUTH_LOGIN = "auth.login"
 AUDIT_AUTH_LOGIN_FAILED = "auth.login_failed"
 AUDIT_AUTH_MFA_CHALLENGE = "auth.mfa_challenge"
 AUDIT_AUTH_SESSION_READ = "auth.session.read"  # Phase 2A-0 stub endpoint (GET /api/v1/me)
+# User-analytics (docs/specs/user-analytics.md) — wires the auth funnel.
+# NOTE: the three stdlib trigger Lambdas (d2c-custom-auth, cognito-pre-token,
+# d2c-pre-token) do NOT bundle _shared, so they hardcode these strings inline
+# (with a back-reference comment). Keep the literals in sync with this catalog.
+AUDIT_AUTH_OTP_REQUESTED = "auth.otp_requested"  # CreateAuthChallenge sent a FRESH D2C SMS-OTP (funnel numerator; resend-dedup at query time)
+AUDIT_AUTH_OTP_VERIFY_FAILED = "auth.otp_verify_failed"  # wrong D2C OTP code submitted
+AUDIT_AUTH_TOKEN_REFRESH = "auth.token_refresh"  # Pre-Token RefreshTokens trigger (both pools) — densifies the #4 active-time proxy
+
+# ── User analytics reads (docs/specs/user-analytics.md) ───────────────
+AUDIT_ANALYTICS_OVERVIEW_READ = "analytics.overview.read"  # internal cross-tenant population KPIs; count-only subject
+AUDIT_ANALYTICS_USERS_READ = "analytics.users.read"  # internal per-user analytics table / drill-down; count-only subject
+
+# ── Internal residents roster (docs/specs/user-analytics.md §pilot view) ──
+AUDIT_RESIDENTS_LIST_READ = "residents.list.read"  # internal cross-tenant active-D2C roster; count-only subject
 
 # ── API middleware (Phase 2A-0) ───────────────────────────────────────
 AUDIT_HANDLER_ERROR = "audit.handler.error"  # uncaught handler exception
@@ -161,6 +175,12 @@ KNOWN_AUDIT_EVENTS = frozenset(
         AUDIT_AUTH_LOGIN_FAILED,
         AUDIT_AUTH_MFA_CHALLENGE,
         AUDIT_AUTH_SESSION_READ,
+        AUDIT_AUTH_OTP_REQUESTED,
+        AUDIT_AUTH_OTP_VERIFY_FAILED,
+        AUDIT_AUTH_TOKEN_REFRESH,
+        AUDIT_ANALYTICS_OVERVIEW_READ,
+        AUDIT_ANALYTICS_USERS_READ,
+        AUDIT_RESIDENTS_LIST_READ,
         AUDIT_HANDLER_ERROR,
         AUDIT_ROLE_ASSIGNED,
         AUDIT_ROLE_REVOKED,

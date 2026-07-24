@@ -908,3 +908,268 @@ class MonitoringSession {
     );
   }
 }
+
+// ── Internal user analytics (docs/specs/user-analytics.md) ──────────────
+
+/// One (label, count) point — an offload-per-day date or an offload-per-hour
+/// hour-of-day bucket.
+class AnalyticsBucket {
+  final String label;
+  final int count;
+  const AnalyticsBucket({required this.label, required this.count});
+}
+
+/// #3 OTP funnel. `abandonmentRate` is 0-1, or null when nothing was requested.
+class OtpFunnel {
+  final int requested;
+  final int completed;
+  final int abandoned;
+  final int verifyFailed;
+  final double? abandonmentRate;
+
+  const OtpFunnel({
+    required this.requested,
+    required this.completed,
+    required this.abandoned,
+    required this.verifyFailed,
+    this.abandonmentRate,
+  });
+
+  factory OtpFunnel.fromJson(Map<String, dynamic> json) => OtpFunnel(
+        requested: _parseInt(json['requested']) ?? 0,
+        completed: _parseInt(json['completed']) ?? 0,
+        abandoned: _parseInt(json['abandoned']) ?? 0,
+        verifyFailed: _parseInt(json['verifyFailed']) ?? 0,
+        abandonmentRate: _parseDouble(json['abandonmentRate']),
+      );
+}
+
+/// #1 offloads — total + per-day time series + per-hour-of-day histogram.
+class OffloadBuckets {
+  final int total;
+  final List<AnalyticsBucket> perDay;
+  final List<AnalyticsBucket> perHour;
+
+  const OffloadBuckets({
+    required this.total,
+    required this.perDay,
+    required this.perHour,
+  });
+
+  factory OffloadBuckets.fromJson(Map<String, dynamic> json) {
+    List<AnalyticsBucket> buckets(Object? raw, String labelKey) =>
+        ((raw as List?) ?? const [])
+            .map((e) => AnalyticsBucket(
+                  label: (e as Map)[labelKey].toString(),
+                  count: _parseInt(e['count']) ?? 0,
+                ))
+            .toList(growable: false);
+    return OffloadBuckets(
+      total: _parseInt(json['total']) ?? 0,
+      perDay: buckets(json['perDay'], 'date'),
+      perHour: buckets(json['perHour'], 'hour'),
+    );
+  }
+}
+
+/// Population overview (`GET /admin/analytics/overview`).
+class AnalyticsOverview {
+  final String range;
+  final int loginsTotal;
+  final Map<String, int> loginsByMethod;
+  final OtpFunnel otp;
+  final int activeUsers;
+  final double avgSessionMinutes;
+  final OffloadBuckets offloads;
+  final int coachTurns;
+  final int coachActiveUsers;
+  final String insightsStatus;
+  final bool offloadTruncated;
+
+  const AnalyticsOverview({
+    required this.range,
+    required this.loginsTotal,
+    required this.loginsByMethod,
+    required this.otp,
+    required this.activeUsers,
+    required this.avgSessionMinutes,
+    required this.offloads,
+    required this.coachTurns,
+    required this.coachActiveUsers,
+    required this.insightsStatus,
+    required this.offloadTruncated,
+  });
+
+  factory AnalyticsOverview.fromJson(Map<String, dynamic> json) {
+    final logins = (json['logins'] as Map?) ?? const {};
+    final byMethod = <String, int>{};
+    ((logins['byMethod'] as Map?) ?? const {}).forEach((k, v) {
+      byMethod[k.toString()] = _parseInt(v) ?? 0;
+    });
+    final coach = (json['coach'] as Map?) ?? const {};
+    final meta = (json['meta'] as Map?) ?? const {};
+    return AnalyticsOverview(
+      range: (json['range'] as String?) ?? '',
+      loginsTotal: _parseInt(logins['total']) ?? 0,
+      loginsByMethod: byMethod,
+      otp: OtpFunnel.fromJson(
+          ((json['otp'] as Map?) ?? const {}).cast<String, dynamic>()),
+      activeUsers: _parseInt(json['activeUsers']) ?? 0,
+      avgSessionMinutes: _parseDouble(json['avgSessionMinutes']) ?? 0.0,
+      offloads: OffloadBuckets.fromJson(
+          ((json['offloads'] as Map?) ?? const {}).cast<String, dynamic>()),
+      coachTurns: _parseInt(coach['turns']) ?? 0,
+      coachActiveUsers: _parseInt(coach['activeUsers']) ?? 0,
+      insightsStatus: (meta['insightsStatus'] as String?) ?? '',
+      offloadTruncated: (meta['offloadTruncated'] as bool?) ?? false,
+    );
+  }
+}
+
+/// One row of the per-user analytics table.
+class AnalyticsUserRow {
+  final String userId;
+  final String clientId;
+  final String role;
+
+  /// True when this user IS the walker/device user (the authoritative
+  /// `isWalkerUser` flag); false for non-walker Care Circle members
+  /// (family viewers, caregiver-owners) and facility/internal users. Drives
+  /// the walker-vs-care-circle segment toggle.
+  final bool isWalkerUser;
+  final String deviceSerial;
+
+  /// The device's REAL last-seen — Device Registry `lastSeen` (last heartbeat).
+  /// Distinct from [lastActive] (the user's last in-app activity). Null when the
+  /// user has no device or it has never reported.
+  final DateTime? deviceLastSeen;
+  final int logins;
+  final int otpAbandoned;
+  final int otpVerifyFailed;
+  final int activeMinutes;
+  final int offloads;
+  final int coachTurns;
+
+  /// The USER's last in-app activity (login / dashboard read / coach turn) — NOT
+  /// the device. See [deviceLastSeen] for device health.
+  final DateTime? lastActive;
+
+  const AnalyticsUserRow({
+    required this.userId,
+    required this.clientId,
+    required this.role,
+    this.isWalkerUser = false,
+    required this.deviceSerial,
+    this.deviceLastSeen,
+    required this.logins,
+    required this.otpAbandoned,
+    required this.otpVerifyFailed,
+    required this.activeMinutes,
+    required this.offloads,
+    required this.coachTurns,
+    this.lastActive,
+  });
+
+  factory AnalyticsUserRow.fromJson(Map<String, dynamic> json) => AnalyticsUserRow(
+        userId: (json['userId'] as String?) ?? '',
+        clientId: (json['clientId'] as String?) ?? '',
+        role: (json['role'] as String?) ?? '',
+        isWalkerUser: json['isWalkerUser'] == true,
+        deviceSerial: (json['deviceSerial'] as String?) ?? '',
+        deviceLastSeen: _parseTs(json['deviceLastSeen']),
+        logins: _parseInt(json['logins']) ?? 0,
+        otpAbandoned: _parseInt(json['otpAbandoned']) ?? 0,
+        otpVerifyFailed: _parseInt(json['otpVerifyFailed']) ?? 0,
+        activeMinutes: _parseInt(json['activeMinutes']) ?? 0,
+        offloads: _parseInt(json['offloads']) ?? 0,
+        coachTurns: _parseInt(json['coachTurns']) ?? 0,
+        lastActive: _parseTs(json['lastActive']),
+      );
+}
+
+/// Per-user table response (`GET /admin/analytics/users`).
+class AnalyticsUsersResponse {
+  final List<AnalyticsUserRow> users;
+  final int count;
+  final int unattributedOffloads;
+  final String insightsStatus;
+
+  const AnalyticsUsersResponse({
+    required this.users,
+    required this.count,
+    required this.unattributedOffloads,
+    required this.insightsStatus,
+  });
+
+  factory AnalyticsUsersResponse.fromJson(Map<String, dynamic> json) {
+    final users = ((json['users'] as List?) ?? const [])
+        .map((e) => AnalyticsUserRow.fromJson(e as Map<String, dynamic>))
+        .toList(growable: false);
+    final meta = (json['meta'] as Map?) ?? const {};
+    return AnalyticsUsersResponse(
+      users: users,
+      count: _parseInt(json['count']) ?? users.length,
+      unattributedOffloads: _parseInt(meta['unattributedOffloads']) ?? 0,
+      insightsStatus: (meta['insightsStatus'] as String?) ?? '',
+    );
+  }
+}
+
+/// One row of the internal "Pilot residents" roster (GET /admin/residents).
+/// Cross-tenant view of an active D2C participant + their device + last walk.
+/// docs/specs/user-analytics.md §pilot view.
+class ResidentRow {
+  final String patientId;
+  final String displayName;
+  final String clientId;
+  final String status;
+  final String deviceSerial;
+  final String deviceStatus;
+  final DateTime? deviceLastSeen; // device heartbeat (registry lastSeen)
+  final DateTime? lastActivityAt; // last offload / "last walk"
+
+  const ResidentRow({
+    required this.patientId,
+    required this.displayName,
+    required this.clientId,
+    required this.status,
+    required this.deviceSerial,
+    required this.deviceStatus,
+    this.deviceLastSeen,
+    this.lastActivityAt,
+  });
+
+  factory ResidentRow.fromJson(Map<String, dynamic> json) => ResidentRow(
+        patientId: (json['patientId'] as String?) ?? '',
+        displayName: (json['displayName'] as String?) ?? '',
+        clientId: (json['clientId'] as String?) ?? '',
+        status: (json['status'] as String?) ?? '',
+        deviceSerial: (json['deviceSerial'] as String?) ?? '',
+        deviceStatus: (json['deviceStatus'] as String?) ?? '',
+        deviceLastSeen: _parseTs(json['deviceLastSeen']),
+        lastActivityAt: _parseTs(json['lastActivityAt']),
+      );
+}
+
+class ResidentsResponse {
+  final List<ResidentRow> residents;
+  final int count;
+  final bool truncated;
+
+  const ResidentsResponse({
+    required this.residents,
+    required this.count,
+    required this.truncated,
+  });
+
+  factory ResidentsResponse.fromJson(Map<String, dynamic> json) {
+    final residents = ((json['residents'] as List?) ?? const [])
+        .map((e) => ResidentRow.fromJson(e as Map<String, dynamic>))
+        .toList(growable: false);
+    return ResidentsResponse(
+      residents: residents,
+      count: _parseInt(json['count']) ?? residents.length,
+      truncated: json['truncated'] == true,
+    );
+  }
+}

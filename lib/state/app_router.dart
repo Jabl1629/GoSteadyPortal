@@ -12,8 +12,11 @@ import '../d2c/screens/d2c_onboarding_screens.dart';
 import '../d2c/screens/d2c_state_screens.dart';
 import '../dev/me_smoke_screen.dart';
 import '../facility_demo/screens/facility_login_screen.dart';
+import '../screens/analytics_screen.dart';
 import '../screens/fleet_screen.dart';
 import '../screens/login_screen.dart';
+import '../screens/resident_detail_host.dart';
+import '../screens/residents_screen.dart';
 import 'build_mode.dart';
 
 /// Builds the GoRouter for the current [BuildMode].
@@ -100,6 +103,32 @@ GoRouter buildAppRouter({
         redirect: (context, state) =>
             auth.currentUser?.isInternal == true ? null : '/not-found',
         builder: (context, state) => const FleetScreen(),
+      ),
+      // Internal user & population analytics — same internal-only gate as
+      // /fleet; the analytics-api enforces server-side too.
+      // docs/specs/user-analytics.md.
+      GoRoute(
+        path: '/analytics',
+        redirect: (context, state) =>
+            auth.currentUser?.isInternal == true ? null : '/not-found',
+        builder: (context, state) => const AnalyticsScreen(),
+      ),
+      // Internal "Pilot residents" — cross-tenant roster of active D2C
+      // participants + per-resident monitoring detail. Same internal-only gate
+      // as /fleet + /analytics; patient-api enforces server-side.
+      // docs/specs/user-analytics.md §pilot view.
+      GoRoute(
+        path: '/residents',
+        redirect: (context, state) =>
+            auth.currentUser?.isInternal == true ? null : '/not-found',
+        builder: (context, state) => const ResidentsScreen(),
+      ),
+      GoRoute(
+        path: '/residents/:patientId',
+        redirect: (context, state) =>
+            auth.currentUser?.isInternal == true ? null : '/not-found',
+        builder: (context, state) =>
+            ResidentDetailHost(patientId: state.pathParameters['patientId']!),
       ),
       GoRoute(
         path: '/not-found',
