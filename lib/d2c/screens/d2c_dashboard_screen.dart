@@ -119,30 +119,14 @@ class D2CDashboardScreen extends StatelessWidget {
                 const SizedBox(height: 12),
                 _WeekContextLine(today: snapshot.today, view: view),
                 const SizedBox(height: 22),
-                // Two explicit, self-labelled trend cards (was one ambiguous
-                // hero-metric chart). Each is tappable per-day and expands that
-                // day's sessions inline.
-                _MetricTrendCard(
-                  title: 'Active minutes',
-                  unit: 'min',
-                  days: snapshot.last7Days,
-                  value: (d) => d.activeMinutes,
+                // Active minutes + distance under one shared Today/7-day/
+                // 30-day zoom. The Today level supersedes the old standalone
+                // "Today's walks" tile, which is why that section is gone.
+                _TrendSection(
+                  days: snapshot.last30Days.isNotEmpty
+                      ? snapshot.last30Days
+                      : snapshot.last7Days,
                 ),
-                const SizedBox(height: 16),
-                _MetricTrendCard(
-                  title: 'Distance traveled',
-                  unit: 'ft',
-                  days: snapshot.last7Days,
-                  value: (d) => d.distanceFt,
-                ),
-                if (snapshot.recentWalks.isNotEmpty) ...[
-                  const SizedBox(height: 26),
-                  _RecentWalksSection(
-                    walks: snapshot.recentWalks,
-                    isWalkerUser: _isWalkerUser,
-                    view: view,
-                  ),
-                ],
                 if (snapshot.openAlerts.isNotEmpty) ...[
                   const SizedBox(height: 26),
                   const _SectionLabel('Today\'s alerts'),
@@ -812,56 +796,424 @@ class _WeekContextLine extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Per-metric 7-day trend card — tappable days + expandable day detail
+// Trend section — one shared Today / 7-day / 30-day zoom over two charts
 // ─────────────────────────────────────────────────────────────────────
 
-/// One labelled 7-day bar chart for a single metric (active minutes,
-/// distance). Replaces the old single hero-metric chart, which never named the
-/// metric it plotted, annotated only today, and whose bars weren't tappable.
-///
-/// Tapping a day selects it: the header restates that day's value with its
-/// unit, the bar highlights, and that day's sessions expand underneath (time ·
-/// duration · distance per session). Defaults to today. Every day column is a
-/// full-height tap target (~42×94), comfortably past the 44px minimum, and the
-/// detail rows are flex-laid so nothing overflows a 375px phone.
-class _MetricTrendCard extends StatefulWidget {
-  const _MetricTrendCard({
-    required this.title,
-    required this.unit,
-    required this.days,
+/// Zoom levels, coarsest last. The three form a stack: a 30-day bar is a week,
+/// a 7-day bar is a day, and a day is the deepest level (intra-day buckets).
+enum _TrendZoom { day, week, month }
+
+/// A single plotted bar, whatever the zoom.
+class _TrendBar {
+  const _TrendBar({
+    required this.label,
     required this.value,
+    this.anchorDay,
+    this.anchorWeek,
+    this.isCurrent = false,
+    this.labelVisible = true,
   });
 
-  /// Names the metric explicitly — "Active minutes", "Distance traveled".
-  final String title;
+  final String label;
+  final int value;
 
-  /// Unit shown beside the selected day's value ("min", "ft").
-  final String unit;
+  /// Set at week zoom — tapping drills into this day.
+  final DateTime? anchorDay;
 
-  /// Oldest-first; the last entry is today.
-  final List<DayStep> days;
+  /// Set at month zoom — tapping drills into this week.
+  final DateTime? anchorWeek;
 
-  /// Pulls this card's metric off a day.
-  final int Function(DayStep) value;
+  /// The bar covering "now" (today / this week) — rendered darker.
+  final bool isCurrent;
 
-  @override
-  State<_MetricTrendCard> createState() => _MetricTrendCardState();
+  /// Day zoom plots 12 buckets but labels every other one, so the axis stays
+  /// readable on a narrow phone.
+  final bool labelVisible;
 }
 
-class _MetricTrendCardState extends State<_MetricTrendCard> {
-  /// null → follow "today" (the last bar), so a refresh with new data keeps
-  /// pointing at today rather than a stale index.
-  int? _selected;
+class _WeekBucket {
+  const _WeekBucket({required this.start, required this.days});
+  final DateTime start;
+  final List<DayStep> days;
+
+  /// Average per DAY, not the week total — the current week is usually partial,
+  /// and a total would make it read as a collapse next to full weeks.
+  int avg(int Function(DayStep) value) {
+    if (days.isEmpty) return 0;
+    final sum = days.fold<int>(0, (a, d) => a + value(d));
+    return (sum / days.length).round();
+  }
+}
+
+/// Owns the zoom + focus shared by both metric charts, so "Active minutes" and
+/// "Distance traveled" always describe the same period and can be compared.
+///
+/// Navigation: the toggle picks a zoom (resetting focus to the current period);
+/// tapping a bar drills one level in (week → day, month → week). A back chip
+/// appears whenever the view is focused on something other than the current
+/// period, and zooms back out to where you came from.
+class _TrendSection extends StatefulWidget {
+  const _TrendSection({required this.days});
+
+  /// The 30-day window, oldest-first (last entry is today).
+  final List<DayStep> days;
+
+  @override
+  State<_TrendSection> createState() => _TrendSectionState();
+}
+
+class _TrendSectionState extends State<_TrendSection> {
+  _TrendZoom _zoom = _TrendZoom.week; // spec: default to 7-day
+  DateTime? _focusDay;
+  DateTime? _focusWeekStart;
+
+  List<DayStep> get _days => widget.days;
+
+  static DateTime _dayOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  /// Monday-anchored week start — calendar weeks read more naturally than
+  /// rolling 7-day chunks once you're comparing several of them.
+  static DateTime _weekStart(DateTime d) =>
+      _dayOnly(d).subtract(Duration(days: d.weekday - 1));
+
+  /// Days plotted at week zoom: the focused calendar week, or (default) the
+  /// trailing 7 days ending today.
+  List<DayStep> _weekWindow() {
+    final start = _focusWeekStart;
+    if (start == null) {
+      return _days.length <= 7 ? _days : _days.sublist(_days.length - 7);
+    }
+    final end = start.add(const Duration(days: 7));
+    return [
+      for (final d in _days)
+        if (d.date != null &&
+            !d.date!.isBefore(start) &&
+            d.date!.isBefore(end))
+          d,
+    ];
+  }
+
+  DayStep _focusedDay() {
+    final f = _focusDay;
+    if (f != null) {
+      for (final d in _days) {
+        if (d.date != null && _sameDay(d.date!, f)) return d;
+      }
+    }
+    return _days.last;
+  }
+
+  List<_WeekBucket> _weekBuckets() {
+    final map = <DateTime, List<DayStep>>{};
+    for (final d in _days) {
+      if (d.date == null) continue;
+      (map[_weekStart(d.date!)] ??= []).add(d);
+    }
+    final keys = map.keys.toList()..sort();
+    return [for (final k in keys) _WeekBucket(start: k, days: map[k]!)];
+  }
+
+  static String _hourLabel(int hour) {
+    if (hour == 0) return '12a';
+    if (hour == 12) return '12p';
+    return hour < 12 ? '${hour}a' : '${hour - 12}p';
+  }
+
+  static String _monthDay(DateTime d) =>
+      '${const [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      ][d.month - 1]} ${d.day}';
+
+  /// Bars for the current zoom, valued by this card's metric.
+  List<_TrendBar> _bars(
+    int Function(DayStep) dayValue,
+    int Function(WalkSession) sessionValue,
+  ) {
+    switch (_zoom) {
+      case _TrendZoom.day:
+        // 12 two-hour buckets. Deepest level, so bars aren't tap targets —
+        // which is what lets them be this thin without hurting usability.
+        final buckets = List<int>.filled(12, 0);
+        for (final s in _focusedDay().sessions) {
+          buckets[(s.startHour ~/ 2).clamp(0, 11)] += sessionValue(s);
+        }
+        return [
+          for (var i = 0; i < 12; i++)
+            _TrendBar(
+              label: _hourLabel(i * 2),
+              value: buckets[i],
+              labelVisible: i.isEven,
+            ),
+        ];
+      case _TrendZoom.week:
+        return [
+          for (final d in _weekWindow())
+            _TrendBar(
+              label: d.weekday,
+              value: dayValue(d),
+              anchorDay: d.date,
+              isCurrent: d.dateLabel == 'Today',
+            ),
+        ];
+      case _TrendZoom.month:
+        final now = _dayOnly(DateTime.now());
+        return [
+          for (final b in _weekBuckets())
+            _TrendBar(
+              label: _monthDay(b.start),
+              value: b.avg(dayValue),
+              anchorWeek: b.start,
+              isCurrent: !now.isBefore(b.start) &&
+                  now.isBefore(b.start.add(const Duration(days: 7))),
+            ),
+        ];
+    }
+  }
+
+  int _headerValue(int Function(DayStep) dayValue) {
+    switch (_zoom) {
+      case _TrendZoom.day:
+        return dayValue(_focusedDay());
+      case _TrendZoom.week:
+        final w = _weekWindow();
+        return w.fold<int>(0, (a, d) => a + dayValue(d));
+      case _TrendZoom.month:
+        if (_days.isEmpty) return 0;
+        final sum = _days.fold<int>(0, (a, d) => a + dayValue(d));
+        return (sum / _days.length).round();
+    }
+  }
+
+  /// Names the period the header value covers.
+  String get _periodLabel {
+    switch (_zoom) {
+      case _TrendZoom.day:
+        final d = _focusedDay();
+        return d.dateLabel.isEmpty ? d.weekday : d.dateLabel;
+      case _TrendZoom.week:
+        final s = _focusWeekStart;
+        return s == null ? 'Last 7 days' : 'Week of ${_monthDay(s)}';
+      case _TrendZoom.month:
+        return 'Last 30 days';
+    }
+  }
+
+  /// A 30-day bar is an average, so its unit needs saying so.
+  String _unitSuffix(String unit) =>
+      _zoom == _TrendZoom.month ? '$unit/day' : unit;
+
+  bool get _isDrilled =>
+      (_zoom == _TrendZoom.day && _focusDay != null) ||
+      (_zoom == _TrendZoom.week && _focusWeekStart != null);
+
+  void _selectZoom(_TrendZoom z) => setState(() {
+        _zoom = z;
+        // A toggle press means "show me the current period at this zoom".
+        _focusDay = null;
+        _focusWeekStart = null;
+      });
+
+  void _onBarTap(_TrendBar bar) {
+    if (bar.anchorDay != null) {
+      // week → day. `_focusWeekStart` is deliberately left alone so backing out
+      // returns to whichever week view you came from (trailing 7 or calendar).
+      setState(() {
+        _focusDay = bar.anchorDay;
+        _zoom = _TrendZoom.day;
+      });
+    } else if (bar.anchorWeek != null) {
+      setState(() {
+        _focusWeekStart = bar.anchorWeek;
+        _zoom = _TrendZoom.week;
+      });
+    }
+  }
+
+  void _back() => setState(() {
+        if (_zoom == _TrendZoom.day) {
+          _focusDay = null;
+          _zoom = _TrendZoom.week;
+        } else {
+          _focusWeekStart = null;
+          _zoom = _TrendZoom.month;
+        }
+      });
 
   @override
   Widget build(BuildContext context) {
-    final days = widget.days;
-    if (days.isEmpty) return const SizedBox.shrink();
-    final idx = (_selected ?? days.length - 1).clamp(0, days.length - 1);
-    final selected = days[idx];
-    final maxVal = days.map(widget.value).fold<int>(0, (a, b) => a > b ? a : b);
-    final fmt = NumberFormat('#,##0');
+    if (_days.isEmpty) return const SizedBox.shrink();
+    final showSessions = _zoom == _TrendZoom.day;
+    final day = _focusedDay();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(child: _ZoomToggle(zoom: _zoom, onChanged: _selectZoom)),
+            if (_isDrilled) ...[
+              const SizedBox(width: 10),
+              _BackChip(onTap: _back),
+            ],
+          ],
+        ),
+        const SizedBox(height: 14),
+        _MetricTrendCard(
+          title: 'Active minutes',
+          unit: _unitSuffix('min'),
+          periodLabel: _periodLabel,
+          headerValue: _headerValue((d) => d.activeMinutes),
+          bars: _bars(
+            (d) => d.activeMinutes,
+            (s) => s.activeMinutes > 0 ? s.activeMinutes : s.durationMinutes,
+          ),
+          onBarTap: _onBarTap,
+          sessions: showSessions ? day.sessions : null,
+          emptyIsToday: day.dateLabel == 'Today',
+        ),
+        const SizedBox(height: 16),
+        _MetricTrendCard(
+          title: 'Distance traveled',
+          unit: _unitSuffix('ft'),
+          periodLabel: _periodLabel,
+          headerValue: _headerValue((d) => d.distanceFt),
+          bars: _bars((d) => d.distanceFt, (s) => s.distanceFt),
+          onBarTap: _onBarTap,
+          sessions: showSessions ? day.sessions : null,
+          emptyIsToday: day.dateLabel == 'Today',
+        ),
+      ],
+    );
+  }
+}
 
+/// Three-way segmented range control. Each segment is a 44px tap target.
+class _ZoomToggle extends StatelessWidget {
+  const _ZoomToggle({required this.zoom, required this.onChanged});
+
+  final _TrendZoom zoom;
+  final ValueChanged<_TrendZoom> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.border),
+      ),
+      padding: const EdgeInsets.all(3),
+      child: Row(
+        children: [
+          _seg('Today', _TrendZoom.day),
+          _seg('7 days', _TrendZoom.week),
+          _seg('30 days', _TrendZoom.month),
+        ],
+      ),
+    );
+  }
+
+  Widget _seg(String label, _TrendZoom value) {
+    final selected = zoom == value;
+    return Expanded(
+      child: Material(
+        color: selected ? AppTheme.sage : Colors.transparent,
+        borderRadius: BorderRadius.circular(9),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(9),
+          onTap: selected ? null : () => onChanged(value),
+          child: Container(
+            height: 38,
+            alignment: Alignment.center,
+            child: Text(
+              label,
+              style: TextStyle(
+                color: selected ? Colors.white : AppTheme.textDark,
+                fontSize: 13.5,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Zoom-out affordance, shown only when focused on a past day/week.
+class _BackChip extends StatelessWidget {
+  const _BackChip({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Container(
+          height: 44,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppTheme.border),
+          ),
+          child: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.arrow_back_rounded, size: 16, color: AppTheme.sage),
+              SizedBox(width: 5),
+              Text(
+                'Back',
+                style: TextStyle(
+                  color: AppTheme.sage,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One metric's chart: a named value for the period, the bars, and (at day
+/// zoom only) that day's sessions underneath.
+class _MetricTrendCard extends StatelessWidget {
+  const _MetricTrendCard({
+    required this.title,
+    required this.unit,
+    required this.periodLabel,
+    required this.headerValue,
+    required this.bars,
+    required this.onBarTap,
+    this.sessions,
+    this.emptyIsToday = false,
+  });
+
+  final String title;
+  final String unit;
+  final String periodLabel;
+  final int headerValue;
+  final List<_TrendBar> bars;
+  final ValueChanged<_TrendBar> onBarTap;
+
+  /// Non-null only at day zoom — the focused day's sessions.
+  final List<WalkSession>? sessions;
+  final bool emptyIsToday;
+
+  @override
+  Widget build(BuildContext context) {
+    final maxVal = bars.fold<int>(0, (a, b) => a > b.value ? a : b.value);
+    final fmt = NumberFormat('#,##0');
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
       decoration: BoxDecoration(
@@ -873,7 +1225,7 @@ class _MetricTrendCardState extends State<_MetricTrendCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            widget.title,
+            title,
             style: const TextStyle(
               color: AppTheme.textDark,
               fontSize: 14,
@@ -881,14 +1233,12 @@ class _MetricTrendCardState extends State<_MetricTrendCard> {
             ),
           ),
           const SizedBox(height: 4),
-          // The selected day's value, named and united — this is what makes
-          // the chart self-explanatory at a glance.
           Row(
             crossAxisAlignment: CrossAxisAlignment.baseline,
             textBaseline: TextBaseline.alphabetic,
             children: [
               Text(
-                fmt.format(widget.value(selected)),
+                fmt.format(headerValue),
                 style: const TextStyle(
                   color: AppTheme.textDark,
                   fontSize: 26,
@@ -898,7 +1248,7 @@ class _MetricTrendCardState extends State<_MetricTrendCard> {
               ),
               const SizedBox(width: 5),
               Text(
-                widget.unit,
+                unit,
                 style: const TextStyle(
                   color: AppTheme.textSoft,
                   fontSize: 14,
@@ -908,9 +1258,7 @@ class _MetricTrendCardState extends State<_MetricTrendCard> {
               const SizedBox(width: 8),
               Flexible(
                 child: Text(
-                  selected.dateLabel.isEmpty
-                      ? selected.weekday
-                      : selected.dateLabel,
+                  periodLabel,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: AppTheme.textSoft,
@@ -924,104 +1272,102 @@ class _MetricTrendCardState extends State<_MetricTrendCard> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              for (var i = 0; i < days.length; i++)
+              for (final b in bars)
                 Expanded(
-                  child: _DayBar(
-                    day: days[i],
-                    value: widget.value(days[i]),
+                  child: _TrendBarColumn(
+                    bar: b,
                     maxValue: maxVal,
-                    selected: i == idx,
-                    onTap: () => setState(() => _selected = i),
+                    onTap: (b.anchorDay != null || b.anchorWeek != null)
+                        ? () => onBarTap(b)
+                        : null,
                   ),
                 ),
             ],
           ),
-          const SizedBox(height: 12),
-          _DayDetail(day: selected),
+          if (sessions != null) ...[
+            const SizedBox(height: 12),
+            _DayDetail(sessions: sessions!, isToday: emptyIsToday),
+          ],
         ],
       ),
     );
   }
 }
 
-/// One tappable day column: bar + weekday label. Bottom-aligned so bars share
-/// a baseline; a zero day still renders a faint stub so it reads as tappable.
-class _DayBar extends StatelessWidget {
-  const _DayBar({
-    required this.day,
-    required this.value,
+/// One bar + its axis label. Tappable only when it can be drilled into.
+class _TrendBarColumn extends StatelessWidget {
+  const _TrendBarColumn({
+    required this.bar,
     required this.maxValue,
-    required this.selected,
-    required this.onTap,
+    this.onTap,
   });
 
-  final DayStep day;
-  final int value;
+  final _TrendBar bar;
   final int maxValue;
-  final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   static const double _maxBarHeight = 72;
 
   @override
   Widget build(BuildContext context) {
     final scaled =
-        maxValue == 0 ? 0.0 : (value / maxValue) * _maxBarHeight;
-    // Floor a non-zero day at 4px so a light day is still visible; a true zero
-    // gets a 3px stub (present, clearly empty).
-    final barHeight = value > 0 ? scaled.clamp(4.0, _maxBarHeight) : 3.0;
+        maxValue == 0 ? 0.0 : (bar.value / maxValue) * _maxBarHeight;
+    // Floor a non-zero bucket at 4px so light activity stays visible; a true
+    // zero gets a 3px stub (present, clearly empty).
+    final barHeight = bar.value > 0 ? scaled.clamp(4.0, _maxBarHeight) : 3.0;
     final color =
-        selected ? AppTheme.sage : AppTheme.sage.withOpacity(0.30);
+        bar.isCurrent ? AppTheme.sage : AppTheme.sage.withOpacity(0.30);
+    final column = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            height: _maxBarHeight,
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                height: barHeight,
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            bar.labelVisible ? bar.label : '',
+            maxLines: 1,
+            overflow: TextOverflow.clip,
+            style: TextStyle(
+              color: bar.isCurrent ? AppTheme.textDark : AppTheme.textSoft,
+              fontSize: 11,
+              fontWeight: bar.isCurrent ? FontWeight.w700 : FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+    if (onTap == null) return column;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(10),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(
-              height: _maxBarHeight,
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                child: Container(
-                  height: barHeight,
-                  decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: BorderRadius.circular(7),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              day.weekday,
-              maxLines: 1,
-              overflow: TextOverflow.clip,
-              style: TextStyle(
-                color: selected ? AppTheme.textDark : AppTheme.textSoft,
-                fontSize: 11,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
+      child: column,
     );
   }
 }
 
-/// The tapped day's sessions — time · duration · distance per row. Flex-laid
+/// The focused day's sessions — time · duration · distance per row. Flex-laid
 /// (no fixed widths) so long values can't overflow a narrow phone.
 class _DayDetail extends StatelessWidget {
-  const _DayDetail({required this.day});
+  const _DayDetail({required this.sessions, required this.isToday});
 
-  final DayStep day;
+  final List<WalkSession> sessions;
+  final bool isToday;
 
   @override
   Widget build(BuildContext context) {
-    final sessions = day.sessions;
-    final isToday = day.dateLabel == 'Today';
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -1134,238 +1480,6 @@ class _SectionLabel extends StatelessWidget {
           fontWeight: FontWeight.w700,
           letterSpacing: 1.0,
         ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Recent walks — Strava-style activity feed
-// ─────────────────────────────────────────────────────────────────────
-//
-// Shows today's completed walking sessions, newest first. Each row is
-// a compact summary: time of day · duration · step count. Intent is
-// the same satisfaction loop Strava + Whoop nail — "here's the thing
-// you did, here's what it counted for."
-
-class _RecentWalksSection extends StatefulWidget {
-  const _RecentWalksSection({
-    required this.walks,
-    required this.isWalkerUser,
-    required this.view,
-  });
-
-  final List<WalkSession> walks;
-  final bool isWalkerUser;
-  final DeviceTypeView view;
-
-  @override
-  State<_RecentWalksSection> createState() => _RecentWalksSectionState();
-}
-
-class _RecentWalksSectionState extends State<_RecentWalksSection> {
-  // Collapse long days to a preview; the rest reveal on tap (an active day can
-  // log many short sessions, and burying them behind a hard cap hid them).
-  static const _previewCount = 4;
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final walks = widget.walks;
-    final canExpand = walks.length > _previewCount;
-    final shown = (_expanded || !canExpand)
-        ? walks
-        : walks.take(_previewCount).toList();
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(AppTheme.cardRadius),
-        boxShadow: AppTheme.cardShadow,
-      ),
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                "Today's walks",
-                style: TextStyle(
-                  color: AppTheme.textDark,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              Text(
-                '${walks.length} session${walks.length == 1 ? '' : 's'}',
-                style: const TextStyle(
-                  color: AppTheme.textSoft,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          for (var i = 0; i < shown.length; i++) ...[
-            _WalkRow(walk: shown[i], view: widget.view),
-            if (i < shown.length - 1)
-              Divider(
-                height: 1,
-                color: AppTheme.border.withOpacity(0.5),
-              ),
-          ],
-          if (canExpand)
-            _ShowAllToggle(
-              expanded: _expanded,
-              totalCount: walks.length,
-              onTap: () => setState(() => _expanded = !_expanded),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// The "Show all N / Show less" control under a collapsed [_RecentWalksSection].
-/// Full-width, ≥44px tap target (elderly users), sage to read as actionable.
-class _ShowAllToggle extends StatelessWidget {
-  const _ShowAllToggle({
-    required this.expanded,
-    required this.totalCount,
-    required this.onTap,
-  });
-
-  final bool expanded;
-  final int totalCount;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(10),
-      child: Container(
-        width: double.infinity,
-        constraints: const BoxConstraints(minHeight: 44),
-        alignment: Alignment.center,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              expanded ? 'Show less' : 'Show all $totalCount',
-              style: const TextStyle(
-                color: AppTheme.sage,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(width: 2),
-            Icon(
-              expanded
-                  ? Icons.keyboard_arrow_up_rounded
-                  : Icons.keyboard_arrow_down_rounded,
-              color: AppTheme.sage,
-              size: 20,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _WalkRow extends StatelessWidget {
-  const _WalkRow({required this.walk, required this.view});
-  final WalkSession walk;
-  final DeviceTypeView view;
-
-  @override
-  Widget build(BuildContext context) {
-    final rollator = view.deviceType == 'rollator_platform';
-    // A walker's per-walk headline is steps; a rollator has none, so it leads
-    // with distance ("—" when the odometer had no valid estimate) and shows
-    // gait beside the duration when the firmware reported it.
-    final String trailingValue;
-    final String trailingUnit;
-    final String subLine;
-    if (rollator) {
-      trailingValue = walk.distanceFt == 0
-          ? '—'
-          : NumberFormat('#,##0').format(walk.distanceFt);
-      trailingUnit = 'ft';
-      subLine = walk.gaitSpeedFts == null
-          ? '${walk.durationMinutes} min'
-          : '${walk.durationMinutes} min · ${walk.gaitSpeedFts!.toStringAsFixed(1)} ft/s';
-    } else {
-      trailingValue = NumberFormat('#,##0').format(walk.steps);
-      trailingUnit = 'steps';
-      subLine = '${walk.durationMinutes} min · ${walk.distanceFt} ft';
-    }
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: AppTheme.sage.withOpacity(0.10),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: const Icon(
-              Icons.directions_walk_rounded,
-              size: 18,
-              color: AppTheme.sage,
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  walk.startTimeOfDay,
-                  style: const TextStyle(
-                    color: AppTheme.textDark,
-                    fontSize: 14.5,
-                    fontWeight: FontWeight.w600,
-                    height: 1.1,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  subLine,
-                  style: const TextStyle(
-                    color: AppTheme.textSoft,
-                    fontSize: 12.5,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Text(
-            trailingValue,
-            style: const TextStyle(
-              color: AppTheme.textDark,
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-              letterSpacing: -0.2,
-            ),
-          ),
-          const SizedBox(width: 4),
-          Text(
-            trailingUnit,
-            style: const TextStyle(
-              color: AppTheme.textSoft,
-              fontSize: 11.5,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ],
       ),
     );
   }

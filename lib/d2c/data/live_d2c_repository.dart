@@ -110,7 +110,10 @@ class LiveD2CRepository implements D2CRepository {
     // Kick off all reads in parallel, then await (typed — no casts).
     final detailF = _api.getPatient(patientId);
     final todayF = _allSessions(patientId, ActivityRange.h24);
-    final weekF = _allSessions(patientId, ActivityRange.d7);
+    // 30d (the 2A-RD cap), not 7d: the trend charts derive all three zooms
+    // (30-day weekly averages / 7-day daily / intra-day) from this one window,
+    // so it replaces the old 7d read rather than adding a request.
+    final monthF = _allSessions(patientId, ActivityRange.d30);
     final alertsF = _api.getAlerts(patientId, AlertStatus.unacknowledged);
 
     final patient = (await detailF).patient;
@@ -124,36 +127,37 @@ class LiveD2CRepository implements D2CRepository {
       for (final s in await todayF)
         if (_isSameDay(s.sessionStart.toLocal(), now)) s,
     ];
-    final weekSessions = await weekF;
+    final monthSessions = await monthF;
     final openAlertRows = (await alertsF).alerts;
 
     // ── Per-device-type view (DT-4). Prefer the current device's type (known
     // even before the first session); else the newest session's type; else
     // walker_cap (D9). The registry decides which metric leads. ──
     final deviceType = patient.currentDevice?.deviceType ??
-        _mostRecentDeviceType(weekSessions) ??
+        _mostRecentDeviceType(monthSessions) ??
         _mostRecentDeviceType(todaySessions) ??
         'walker_cap';
     final heroIsActiveMin =
         deviceTypeView(deviceType).hero == ActivityMetric.activeMinutes;
 
-    // ── Daily buckets (zero-filled 7-day window). Carry every metric the trend
+    // ── Daily buckets (zero-filled 30-day window). Carry every metric the trend
     // cards plot (active minutes + distance, and steps for the hero stat), plus
-    // the day's own sessions so tapping a bar can expand that day's detail. ──
+    // the day's own sessions so a tapped day can show its intra-day detail. ──
     final stepsByDate = <String, int>{};
     final activeMinByDate = <String, int>{};
     final distanceByDate = <String, double>{};
     final sessionsByDate = <String, List<ActivitySession>>{};
-    for (final s in weekSessions) {
+    for (final s in monthSessions) {
       stepsByDate[s.date] = (stepsByDate[s.date] ?? 0) + s.steps;
       activeMinByDate[s.date] = (activeMinByDate[s.date] ?? 0) + s.activeMinutes;
       distanceByDate[s.date] = (distanceByDate[s.date] ?? 0) + s.distanceFt;
       (sessionsByDate[s.date] ??= []).add(s);
     }
     final today0 = DateTime(now.year, now.month, now.day);
-    final last7Dates = [
-      for (var i = 6; i >= 0; i--) today0.subtract(Duration(days: i)),
+    final last30Dates = [
+      for (var i = 29; i >= 0; i--) today0.subtract(Duration(days: i)),
     ];
+    final last7Dates = last30Dates.sublist(23);
 
     final todaySteps = todaySessions.fold<int>(0, (a, s) => a + s.steps);
     final todayDistFt =
@@ -168,15 +172,16 @@ class LiveD2CRepository implements D2CRepository {
     final todayHero = heroIsActiveMin ? todayMinutes : todaySteps;
 
     // Today's bucket uses the (more current) 24h totals + the calendar-day
-    // filtered session list, so the tapped-day detail for today matches
-    // "Today's walks" exactly.
-    final last7Days = <DayStep>[];
-    for (final d in last7Dates) {
+    // filtered session list, so today's detail matches the live 24h numbers.
+    // `last7Days` is simply the trailing slice — one computation, one source.
+    final last30Days = <DayStep>[];
+    for (final d in last30Dates) {
       final isToday = _isSameDay(d, today0);
       final ymd = _ymd(d);
-      last7Days.add(DayStep(
+      last30Days.add(DayStep(
         weekday: _weekdayLabel(d.weekday),
         dateLabel: isToday ? 'Today' : _dateLabel(d),
+        date: d,
         steps: isToday ? todaySteps : (stepsByDate[ymd] ?? 0),
         activeMinutes: isToday ? todayMinutes : (activeMinByDate[ymd] ?? 0),
         distanceFt:
@@ -186,6 +191,7 @@ class LiveD2CRepository implements D2CRepository {
         ),
       ));
     }
+    final last7Days = last30Days.sublist(23);
 
     // Prior 6 days (excludes today) → rolling average of the HERO metric for
     // the "above/below your usual" context.
@@ -344,6 +350,7 @@ class LiveD2CRepository implements D2CRepository {
         gaitSpeedFts: todayGait,
       ),
       last7Days: last7Days,
+      last30Days: last30Days,
       recentWalks: recentWalks,
       openAlerts: openAlerts,
       careNote: careNote,
@@ -702,6 +709,7 @@ class LiveD2CRepository implements D2CRepository {
       for (final s in sorted)
         WalkSession(
           startTimeOfDay: _formatTimeOfDay(s.sessionStart.toLocal()),
+          startHour: s.sessionStart.toLocal().hour,
           durationMinutes: s.activeMinutes > 0
               ? s.activeMinutes
               : s.sessionEnd.difference(s.sessionStart).inMinutes,

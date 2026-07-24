@@ -110,8 +110,13 @@ class DayStep {
     this.distanceFt = 0,
     this.dateLabel = '',
     this.sessions = const [],
+    this.date,
   });
   final String weekday; // "Mon", "Tue", ...
+
+  /// The calendar day this bucket covers (local midnight). Anchors the trend
+  /// charts' week grouping and drill-down; null for legacy/mock rows.
+  final DateTime? date;
   final int steps;
   final int activeMinutes;
 
@@ -137,6 +142,7 @@ class WalkSession {
     required this.distanceFt,
     this.activeMinutes = 0,
     this.gaitSpeedFts,
+    this.startHour = 12,
   });
 
   /// e.g. "7:42 AM" — local time-of-day; renders right-aligned.
@@ -144,6 +150,10 @@ class WalkSession {
   final int durationMinutes;
   final int steps;
   final int distanceFt;
+
+  /// Local hour the session started (0–23). Buckets the intra-day ("Today")
+  /// zoom of the trend charts; [startTimeOfDay] stays the display string.
+  final int startHour;
 
   /// Active-minutes for this session; the rollator recent-walk row shows this
   /// in place of steps. Gait speed (ft/s) when the firmware reported it.
@@ -207,6 +217,7 @@ class D2CDashboardSnapshot {
     required this.walker,
     required this.today,
     required this.last7Days,
+    this.last30Days = const [],
     required this.recentWalks,
     required this.openAlerts,
     required this.careNote,
@@ -225,6 +236,12 @@ class D2CDashboardSnapshot {
   final String deviceType;
   final TodayActivity today;
   final List<DayStep> last7Days;
+
+  /// The full 30-day window, oldest-first — the single source the trend charts
+  /// derive all three zooms from (30d weekly averages / 7d daily / intra-day).
+  /// [last7Days] is its trailing 7 entries; both are kept so the greeting and
+  /// week-context line keep their existing input.
+  final List<DayStep> last30Days;
   /// Today's completed walking sessions, newest-first. Drives the
   /// "Today's walks" Strava-style activity feed.
   final List<WalkSession> recentWalks;
@@ -726,11 +743,126 @@ class D2CMockData {
         '${d.day.toString().padLeft(2, '0')}';
   }
 
+  // ── Trend history (30 days) ─────────────────────────────────────
+
+  static const _mockMonths = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  static const _mockWeekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  static String _mockClock(int hour, int minute) {
+    final ampm = hour < 12 ? 'AM' : 'PM';
+    var h = hour % 12;
+    if (h == 0) h = 12;
+    return '$h:${minute.toString().padLeft(2, '0')} $ampm';
+  }
+
+  /// Deterministic 30-day history, oldest-first, ending today — gives the trend
+  /// charts real shape at every zoom (30-day weekly averages, 7-day daily,
+  /// intra-day). Values follow a gentle weekly rhythm (quieter weekends) and
+  /// each day's totals equal the sum of its sessions. Today is pinned to the
+  /// same numbers as [TodayActivity] below so the demo stays self-consistent.
+  static List<DayStep> mockDays({int days = 30}) {
+    final now = DateTime.now();
+    final today0 = DateTime(now.year, now.month, now.day);
+    final out = <DayStep>[];
+    for (var i = days - 1; i >= 0; i--) {
+      final d = today0.subtract(Duration(days: i));
+      final weekday = _mockWeekdays[d.weekday - 1];
+      final label = '$weekday, ${_mockMonths[d.month - 1]} ${d.day}';
+      if (i == 0) {
+        out.add(DayStep(
+          weekday: weekday,
+          dateLabel: 'Today',
+          date: d,
+          steps: 1247,
+          activeMinutes: 32,
+          distanceFt: 942,
+          sessions: const [
+            WalkSession(
+                startTimeOfDay: '2:18 PM',
+                startHour: 14,
+                durationMinutes: 8,
+                steps: 412,
+                distanceFt: 310),
+            WalkSession(
+                startTimeOfDay: '11:04 AM',
+                startHour: 11,
+                durationMinutes: 14,
+                steps: 583,
+                distanceFt: 441),
+            WalkSession(
+                startTimeOfDay: '7:42 AM',
+                startHour: 7,
+                durationMinutes: 10,
+                steps: 252,
+                distanceFt: 191),
+          ],
+        ));
+        continue;
+      }
+      // Deterministic pseudo-variation (no Random — stable across rebuilds).
+      final seed = d.day * 7 + d.month * 13;
+      final isWeekend = d.weekday >= 6;
+      // A couple of true rest days so empty buckets are represented.
+      final isRest = seed % 11 == 0;
+      final activeMin =
+          isRest ? 0 : ((20 + seed % 15) * (isWeekend ? 0.6 : 1.0)).round();
+      if (activeMin == 0) {
+        out.add(DayStep(
+          weekday: weekday,
+          dateLabel: label,
+          date: d,
+          steps: 0,
+        ));
+        continue;
+      }
+      final count = 1 + seed % 3; // 1–3 sessions
+      final sessions = <WalkSession>[];
+      var minsLeft = activeMin;
+      var stepsTotal = 0;
+      var distTotal = 0;
+      for (var k = 0; k < count; k++) {
+        final last = k == count - 1;
+        final mins = last ? minsLeft : (minsLeft / (count - k)).round();
+        minsLeft -= mins;
+        final dist = mins * 30 + (seed + k) % 25;
+        final steps = mins * 40 + (seed + k) % 35;
+        stepsTotal += steps;
+        distTotal += dist;
+        // Spread across the day: morning, midday, late afternoon.
+        final hour = [8, 12, 16][k % 3] + (seed + k) % 2;
+        sessions.add(WalkSession(
+          startTimeOfDay: _mockClock(hour, (seed * (k + 3)) % 60),
+          startHour: hour,
+          durationMinutes: mins,
+          steps: steps,
+          distanceFt: dist,
+          activeMinutes: mins,
+        ));
+      }
+      // Newest-first within the day, matching the live repository's ordering.
+      sessions.sort((a, b) => b.startHour.compareTo(a.startHour));
+      out.add(DayStep(
+        weekday: weekday,
+        dateLabel: label,
+        date: d,
+        steps: stepsTotal,
+        activeMinutes: activeMin,
+        distanceFt: distTotal,
+        sessions: sessions,
+      ));
+    }
+    return out;
+  }
+
   // ── Dashboard snapshots ─────────────────────────────────────────
 
   /// Default: Sarah (Admin, walker's daughter) viewing Susan's data.
   /// Use this for the initial wireframe screens.
   static D2CDashboardSnapshot susanViewedBySarah() {
+    final days = mockDays();
     final susan = Walker(
       id: 'pat_d2c_susan',
       displayName: 'Susan Davis',
@@ -766,146 +898,8 @@ class D2CMockData {
       // minutes / distance) and their tap-to-expand detail all have something
       // real to show. Each day's totals equal the sum of its sessions; Tue is
       // today and mirrors `recentWalks` below exactly.
-      last7Days: const [
-        DayStep(
-          weekday: 'Wed',
-          dateLabel: 'Wed, Jul 15',
-          steps: 980,
-          activeMinutes: 26,
-          distanceFt: 740,
-          sessions: [
-            WalkSession(
-                startTimeOfDay: '3:12 PM',
-                durationMinutes: 15,
-                steps: 560,
-                distanceFt: 425),
-            WalkSession(
-                startTimeOfDay: '8:20 AM',
-                durationMinutes: 11,
-                steps: 420,
-                distanceFt: 315),
-          ],
-        ),
-        DayStep(
-          weekday: 'Thu',
-          dateLabel: 'Thu, Jul 16',
-          steps: 1310,
-          activeMinutes: 34,
-          distanceFt: 990,
-          sessions: [
-            WalkSession(
-                startTimeOfDay: '5:02 PM',
-                durationMinutes: 12,
-                steps: 430,
-                distanceFt: 325),
-            WalkSession(
-                startTimeOfDay: '12:40 PM',
-                durationMinutes: 13,
-                steps: 500,
-                distanceFt: 380),
-            WalkSession(
-                startTimeOfDay: '7:55 AM',
-                durationMinutes: 9,
-                steps: 380,
-                distanceFt: 285),
-          ],
-        ),
-        DayStep(
-          weekday: 'Fri',
-          dateLabel: 'Fri, Jul 17',
-          steps: 850,
-          activeMinutes: 22,
-          distanceFt: 640,
-          sessions: [
-            WalkSession(
-                startTimeOfDay: '4:30 PM',
-                durationMinutes: 12,
-                steps: 470,
-                distanceFt: 355),
-            WalkSession(
-                startTimeOfDay: '9:10 AM',
-                durationMinutes: 10,
-                steps: 380,
-                distanceFt: 285),
-          ],
-        ),
-        DayStep(
-          weekday: 'Sat',
-          dateLabel: 'Sat, Jul 18',
-          steps: 410,
-          activeMinutes: 11,
-          distanceFt: 310,
-          sessions: [
-            WalkSession(
-                startTimeOfDay: '11:25 AM',
-                durationMinutes: 11,
-                steps: 410,
-                distanceFt: 310),
-          ],
-        ),
-        DayStep(
-          weekday: 'Sun',
-          dateLabel: 'Sun, Jul 19',
-          steps: 1180,
-          activeMinutes: 30,
-          distanceFt: 890,
-          sessions: [
-            WalkSession(
-                startTimeOfDay: '2:45 PM',
-                durationMinutes: 16,
-                steps: 640,
-                distanceFt: 480),
-            WalkSession(
-                startTimeOfDay: '8:05 AM',
-                durationMinutes: 14,
-                steps: 540,
-                distanceFt: 410),
-          ],
-        ),
-        DayStep(
-          weekday: 'Mon',
-          dateLabel: 'Mon, Jul 20',
-          steps: 1102,
-          activeMinutes: 28,
-          distanceFt: 830,
-          sessions: [
-            WalkSession(
-                startTimeOfDay: '1:30 PM',
-                durationMinutes: 15,
-                steps: 590,
-                distanceFt: 445),
-            WalkSession(
-                startTimeOfDay: '7:20 AM',
-                durationMinutes: 13,
-                steps: 512,
-                distanceFt: 385),
-          ],
-        ),
-        DayStep(
-          weekday: 'Tue',
-          dateLabel: 'Today',
-          steps: 1247,
-          activeMinutes: 32,
-          distanceFt: 942,
-          sessions: [
-            WalkSession(
-                startTimeOfDay: '2:18 PM',
-                durationMinutes: 8,
-                steps: 412,
-                distanceFt: 310),
-            WalkSession(
-                startTimeOfDay: '11:04 AM',
-                durationMinutes: 14,
-                steps: 583,
-                distanceFt: 441),
-            WalkSession(
-                startTimeOfDay: '7:42 AM',
-                durationMinutes: 10,
-                steps: 252,
-                distanceFt: 191),
-          ],
-        ),
-      ],
+      last7Days: days.sublist(23),
+      last30Days: days,
       recentWalks: const [
         // Newest first; today's sessions only.
         WalkSession(
@@ -969,6 +963,7 @@ class D2CMockData {
         streakDaysAboveAverage: 0,
       ),
       last7Days: base.last7Days,
+      last30Days: base.last30Days,
       recentWalks: const [],
       openAlerts: const [],
       careNote: base.careNote,
@@ -1031,6 +1026,7 @@ class D2CMockData {
       walker: base.walker,
       today: base.today,
       last7Days: base.last7Days,
+      last30Days: base.last30Days,
       recentWalks: base.recentWalks,
       openAlerts: base.openAlerts,
       careNote: base.careNote,
