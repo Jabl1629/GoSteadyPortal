@@ -1407,37 +1407,47 @@ class _TrendBarColumn extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Value above each bar — a bar with no number attached doesn't tell
-          // you anything on its own.
-          if (showValue)
-            SizedBox(
-              height: 15,
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Text(
-                  NumberFormat('#,##0').format(bar.value),
-                  maxLines: 1,
-                  style: TextStyle(
-                    color:
-                        bar.isCurrent ? AppTheme.textDark : AppTheme.textSoft,
-                    fontSize: 10.5,
-                    fontWeight:
-                        bar.isCurrent ? FontWeight.w700 : FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
+          // The plot area: bar pinned to the baseline with its value riding
+          // directly on top of it, so the number tracks the bar's height
+          // instead of floating on a shared line above the chart.
           SizedBox(
-            height: _maxBarHeight,
-            child: Align(
-              alignment: Alignment.bottomCenter,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: color,
-                  borderRadius: BorderRadius.circular(7),
+            height: _maxBarHeight + (showValue ? 16 : 0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.end,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (showValue) ...[
+                  // Fixed 14px so the plot area's height math is exact
+                  // (14 + 2 gap + 66 bar = the 82 reserved below) rather than
+                  // depending on font metrics.
+                  SizedBox(
+                    height: 14,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        NumberFormat('#,##0').format(bar.value),
+                        maxLines: 1,
+                        style: TextStyle(
+                          color: bar.isCurrent
+                              ? AppTheme.textDark
+                              : AppTheme.textSoft,
+                          fontSize: 10.5,
+                          fontWeight:
+                              bar.isCurrent ? FontWeight.w700 : FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                ],
+                Container(
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  height: barHeight,
                 ),
-                height: barHeight,
-              ),
+              ],
             ),
           ),
           const SizedBox(height: 8),
