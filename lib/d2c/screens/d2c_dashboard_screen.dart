@@ -1040,6 +1040,15 @@ class _TrendSectionState extends State<_TrendSection> {
     setState(() => _anchor = _sameDay(next, _today) ? null : next);
   }
 
+  /// Window paging, rendered in each chart's header (shared state, so either
+  /// card's arrows move both).
+  _ChartNav get _nav => _ChartNav(
+        onBack: _canGoBack ? () => _page(-1) : null,
+        onForward: _canGoForward ? () => _page(1) : null,
+        onToday: _isCurrent ? null : () => setState(() => _anchor = null),
+        stepLabel: _zoom == _TrendZoom.day ? 'day' : 'week',
+      );
+
   @override
   Widget build(BuildContext context) {
     if (_days.isEmpty) return const SizedBox.shrink();
@@ -1055,13 +1064,6 @@ class _TrendSectionState extends State<_TrendSection> {
           // the date you're looking at instead of jumping back to now.
           onChanged: (z) => setState(() => _zoom = z),
         ),
-        const SizedBox(height: 10),
-        _NavRow(
-          onBack: _canGoBack ? () => _page(-1) : null,
-          onForward: _canGoForward ? () => _page(1) : null,
-          onToday: _isCurrent ? null : () => setState(() => _anchor = null),
-          stepLabel: _zoom == _TrendZoom.day ? 'day' : 'week',
-        ),
         const SizedBox(height: 14),
         _MetricTrendCard(
           title: 'Active minutes',
@@ -1075,6 +1077,7 @@ class _TrendSectionState extends State<_TrendSection> {
           onBarTap: _drill,
           sessions: showSessions ? day.sessions : null,
           emptyIsToday: _isCurrent,
+          nav: _nav,
         ),
         const SizedBox(height: 16),
         _MetricTrendCard(
@@ -1086,6 +1089,7 @@ class _TrendSectionState extends State<_TrendSection> {
           onBarTap: _drill,
           sessions: showSessions ? day.sessions : null,
           emptyIsToday: _isCurrent,
+          nav: _nav,
         ),
       ],
     );
@@ -1165,10 +1169,12 @@ class _ZoomToggle extends StatelessWidget {
   }
 }
 
-/// ‹ › window paging plus a "Today" reset. Arrows disable at the edges of the
-/// data we hold (30 days — see the class doc on [_TrendSection]).
-class _NavRow extends StatelessWidget {
-  const _NavRow({
+/// ‹ › window paging plus a "Today" reset, sized to sit in a chart card's
+/// header rather than on its own row. Sage-tinted, not white — these sit on a
+/// white card, so a white button would disappear. Arrows disable at the edges
+/// of the data we hold (see the class doc on [_TrendSection]).
+class _ChartNav extends StatelessWidget {
+  const _ChartNav({
     required this.onBack,
     required this.onForward,
     required this.onToday,
@@ -1182,82 +1188,72 @@ class _NavRow extends StatelessWidget {
   final VoidCallback? onToday;
   final String stepLabel;
 
+  static const double _size = 38;
+
   @override
   Widget build(BuildContext context) {
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        _arrow(
-          icon: Icons.chevron_left_rounded,
-          onTap: onBack,
-          tooltip: 'Previous $stepLabel',
-        ),
-        const SizedBox(width: 8),
-        _arrow(
-          icon: Icons.chevron_right_rounded,
-          onTap: onForward,
-          tooltip: 'Next $stepLabel',
-        ),
-        const Spacer(),
-        if (onToday != null)
-          Material(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(11),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(11),
-              onTap: onToday,
-              child: Container(
-                height: 44,
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(11),
-                  border: Border.all(color: AppTheme.sage.withOpacity(0.5)),
-                ),
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.today_rounded, size: 15, color: AppTheme.sage),
-                    SizedBox(width: 6),
-                    Text(
-                      'Today',
-                      style: TextStyle(
-                        color: AppTheme.sage,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
+        _arrow(Icons.chevron_left_rounded, onBack, 'Previous $stepLabel'),
+        const SizedBox(width: 4),
+        _arrow(Icons.chevron_right_rounded, onForward, 'Next $stepLabel'),
+        if (onToday != null) ...[
+          const SizedBox(width: 6),
+          Tooltip(
+            message: 'Back to today',
+            child: Material(
+              color: AppTheme.sage.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(10),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: onToday,
+                child: Container(
+                  height: _size,
+                  padding: const EdgeInsets.symmetric(horizontal: 11),
+                  alignment: Alignment.center,
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.today_rounded,
+                          size: 14, color: AppTheme.sageDark),
+                      SizedBox(width: 5),
+                      Text(
+                        'Today',
+                        style: TextStyle(
+                          color: AppTheme.sageDark,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
+        ],
       ],
     );
   }
 
-  Widget _arrow({
-    required IconData icon,
-    required VoidCallback? onTap,
-    required String tooltip,
-  }) {
+  Widget _arrow(IconData icon, VoidCallback? onTap, String tooltip) {
     final enabled = onTap != null;
     final button = Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(11),
+      color: enabled
+          ? AppTheme.sage.withOpacity(0.12)
+          : AppTheme.border.withOpacity(0.30),
+      borderRadius: BorderRadius.circular(10),
       child: InkWell(
-        borderRadius: BorderRadius.circular(11),
+        borderRadius: BorderRadius.circular(10),
         onTap: onTap,
-        child: Container(
-          width: 46,
-          height: 44,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(11),
-            border: Border.all(color: AppTheme.border),
-          ),
+        child: SizedBox(
+          width: _size,
+          height: _size,
           child: Icon(
             icon,
-            size: 22,
-            color: enabled ? AppTheme.textDark : AppTheme.border,
+            size: 21,
+            color: enabled ? AppTheme.sageDark : AppTheme.textSoft.withOpacity(0.45),
           ),
         ),
       ),
@@ -1276,9 +1272,13 @@ class _MetricTrendCard extends StatelessWidget {
     required this.headerValue,
     required this.bars,
     required this.onBarTap,
+    required this.nav,
     this.sessions,
     this.emptyIsToday = false,
   });
+
+  /// Window paging, rendered top-right of this card's header.
+  final _ChartNav nav;
 
   final String title;
   final String unit;
@@ -1307,15 +1307,29 @@ class _MetricTrendCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title,
-            style: const TextStyle(
-              color: AppTheme.textDark,
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-            ),
+          // Title left, window paging top-right. The nav lives in the card
+          // header rather than on its own row so it doesn't cost a second line
+          // on a phone; the title ellipsizes rather than overflowing if the
+          // "Today" chip is showing and space gets tight.
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: AppTheme.textDark,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              nav,
+            ],
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 2),
           Row(
             crossAxisAlignment: CrossAxisAlignment.baseline,
             textBaseline: TextBaseline.alphabetic,
