@@ -37,7 +37,7 @@ def evaluate(
     *,
     today_active_minutes: int,
     history_active_min_per_day: list[int],
-    local_now_iso: str,
+    event_timestamp_iso: str,
     threshold_pct: float = DEFAULT_BELOW_TYPICAL_THRESHOLD_PCT,
     min_history_days: int = DEFAULT_MIN_HISTORY_DAYS_FOR_BEHAVIORAL,
 ) -> Optional[AlertCandidate]:
@@ -49,7 +49,9 @@ def evaluate(
         the last 7 days (excluding today). Caller-built from Activity
         Series query + day-bucketing. Skipped (cold-start guard) if
         len < min_history_days.
-      local_now_iso: ISO 8601 in facility-local time (with tz offset).
+      event_timestamp_iso: facility-local DAY ANCHOR (midnight), ISO 8601
+        with tz offset — see `history_window.local_day_anchor_iso`. Becomes
+        the alert's eventTimestamp / day half of its sort key.
       threshold_pct: e.g. 0.70 → fires if today < 0.70 × median7Day.
       min_history_days: minimum history before behavioral rules fire.
 
@@ -72,7 +74,7 @@ def evaluate(
         alert_type=ALERT_BELOW_TYPICAL,
         severity=SEVERITY_STANDARD,
         source=SOURCE_BEHAVIORAL,
-        event_timestamp_iso=local_now_iso,
+        event_timestamp_iso=event_timestamp_iso,
         data={
             "activeMinutesToday": today_active_minutes,
             "median7Day": median_7d,

@@ -35,7 +35,11 @@ from rules.types import (  # noqa: E402
 
 
 NOW = 1_700_000_000  # fixed epoch for deterministic time math
+# Offline rules stamp the moment of detection...
 LOCAL_NOW_ISO = "2026-05-24T09:00:00-08:00"
+# ...while the daily-cadence rules stamp the facility-local DAY ANCHOR
+# (midnight), which is what makes their Alert History SK once-per-day.
+LOCAL_DAY_ISO = "2026-05-24T00:00:00-08:00"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -51,7 +55,7 @@ class TestNoActivityToday(unittest.TestCase):
             activity_rows_today=rows,
             device_last_seen_epoch=NOW + last_seen_offset if last_seen_offset is not None else None,
             now_epoch=NOW,
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
             **kw,
         )
 
@@ -165,7 +169,7 @@ class TestBelowTypical(unittest.TestCase):
         cand = below_typical.evaluate(
             today_active_minutes=100,
             history_active_min_per_day=self._hist(14, 200),
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNotNone(cand)
         self.assertEqual(cand.alert_type, ALERT_BELOW_TYPICAL)
@@ -179,7 +183,7 @@ class TestBelowTypical(unittest.TestCase):
         cand = below_typical.evaluate(
             today_active_minutes=150,  # > 140
             history_active_min_per_day=self._hist(14, 200),
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNone(cand)
 
@@ -188,7 +192,7 @@ class TestBelowTypical(unittest.TestCase):
         cand = below_typical.evaluate(
             today_active_minutes=140,
             history_active_min_per_day=self._hist(14, 200),
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNone(cand)
 
@@ -196,7 +200,7 @@ class TestBelowTypical(unittest.TestCase):
         cand = below_typical.evaluate(
             today_active_minutes=0,
             history_active_min_per_day=self._hist(13, 200),
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNone(cand)
 
@@ -205,7 +209,7 @@ class TestBelowTypical(unittest.TestCase):
         cand = below_typical.evaluate(
             today_active_minutes=0,
             history_active_min_per_day=self._hist(14, 0),
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNone(cand)
 
@@ -215,7 +219,7 @@ class TestBelowTypical(unittest.TestCase):
         cand = below_typical.evaluate(
             today_active_minutes=100,
             history_active_min_per_day=history,
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNotNone(cand)
         self.assertEqual(cand.data["median7Day"], 200)
@@ -225,14 +229,14 @@ class TestBelowTypical(unittest.TestCase):
         cand = below_typical.evaluate(
             today_active_minutes=99,
             history_active_min_per_day=self._hist(14, 200),
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
             threshold_pct=0.50,
         )
         self.assertIsNotNone(cand)
         cand = below_typical.evaluate(
             today_active_minutes=100,
             history_active_min_per_day=self._hist(14, 200),
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
             threshold_pct=0.50,
         )
         self.assertIsNone(cand)
@@ -243,7 +247,7 @@ class TestBelowTypical(unittest.TestCase):
         cand = below_typical.evaluate(
             today_active_minutes=129,
             history_active_min_per_day=self._hist(14, 200),
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
             threshold_pct=0.65,
         )
         self.assertIsNotNone(cand)
@@ -251,7 +255,7 @@ class TestBelowTypical(unittest.TestCase):
         cand = below_typical.evaluate(
             today_active_minutes=129,
             history_active_min_per_day=self._hist(14, 200),
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
             threshold_pct=0.70,
         )
         self.assertIsNotNone(cand)
@@ -270,7 +274,7 @@ class TestDecliningTrend(unittest.TestCase):
         history = [300] * 23 + [200] * 7
         cand = declining_trend.evaluate(
             history_active_min_per_day=history,
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNotNone(cand)
         self.assertEqual(cand.alert_type, ALERT_DECLINING_TREND)
@@ -284,7 +288,7 @@ class TestDecliningTrend(unittest.TestCase):
         history = [200] * 30
         cand = declining_trend.evaluate(
             history_active_min_per_day=history,
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNone(cand)
 
@@ -292,7 +296,7 @@ class TestDecliningTrend(unittest.TestCase):
         history = [100] * 23 + [400] * 7
         cand = declining_trend.evaluate(
             history_active_min_per_day=history,
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNone(cand)
 
@@ -302,7 +306,7 @@ class TestDecliningTrend(unittest.TestCase):
         history = [200] * 23 + [170] * 7
         cand = declining_trend.evaluate(
             history_active_min_per_day=history,
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNone(cand)
 
@@ -311,7 +315,7 @@ class TestDecliningTrend(unittest.TestCase):
         history = [300] * 22 + [100] * 7
         cand = declining_trend.evaluate(
             history_active_min_per_day=history,
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNone(cand)
 
@@ -319,7 +323,7 @@ class TestDecliningTrend(unittest.TestCase):
         history = [300] * 13
         cand = declining_trend.evaluate(
             history_active_min_per_day=history,
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNone(cand)
 
@@ -327,7 +331,7 @@ class TestDecliningTrend(unittest.TestCase):
         history = [0] * 30
         cand = declining_trend.evaluate(
             history_active_min_per_day=history,
-            local_now_iso=LOCAL_NOW_ISO,
+            event_timestamp_iso=LOCAL_DAY_ISO,
         )
         self.assertIsNone(cand)
 

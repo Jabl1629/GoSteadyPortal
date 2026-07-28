@@ -36,7 +36,7 @@ from .types import (
 def evaluate(
     *,
     history_active_min_per_day: list[int],
-    local_now_iso: str,
+    event_timestamp_iso: str,
     threshold_pct: float = DEFAULT_DECLINING_TREND_THRESHOLD_PCT,
     min_history_days: int = DEFAULT_MIN_HISTORY_DAYS_FOR_BEHAVIORAL,
 ) -> Optional[AlertCandidate]:
@@ -46,7 +46,9 @@ def evaluate(
         Oldest first, most recent last. At least 30 days for the 7d-vs-prior-23d
         split to be meaningful. Caller-built; skipped (cold-start) if
         len < min_history_days.
-      local_now_iso: ISO 8601 in facility-local time.
+      event_timestamp_iso: facility-local DAY ANCHOR (midnight), ISO 8601
+        with tz offset — see `history_window.local_day_anchor_iso`. Becomes
+        the alert's eventTimestamp / day half of its sort key.
       threshold_pct: e.g. 0.85 → fires if median7Day < 0.85 × medianPrior23Day.
 
     Returns:
@@ -74,7 +76,7 @@ def evaluate(
         alert_type=ALERT_DECLINING_TREND,
         severity=SEVERITY_STANDARD,
         source=SOURCE_BEHAVIORAL,
-        event_timestamp_iso=local_now_iso,
+        event_timestamp_iso=event_timestamp_iso,
         data={
             "median7Day": median_7d,
             "medianPrior23Day": median_prior_23,

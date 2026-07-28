@@ -387,8 +387,14 @@ export class ProcessingStack extends cdk.Stack {
         DEVICES_TABLE: deviceTable.tableName,
         ASSIGNMENTS_TABLE: deviceAssignmentsTable.tableName,
         // Tuning surface (all overridable without code change):
-        NO_ACTIVITY_LOCAL_HOUR: '9',
+        // 11:00, raised from 09:00 (2026-07) — 09:00 flagged residents who
+        // had merely had a slow morning.
+        NO_ACTIVITY_LOCAL_HOUR: '11',
         END_OF_DAY_LOCAL_HOUR: '22',
+        // Hourly firings, starting at the target hour, in which a daily rule
+        // may still run. Covers a missed/jitter-straddled invocation; repeats
+        // are deduped by the day-anchored alert SK.
+        TRIGGER_CATCHUP_HOURS: '3',
         HISTORY_DAYS: '30',
       },
       powertoolsLayer,

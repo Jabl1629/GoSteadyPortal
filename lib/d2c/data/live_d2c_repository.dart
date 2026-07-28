@@ -261,7 +261,9 @@ class LiveD2CRepository implements D2CRepository {
             detail: _alertDetail(a),
             severity: _alertSeverity(a.severity),
             openedMinAgo: now
-                .difference(a.eventTimestamp.toLocal())
+                // raisedAt, not eventTimestamp — the daily behavioral rules
+                // anchor eventTimestamp to facility-local midnight.
+                .difference(a.raisedAt.toLocal())
                 .inMinutes
                 .clamp(0, 1 << 30),
           ),

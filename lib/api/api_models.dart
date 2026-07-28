@@ -401,6 +401,18 @@ class AlertRow {
   /// like `-06:00`; converting to UTC would produce a different SK
   /// that doesn't match the stored row.)
   final String eventTimestampRaw;
+
+  /// When the row was written, per the server. Null on rows predating the
+  /// projection (and on any producer that omits it).
+  ///
+  /// Prefer this over [eventTimestamp] for "how long ago was this raised?".
+  /// The daily-cadence behavioral rules (`no_activity_today`,
+  /// `below_typical_activity`, `declining_trend`) anchor [eventTimestamp] to
+  /// facility-local midnight — that is the day the alert is ABOUT and the
+  /// sort key that makes it once-per-day — so an alert raised at 11:00
+  /// local would otherwise render as "Triggered 11h ago" the moment it
+  /// appeared. Use [raisedAt].
+  final DateTime? createdAt;
   final String alertType;
   final String severity;
   final String? source;
@@ -411,6 +423,7 @@ class AlertRow {
   const AlertRow({
     required this.eventTimestamp,
     required this.eventTimestampRaw,
+    this.createdAt,
     required this.alertType,
     required this.severity,
     this.source,
@@ -422,11 +435,18 @@ class AlertRow {
   /// Compound SK for `PATCH /alerts/{patientId}/{sk}` (2B-FAC-W).
   String get sk => '$eventTimestampRaw#$alertType';
 
+  /// When this alert was raised — the timestamp to age against for display.
+  /// Falls back to [eventTimestamp] on rows with no [createdAt], which is
+  /// correct for the real-time producers (threshold-detector, offline rules,
+  /// firmware) where the two coincide anyway.
+  DateTime get raisedAt => createdAt ?? eventTimestamp;
+
   factory AlertRow.fromJson(Map<String, dynamic> json) {
     final tsRaw = json['eventTimestamp']?.toString() ?? '';
     return AlertRow(
       eventTimestamp: _parseTs(tsRaw) ?? DateTime.now(),
       eventTimestampRaw: tsRaw,
+      createdAt: _parseTs(json['createdAt']?.toString() ?? ''),
       alertType: (json['alertType'] as String?) ?? 'unknown',
       severity: (json['severity'] as String?) ?? 'standard',
       source: json['source'] as String?,

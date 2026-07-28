@@ -196,6 +196,12 @@ def _alert_view(row: dict[str, Any]) -> dict[str, Any]:
     """Projection for an alert row."""
     return {
         "eventTimestamp": row.get("eventTimestamp"),
+        # When the row was actually written. Distinct from eventTimestamp:
+        # the daily-cadence behavioral rules anchor eventTimestamp to
+        # facility-local midnight (it is the day the alert is ABOUT, and the
+        # SK that makes it once-per-day), so only createdAt can answer
+        # "how long ago was this raised?" for those rows.
+        "createdAt": row.get("createdAt"),
         "alertType": row.get("alertType"),
         "severity": row.get("severity"),
         "source": row.get("source"),

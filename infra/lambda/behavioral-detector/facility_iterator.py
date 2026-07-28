@@ -3,16 +3,18 @@ Facility enumeration + rule routing — Phase 1C-slim.
 
 Spec L2 + L7: hourly UTC cron fires the Lambda. Per invocation we
 enumerate all facilities, compute each one's local-now, and route to
-the rule sets whose trigger-hour just crossed within the past hour:
+the rule sets whose trigger window the facility is currently inside:
 
-  local-hour 09 (±1h) → no_activity_today rule
-  local-hour 22 (±1h) → below_typical + declining_trend rules
-  (always)            → device_offline + device_silent rules
+  local-hour 11..13 → no_activity_today rule
+  local-hour 22..23 → below_typical + declining_trend rules
+  (always)          → device_offline + device_silent rules
 
-The ±1h window covers DST transitions and timezone weirdness. Idempotency
-is handled at the DDB write layer (conditional PutItem on Alert History
-with compound SK including facility-local date) — running the rule
-twice in the same day is a no-op past the first write.
+The window (target hour + a catch-up tail, clamped at local midnight)
+makes the daily check survive a missed or jitter-straddled invocation.
+Idempotency is handled at the DDB write layer: the daily rules stamp
+their eventTimestamp — and so their Alert History sort key — with the
+facility-local day anchor (midnight), so running the rule again the
+same local day collides and is a no-op past the first write.
 
 Organizations table SK pattern (Phase 0B-rev):
   PK = clientId
@@ -34,8 +36,18 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 # Spec config (overridable via env).
-DEFAULT_NO_ACTIVITY_LOCAL_HOUR = 9
+#
+# 11:00 (was 09:00 through 2026-07): the 09:00 gate flagged residents who
+# simply had a slow morning. 11:00 gives breakfast AND mid-morning activity
+# time to land before a CRITICAL fires, at the cost of ~2h of notice.
+DEFAULT_NO_ACTIVITY_LOCAL_HOUR = 11
 DEFAULT_END_OF_DAY_LOCAL_HOUR = 22
+
+# How many hourly firings, starting at the target hour, may run a
+# daily-cadence rule. >1 makes the daily check resilient to a missed or
+# jitter-straddled invocation; the day-anchored SK dedupes the repeats so
+# only the first firing to see the condition writes a row.
+DEFAULT_TRIGGER_CATCHUP_HOURS = 3
 
 
 @dataclass(frozen=True)
@@ -117,35 +129,59 @@ def list_facilities(
     return out
 
 
+def in_trigger_window(
+    local_hour: int, target_hour: int, catchup_hours: int
+) -> bool:
+    """
+    True for the target local hour and the `catchup_hours - 1` hours after it.
+
+    The window never crosses local midnight: past midnight the local DAY has
+    rolled over, and the daily rules' sort key is anchored to local midnight
+    (`history_window.local_day_anchor_iso`), so a firing at 00:30 would key
+    the NEW day and write a spurious row for a day that has barely started.
+    The window is therefore clamped at hour 24 — an end-of-day rule targeting
+    22:00 can catch up at 23:00 but no further.
+
+    Why a window rather than `local_hour == target_hour`: a single missed or
+    jitter-straddled invocation silently dropped that facility's entire day.
+    EventBridge `rate()` fires about hourly, not on an exact-minute grid, so
+    two consecutive firings can land at 10:59:5x and 12:00:0x and never
+    observe hour 11 at all; an invocation that errors (`list_facilities`
+    raises for every facility at once) has the same effect. The repeats a
+    window introduces are free — the day-anchored SK rejects them.
+    """
+    catchup = max(1, catchup_hours)
+    return target_hour <= local_hour < min(target_hour + catchup, 24)
+
+
 def rule_set_for_facility(
     facility: FacilityContext,
     *,
     no_activity_hour: int = DEFAULT_NO_ACTIVITY_LOCAL_HOUR,
     end_of_day_hour: int = DEFAULT_END_OF_DAY_LOCAL_HOUR,
-    last_invocation_local_hour: int | None = None,
+    catchup_hours: int = DEFAULT_TRIGGER_CATCHUP_HOURS,
 ) -> RuleSet:
     """
     Decide which rule families to evaluate for this facility now.
 
-    The trigger windows are ±1 hour around the configured local hours.
-    Specifically: a rule fires if the facility's local hour ∈ [target-1, target]
-    crossed into target within the past hour. Concretely, we say:
+    Daily-cadence rules run on the first firing at or after their target
+    local hour, plus a short catch-up window (see `in_trigger_window`).
+    At most one of those firings writes a row — the rest collide on the
+    day-anchored sort key in `handler._write_alert`.
 
-      "evaluate no_activity_today if facility-local hour is currently 09"
-
-    Because the cron fires hourly and we check at-most-once per local hour,
-    rule writes are deduplicated at the DDB write layer (compound SK +
-    once-per-day eventTimestamp). If two consecutive cron firings see the
-    same local hour (e.g., DST fallback when the same hour repeats),
-    the second write fails the conditional check — no harm done.
-
-    `last_invocation_local_hour` is informational only in V1 (unused);
-    reserved for future "skip if we just ran" logic if needed.
+    Note DST needs no special handling here. US transitions occur at ~02:00
+    local, so an hourly UTC cron still observes local hours 11 and 22
+    exactly once on a transition day (verified by simulation); the hour that
+    goes missing is 02 and the one that repeats is 01.
     """
     local_hour = facility.local_now.hour
     return RuleSet(
-        evaluate_no_activity=(local_hour == no_activity_hour),
-        evaluate_end_of_day_behavioral=(local_hour == end_of_day_hour),
+        evaluate_no_activity=in_trigger_window(
+            local_hour, no_activity_hour, catchup_hours
+        ),
+        evaluate_end_of_day_behavioral=in_trigger_window(
+            local_hour, end_of_day_hour, catchup_hours
+        ),
         # Offline rules run on every invocation regardless of local time
         # (a dead device at 03:00 is just as relevant as at 13:00).
         evaluate_offline=True,
@@ -167,4 +203,7 @@ NO_ACTIVITY_LOCAL_HOUR = _env_int(
 )
 END_OF_DAY_LOCAL_HOUR = _env_int(
     "END_OF_DAY_LOCAL_HOUR", DEFAULT_END_OF_DAY_LOCAL_HOUR
+)
+TRIGGER_CATCHUP_HOURS = _env_int(
+    "TRIGGER_CATCHUP_HOURS", DEFAULT_TRIGGER_CATCHUP_HOURS
 )

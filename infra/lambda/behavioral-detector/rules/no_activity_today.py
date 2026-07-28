@@ -1,10 +1,11 @@
 """
 "No activity today" rule — Phase 1C-slim, spec L8.
 
-Triggers at facility-local 09:00 (configurable per spec D6 — gives
-breakfast/morning-activity time to land before flagging). Fires alert
-if:
-  - sum(the device's PRIMARY metric) over [local-midnight, local-09:00] == 0
+Triggers at facility-local 11:00 (configurable per spec D6 — gives
+breakfast AND mid-morning activity time to land before flagging; was
+09:00 through 2026-07, which flagged residents who simply had a slow
+morning). Fires alert if:
+  - sum(the device's PRIMARY metric) over [local-midnight, local-11:00] == 0
   - AND device lastSeen < 24h ago (device is alive but not moving;
     if it's been silent >24h, device_silent rule handles it instead)
 
@@ -40,8 +41,8 @@ def evaluate(
     activity_rows_today: list[dict[str, Any]],
     device_last_seen_epoch: Optional[int],
     now_epoch: int,
-    local_now_iso: str,
-    check_local_hour: int = 9,
+    event_timestamp_iso: str,
+    check_local_hour: int = 11,
     metric_field: str = "activeMinutes",
 ) -> Optional[AlertCandidate]:
     """
@@ -55,11 +56,16 @@ def evaluate(
         or None if never seen.
       now_epoch: current epoch seconds (caller-injected; tests pass
         deterministic values).
-      local_now_iso: ISO 8601 in facility-local time (with tz offset).
-        Used as the eventTimestamp on the alert.
+      event_timestamp_iso: the facility-local DAY ANCHOR (midnight) in
+        ISO 8601 with tz offset, from
+        `history_window.local_day_anchor_iso`. Becomes the alert's
+        eventTimestamp and so the day half of its sort key — constant
+        for the whole local day, which is what makes the write a
+        once-per-day guard.
       check_local_hour: the facility-local hour at which this rule fires
-        (default 9, but the caller is already deciding "do we evaluate
-        this rule now?" before calling — see facility_iterator).
+        (default 11, but the caller is already deciding "do we evaluate
+        this rule now?" before calling — see facility_iterator). Reported
+        in the alert payload only; it does not gate anything here.
       metric_field: the device's PRIMARY activity column (DT-4 WS2
         no-regression) — "steps" for a walker (identical to the pre-DT-4
         steps rule, so a walker who took steps but summed < 1 active-minute
@@ -88,7 +94,7 @@ def evaluate(
         alert_type=ALERT_NO_ACTIVITY_TODAY,
         severity=SEVERITY_CRITICAL,
         source=SOURCE_BEHAVIORAL,
-        event_timestamp_iso=local_now_iso,
+        event_timestamp_iso=event_timestamp_iso,
         data={
             "metric": metric_field,
             "activeMinutesObservedBefore": total_active_minutes,

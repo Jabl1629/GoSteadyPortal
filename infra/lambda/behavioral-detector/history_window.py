@@ -53,6 +53,32 @@ def facility_local_midnight(tz_name: str, now: datetime | None = None) -> dateti
     return n.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def local_day_anchor_iso(local_now: datetime) -> str:
+    """
+    The facility-local midnight of `local_now`'s day, as ISO 8601 with a
+    numeric offset (e.g. `2026-07-27T00:00:00-06:00`).
+
+    This is the DAY KEY for the daily-cadence behavioral alerts
+    (`no_activity_today`, `below_typical_activity`, `declining_trend`) —
+    it becomes the `eventTimestamp` half of their Alert History sort key
+    (spec L5 / Q5). Because it is constant for the whole local day, the
+    conditional PutItem in `handler._write_alert` is a genuine
+    once-per-day-per-rule guard: a second evaluation in the same local
+    day collides on the SK and is rejected.
+
+    It replaced a second-precision `local_now` timestamp, which could
+    never collide across two invocations and so provided no dedupe at
+    all — the daily cadence rested entirely on the trigger-hour gate.
+
+    `ZoneInfo` resolves the offset from the wall-clock fields, so on a
+    DST-transition day this returns midnight's offset (not `local_now`'s)
+    and stays stable for every evaluation that day.
+    """
+    return local_now.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).isoformat(timespec="seconds")
+
+
 def query_activity_for_today(
     activity_table: Any,
     *,

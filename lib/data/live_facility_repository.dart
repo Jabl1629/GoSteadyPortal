@@ -758,7 +758,10 @@ NotificationSeverity _mapSeverity(String alertType, String serverSeverity) {
 /// Mirrors the demo engine's `detail` string shape so the Notification
 /// Review panel renders consistently across modes.
 String _formatDetail(AlertRow alert, DateTime now) {
-  final d = now.difference(alert.eventTimestamp);
+  // raisedAt, not eventTimestamp: the daily-cadence behavioral rules anchor
+  // eventTimestamp to facility-local midnight (the day the alert is about),
+  // so ageing against it would read "Triggered 11h ago" on a fresh alert.
+  final d = now.difference(alert.raisedAt);
   final String age;
   if (d.inMinutes < 1) {
     age = 'just now';

@@ -6,9 +6,9 @@ Triggered hourly by EventBridge (spec L2). Per invocation:
   2. For each facility:
        a. Compute facility-local now from facility.timezone.
        b. Route to applicable rule sets:
-            local-09 → no_activity_today
-            local-22 → below_typical + declining_trend
-            (always) → device_offline + device_silent
+            local-11 (+ catch-up) → no_activity_today
+            local-22 (+ catch-up) → below_typical + declining_trend
+            (always)              → device_offline + device_silent
        c. Enumerate active patients in this facility (Patients GSI).
        d. For each (rule, patient):
             - Skip if patient.notificationsPaused.until > now
@@ -166,9 +166,13 @@ def _write_alert(
     `device_silent`), claim_open_alert is called first; subsequent
     same-type firings while the prior alert is open are suppressed.
     Daily-cadence types (`no_activity_today`, `below_typical_activity`,
-    `declining_trend`) skip the open-alert gate — each day's row is
-    the historical record of that day and is naturally once-per-day
-    via the hour-gate in facility_iterator.rule_set_for_facility().
+    `declining_trend`) skip the open-alert gate — each day's row is the
+    historical record of that day. Their once-per-day property comes
+    from the SK itself: their `event_timestamp_iso` is the facility-local
+    DAY ANCHOR (midnight), so a second evaluation anywhere in the same
+    local day collides here and is rejected. The trigger-hour gate in
+    `facility_iterator.rule_set_for_facility()` decides WHEN in the day
+    they run; this condition is what makes a re-run harmless.
     """
     sk = f"{cand.event_timestamp_iso}#{cand.alert_type}"
 
@@ -325,13 +329,19 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
     patients = list_active_patients(_patients_tbl, facility=facility)
     summary["patientsEvaluated"] += len(patients)
 
-    # Pre-compute local-now ISO once per facility (consistent timestamp
-    # across all rule fires within this facility's evaluation pass).
-    local_now_iso = facility.local_now.strftime("%Y-%m-%dT%H:%M:%S%z")
-    # Insert the colon in the tz offset for proper ISO 8601 (Python's
-    # %z gives `-0800` not `-08:00`).
-    if len(local_now_iso) >= 5 and (local_now_iso[-5] in "+-"):
-        local_now_iso = local_now_iso[:-2] + ":" + local_now_iso[-2:]
+    # Two timestamps, each the `eventTimestamp` (and so the SK) of a
+    # different class of rule:
+    #
+    #   local_day_iso — facility-local MIDNIGHT. Used by the daily-cadence
+    #     rules, whose row is the record of that DAY. Constant across the
+    #     local day, so `_write_alert`'s conditional PutItem is a real
+    #     once-per-day guard (spec L5 / Q5).
+    #   local_now_iso — facility-local NOW, to the second. Used by the
+    #     offline rules, where the row records a moment of detection and
+    #     once-per-condition is enforced by the open-alert state machine
+    #     instead (2026-05-26-alert-recurrence-policy.md).
+    local_now_iso = facility.local_now.isoformat(timespec="seconds")
+    local_day_iso = history_window.local_day_anchor_iso(facility.local_now)
 
     now_epoch = _now_epoch()
 
@@ -409,7 +419,7 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
                 activity_rows_today=_today_rows(),
                 device_last_seen_epoch=device_last_seen,
                 now_epoch=now_epoch,
-                local_now_iso=local_now_iso,
+                event_timestamp_iso=local_day_iso,
                 check_local_hour=facility_iterator.NO_ACTIVITY_LOCAL_HOUR,
                 metric_field=metric_field,
             )
@@ -420,13 +430,13 @@ def _evaluate_facility(facility: FacilityContext, rule_set: RuleSet, summary: di
             cand = below_typical.evaluate(
                 today_active_minutes=_today_active_minutes(),
                 history_active_min_per_day=_history_per_day(),
-                local_now_iso=local_now_iso,
+                event_timestamp_iso=local_day_iso,
             )
             _maybe_fire(patient, cand, device_serial, summary)
 
             cand = declining_trend.evaluate(
                 history_active_min_per_day=_history_per_day(),
-                local_now_iso=local_now_iso,
+                event_timestamp_iso=local_day_iso,
             )
             _maybe_fire(patient, cand, device_serial, summary)
 
@@ -599,6 +609,7 @@ def handler(event: dict, _context):
             "facilityCount": len(facilities),
             "noActivityHour": facility_iterator.NO_ACTIVITY_LOCAL_HOUR,
             "endOfDayHour": facility_iterator.END_OF_DAY_LOCAL_HOUR,
+            "catchupHours": facility_iterator.TRIGGER_CATCHUP_HOURS,
         },
     )
 
@@ -607,6 +618,7 @@ def handler(event: dict, _context):
             facility,
             no_activity_hour=facility_iterator.NO_ACTIVITY_LOCAL_HOUR,
             end_of_day_hour=facility_iterator.END_OF_DAY_LOCAL_HOUR,
+            catchup_hours=facility_iterator.TRIGGER_CATCHUP_HOURS,
         )
         # Skip facilities where no rules apply this hour (offline rules
         # always apply, so this branch is rare — but defensive).
