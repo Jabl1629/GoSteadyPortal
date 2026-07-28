@@ -9920,3 +9920,99 @@ stickers (operator generates from the claim URLs above) + real household claims.
 claim→activate→walk→dashboard loop is already proven on GS0002000001 (§C58.3), so no
 per-unit claim test was run on 02–05 (a claim binds a device to a household and there's
 no clean D2C un-claim path yet — §C58.6).
+
+---
+
+# §C60 — [cloud] Behavioral daily rules weren't actually daily; no-activity gate raised to 11:00 (2026-07-28)
+
+Entry owner: Claude (portal session) | Trigger: a read of `no_activity_today`'s
+current behavior turned up two defects in the 1C-slim daily-cadence path.
+**Zero firmware-facing impact** — no MQTT topic, heartbeat, activity, alert, or
+downlink-cmd contract changes. Portal `c5ad9f8`.
+
+## C60.1 — What was wrong
+
+1. **The daily rules had no write-layer dedupe at all.** `no_activity_today` /
+   `below_typical_activity` / `declining_trend` stamped `eventTimestamp` — and
+   so their Alert History SK — with facility-local now *to the second*. Two
+   invocations can never produce the same second, so the conditional PutItem in
+   `_write_alert` was dead code for them (its own comment claimed "same-day
+   dedupe"). Their once-per-day property rested *entirely* on the trigger-hour
+   gate firing exactly once, ever. This is the weakness ai-coach C2-D4 flagged.
+2. **That gate was `local_hour == target`,** so any missed or jitter-straddled
+   hourly firing silently dropped a facility's whole day — and `list_facilities`
+   re-raises, so one failure drops every facility at once.
+
+Neither is safe to fix alone: a wider window without the day-anchored SK just
+writes duplicate CRITICALs. Shipped as one commit.
+
+**A note for whoever reads the old code:** `facility_iterator`'s docstring
+justified a "±1h window" as DST cover. That rationale was wrong (and the window
+was never implemented anyway). US transitions move local hours 01–03, so an
+hourly UTC cron always observed local 09/11/22 exactly once even on transition
+days — verified by simulating both directions. The gate's real exposure was
+missed invocations.
+
+## C60.2 — What landed
+
+- **`history_window.local_day_anchor_iso()`** — daily rules now anchor to
+  facility-local midnight; the write itself is the once-per-day guard. Offline
+  rules keep local-now (they dedupe via the open-alert state machine).
+- **`facility_iterator.in_trigger_window()`** — target hour + `TRIGGER_CATCHUP_HOURS`
+  (new env, default 3), clamped at local midnight so end-of-day rules can't leak
+  into the next day's anchor. Set to `1` to restore exact-hour behavior.
+- **`NO_ACTIVITY_LOCAL_HOUR` 9 → 11** — 09:00 flagged residents who'd merely had
+  a slow morning.
+- **Portal display fix:** a midnight anchor would render a fresh 11:00 alert as
+  "Triggered 11h ago". `patient-api._alert_view` now projects `createdAt`, and
+  new `AlertRow.raisedAt` (falls back to `eventTimestamp`) is what the facility
+  and D2C repos age against. **This is why the frontends were redeployed** — the
+  backend change alone would have shipped the display regression.
+
+## C60.3 — Verification
+
+- 76 behavioral unit tests (was 46). New `test_facility_iterator.py` — the gate
+  had **zero** coverage — includes a counterfactual reproducing the old miss at
+  `catchup_hours=1`. New `test_day_anchor.py` covers both DST directions.
+  59 patient-api / 29 alert-actions / 104 `_shared` green; `dart analyze` clean.
+- **Live dedupe proof against the real dev Alerts table** (synthetic patient,
+  self-cleaning): three evaluations across one facility-local day → 1 row written,
+  2 rejected by the conditional PutItem; next local day → new row.
+- Post-deploy invoke both envs: dev `facilities=11 patients=14 alerts=0`,
+  prod `facilities=8 patients=6 alerts=0`, no errors. The `deduped=1` in each is
+  a pre-existing `device_silent` open-alert suppression, **not** the new path.
+
+## C60.4 — Deploys (all 2026-07-28)
+
+| Target | Result |
+|---|---|
+| `GoSteady-Dev-Processing` / `GoSteady-Prod-Processing` | ✅ 40s / 41s |
+| `GoSteady-Dev-Api` / `GoSteady-Prod-Api` | ✅ 58s / 311s |
+| D2C app dev + prod (`app.gosteady.co`) | ✅ 200 |
+| Facility portal dev + prod (`portal.gosteady.co`) | ✅ 200 |
+
+The Processing deploys also carried a **pre-existing undeployed `_shared/audit_catalog.py`
+change** (20 audit-event constants from the 2026-07-24 analytics commit `59fdc93`)
+— inert, but it's why every Processing Lambda showed a code bump.
+
+## C60.5 — Dev/prod alignment + what's still drifted
+
+§C58.6's "WS2 (`behavioral-detector`) is prod-only; sync dev when convenient" is
+**stale** — dev and prod already carried identical `CodeSha256` before this work,
+and still do after. 22/24 Lambdas are byte-identical across envs.
+
+**Still drifted, both pre-existing and unrelated to this change:**
+
+| Function | Owning stack | State |
+|---|---|---|
+| `d2c-pre-token` | `d2c-auth-stack.ts` | dev 2026-07-21, prod 2026-07-24 (dev behind) |
+| `audit-forwarder` | `audit-stack.ts` | dev 2026-07-21, prod 2026-07-24 (dev behind) |
+
+Neither stack was deployed here — `d2c-auth` carries Cognito trigger changes with
+real blast radius on the live D2C sign-in flow, and both are outside this change.
+Closing that drift wants its own review + deploy.
+
+---
+
+*Entry owner: Claude (portal session, 2026-07-28). No firmware impact; cloud-side
+detector correctness + a portal display fix.*

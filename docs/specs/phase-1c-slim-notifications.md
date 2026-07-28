@@ -2,7 +2,7 @@
 
 ## Overview
 - **Phase**: 1C-slim (a focused subset of the broader Phase 1C Scheduled Jobs umbrella)
-- **Status**: ✅ Deployed (dev) 2026-05-24 — 42/42 rule unit tests PASS + end-to-end audit pipeline verified on synthetic invoke
+- **Status**: ✅ Deployed **dev + PROD** — 1C-slim dev 2026-05-24; daily-cadence correctness pass (day-anchored SK + trigger window) and `NO_ACTIVITY_LOCAL_HOUR` 9 → 11 shipped to both envs 2026-07-28 (coord §C60). 76 behavioral unit tests PASS + live dedupe verified against the real dev Alerts table
 - **Branch**: `feature/infra-scaffold`
 - **Date Started**: 2026-05-24
 - **Date Completed**: 2026-05-24 (dev) — real-data rule-firing validation deferred (needs local-09 / local-22 cron firing OR seeded fixtures with controlled timestamps)
