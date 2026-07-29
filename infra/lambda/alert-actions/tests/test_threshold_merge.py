@@ -60,12 +60,24 @@ class TestMergeThresholds(unittest.TestCase):
 
 class TestDetermineThresholdAlertsWithOverrides(unittest.TestCase):
     def test_default_behavior_unchanged_no_overrides(self):
-        # Same as Phase 1B behavior
+        # Same as Phase 1B behavior for BATTERY.
         self.assertEqual(determine_threshold_alerts(0.03, None), [("battery_critical", "critical")])
         self.assertEqual(determine_threshold_alerts(0.07, None), [("battery_low", "warning")])
         self.assertEqual(determine_threshold_alerts(0.50, None), [])
-        self.assertEqual(determine_threshold_alerts(None, -130), [("signal_lost", "warning")])
-        self.assertEqual(determine_threshold_alerts(None, -115), [("signal_weak", "info")])
+        # Signal alerting is OFF by default since 2026-07-28 — these fire
+        # only with the flag explicitly on. Kept exercising the tier logic
+        # here so the rollback path stays covered; the default-off contract
+        # lives in _shared/tests/test_signal_alerts_disabled.py.
+        self.assertEqual(determine_threshold_alerts(None, -130), [])
+        self.assertEqual(determine_threshold_alerts(None, -115), [])
+        self.assertEqual(
+            determine_threshold_alerts(None, -130, signal_enabled=True),
+            [("signal_lost", "warning")],
+        )
+        self.assertEqual(
+            determine_threshold_alerts(None, -115, signal_enabled=True),
+            [("signal_weak", "info")],
+        )
 
     def test_override_relaxes_battery(self):
         # Patient with batteryLow=0.05 (under-default) should NOT alert at 0.07
@@ -89,10 +101,17 @@ class TestDetermineThresholdAlertsWithOverrides(unittest.TestCase):
         )
 
     def test_combined_battery_and_signal_overrides(self):
+        """The rsrpWeak override still merges correctly — verified with the
+        flag on. With it off (the default) only battery survives."""
         overrides = {"batteryLow": 0.20, "rsrpWeak": -100}
         self.assertEqual(
-            sorted(determine_threshold_alerts(0.15, -105, overrides=overrides)),
+            sorted(determine_threshold_alerts(
+                0.15, -105, overrides=overrides, signal_enabled=True)),
             sorted([("battery_low", "warning"), ("signal_weak", "info")]),
+        )
+        self.assertEqual(
+            determine_threshold_alerts(0.15, -105, overrides=overrides),
+            [("battery_low", "warning")],
         )
 
     def test_decimal_values_in_overrides(self):

@@ -8,8 +8,37 @@ per shadow update — only the most severe per dimension fires.
 
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 from typing import Mapping
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# ── Signal (RSRP) alerting: OFF by default (2026-07-28) ───────────────
+#
+# `signal_lost` / `signal_weak` were 35% of all prod alert rows and were
+# not actionable: RSRP swings are a property of where the resident happens
+# to be standing, and no caregiver action follows from "the cell signal
+# dipped". A genuinely dark device is already covered — and covered better
+# — by the behavioral-detector's `device_offline` (2h) / `device_silent`
+# (24h) rules, which key on "we stopped hearing from it" rather than on a
+# radio metric.
+#
+# Disabled as a FLAG rather than by deleting the rules: the thresholds,
+# their per-patient override surface (Phase 2A-AA `rsrpLost`/`rsrpWeak`),
+# the validation, and the dashboards all stay intact, so re-enabling is an
+# env-var flip with no code change. Set `SIGNAL_ALERTS_ENABLED=true`.
+#
+# Both types move together on purpose. Disabling only `signal_lost` leaves
+# a perverse gap: a device degrading PAST the -120 dBm lost threshold would
+# stop alerting while a healthier -110 dBm device still alerted.
+SIGNAL_ALERTS_ENABLED = _env_bool("SIGNAL_ALERTS_ENABLED", False)
 
 # Battery thresholds (fraction 0..1) — ARCHITECTURE.md §8 / Phase 1B L10.
 BATTERY_CRITICAL = 0.05
@@ -71,12 +100,20 @@ def merge_thresholds(
     return merged
 
 
+def signal_alerts_enabled(override: bool | None = None) -> bool:
+    """Resolve the signal-alerting flag. `None` → the module/env default
+    (`SIGNAL_ALERTS_ENABLED`, off since 2026-07-28). Tests and callers pass
+    an explicit bool."""
+    return SIGNAL_ALERTS_ENABLED if override is None else override
+
+
 def determine_threshold_alerts(
     battery_pct: float | None,
     rsrp_dbm: float | None,
     *,
     overrides: Mapping[str, float | Decimal | None] | None = None,
     device_type: str | None = None,
+    signal_enabled: bool | None = None,
 ) -> list[tuple[str, str]]:
     """
     Returns [(alert_type, severity), ...] for the breaches present in the
@@ -84,7 +121,12 @@ def determine_threshold_alerts(
 
     Per-patient overrides (Phase 2A-AA) are merged over per-type defaults
     (Phase DT-0). Existing call sites that pass neither kwarg get unchanged
-    Phase 1B behavior.
+    Phase 1B behavior for BATTERY.
+
+    Signal (`signal_lost` / `signal_weak`) is gated by `signal_enabled`,
+    which defaults to the `SIGNAL_ALERTS_ENABLED` env flag — OFF as of
+    2026-07-28 (see the note at the top of this module). When off, no
+    signal breach is ever returned; battery is untouched.
     """
     t = merge_thresholds(overrides, device_type=device_type)
     alerts: list[tuple[str, str]] = []
@@ -93,7 +135,7 @@ def determine_threshold_alerts(
             alerts.append(("battery_critical", "critical"))
         elif battery_pct < t["batteryLow"]:
             alerts.append(("battery_low", "warning"))
-    if rsrp_dbm is not None:
+    if rsrp_dbm is not None and signal_alerts_enabled(signal_enabled):
         if rsrp_dbm <= t["rsrpLost"]:
             alerts.append(("signal_lost", "warning"))
         elif rsrp_dbm <= t["rsrpWeak"]:

@@ -186,6 +186,13 @@ export class ProcessingStack extends cdk.Stack {
       environment: {
         ...commonEnv,
         PRE_ACTIVATION_AUDIT_SAMPLE_HOURS: String(config.preActivationAuditSampleHours),
+        // signal_lost / signal_weak kill switch (2026-07-28). RSRP swings
+        // track where the resident is standing, not anything a caregiver
+        // acts on — they were 35% of prod alert volume. A genuinely dark
+        // device is covered better by behavioral-detector's device_offline
+        // (2h) / device_silent (24h). Set 'true' to restore; the thresholds,
+        // per-patient overrides and dashboards are all still in place.
+        SIGNAL_ALERTS_ENABLED: 'false',
       },
       powertoolsLayer,
       tracingActive: true,

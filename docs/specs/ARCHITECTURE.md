@@ -998,11 +998,27 @@ most severe tier per dimension fires (critical suppresses low; lost suppresses w
 |-----------|-----------|-----------|----------|-------|
 | Battery critical | `battery_pct < 0.05` | `battery_critical` | `critical` | Charge immediately |
 | Battery low | `battery_pct < 0.10` | `battery_low` | `warning` | Charge soon |
-| Signal lost | `rsrp_dbm ≤ −120` | `signal_lost` | `warning` | Device may be unreachable |
-| Signal weak | `rsrp_dbm ≤ −110` | `signal_weak` | `info` | Consider repositioning |
+| ~~Signal lost~~ | ~~`rsrp_dbm ≤ −120`~~ | `signal_lost` | ~~`warning`~~ | **DISABLED 2026-07-28** (coord §C61) |
+| ~~Signal weak~~ | ~~`rsrp_dbm ≤ −110`~~ | `signal_weak` | ~~`info`~~ | **DISABLED 2026-07-28** (coord §C61) |
 | Device offline | Shadow `lastSeen > 2 hours` | `device_offline` | `warning` | Detected via IoT Events or scheduled sweep (Phase 1C) |
 
 Thresholds are hard-coded in Lambda source. Per-walker overrides deferred to Phase 2A.
+
+> **Signal alerting is OFF (2026-07-28).** `signal_lost` / `signal_weak` were
+> 35% of all prod alert rows and were not actionable — RSRP tracks where the
+> resident happens to be standing, and no caregiver action follows from a cell
+> dip. A genuinely unreachable device is covered better by behavioral-detector's
+> `device_offline` (2h) / `device_silent` (24h), which key on "we stopped
+> hearing from it" rather than on a radio metric.
+>
+> Disabled behind `SIGNAL_ALERTS_ENABLED` (`_shared/thresholds`, default
+> `false`) rather than by deleting the rules — the tiers, the Phase 2A-AA
+> per-patient `rsrpLost`/`rsrpWeak` override surface, its validation, and the
+> CloudWatch dashboards all stay intact, so restoring is an env-var flip with no
+> code change. **Both types move together on purpose:** disabling only
+> `signal_lost` would leave a device degrading *past* −120 dBm silent while a
+> healthier −110 dBm device still alerted. RSRP is still collected, still on the
+> shadow, and still on the fleet-health dashboards — it just doesn't page anyone.
 
 ### Pre-activation suppression
 

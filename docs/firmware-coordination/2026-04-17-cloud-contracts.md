@@ -10016,3 +10016,82 @@ Closing that drift wants its own review + deploy.
 
 *Entry owner: Claude (portal session, 2026-07-28). No firmware impact; cloud-side
 detector correctness + a portal display fix.*
+
+---
+
+# §C61 — [cloud] Signal alerting (`signal_lost` / `signal_weak`) disabled (2026-07-28)
+
+Entry owner: Claude (portal session) | Trigger: operator call — the signal
+notifications "really aren't helpful." **Zero firmware-facing impact** — RSRP is
+still reported on every heartbeat, still written to the Shadow, still on the
+fleet-health dashboards. Only the *alerting* on it stopped.
+
+## C61.1 — Why
+
+`signal_lost` + `signal_weak` were **35% of all prod alert rows** (13 of 37) and
+25 of 216 in dev — and not actionable. RSRP tracks where the resident happens to
+be standing; no caregiver action follows from a cell dip. The condition that
+actually matters — a device you've stopped hearing from — is covered better by
+behavioral-detector's `device_offline` (2h) / `device_silent` (24h), which key on
+silence rather than on a radio metric.
+
+Live confirmation: one of the four unacked prod rows was written **that same
+day**, on a real D2C household.
+
+## C61.2 — Both types, not just `signal_lost`
+
+Disabling only `signal_lost` (as literally asked) would have left a perverse gap:
+a device degrading **past** the −120 dBm lost threshold would go silent while a
+healthier −110 dBm device still alerted. Worse signal, no alert. The dimension
+moves as a unit.
+
+## C61.3 — What landed (portal `<this commit>`)
+
+- **`_shared/thresholds.SIGNAL_ALERTS_ENABLED`** (env, default `false`) +
+  `signal_alerts_enabled()`. `determine_threshold_alerts` takes an optional
+  `signal_enabled` override; **battery is untouched** (it's the one alert a D2C
+  walker can act on — §C56 allow-list).
+- **A flag, not a deletion.** The tiers, the Phase 2A-AA per-patient
+  `rsrpLost`/`rsrpWeak` override surface, its validation, and the dashboards all
+  stay. Restoring = `SIGNAL_ALERTS_ENABLED=true`, no code change.
+- **Per-patient overrides cannot resurrect it** — the flag gates the whole
+  dimension, so a stale override can't keep one resident noisy after the shutoff.
+- **`threshold-detector._auto_ack_cleared_thresholds`**: when disabled, signal
+  slots clear **unconditionally** — deliberately NOT gated on `rsrp_dbm is not
+  None`. A device with an open pre-shutoff alert that never reports RSRP again
+  would otherwise have that slot (and the caregiver's unacked row) stuck forever.
+- **`infra/scripts/ack-disabled-signal-alerts.py`** — acks leftover unacked
+  signal rows as `system:signal_alerts_disabled` and releases their `openAlerts`
+  slots. **Acks, never deletes**: the history of past signal conditions stays
+  queryable. Idempotent, `--dry-run` supported.
+
+## C61.4 — Verification + rollout
+
+- 123 `_shared` tests (19 new: default-off, battery-unaffected, both boundaries,
+  overrides-can't-resurrect, explicit re-enable as a real rollback path).
+  Two `alert-actions` threshold-merge tests asserted the old behavior and were
+  updated to exercise the tiers with `signal_enabled=True` — the merge logic is
+  still covered, the default-off contract lives in the new `_shared` test.
+  29 alert-actions / 59 patient-api / 76 behavioral green.
+- **Order mattered:** deployed the flag first (stop new writes), *then* ran the
+  cleanup — otherwise the detector could write a fresh row into the gap.
+
+| Step | dev | prod |
+|---|---|---|
+| `GoSteady-*-Processing` deploy | ✅ 46s | ✅ 45s |
+| `SIGNAL_ALERTS_ENABLED` confirmed | `false` | `false` |
+| Cleanup script | 3 rows acked, 3 slots released | 4 rows acked, 4 slots released |
+| Unacked signal rows after | **0** | **0** |
+| Historical rows preserved | 25 | 13 |
+
+Re-run of the script is a clean no-op (idempotency confirmed on dev).
+
+## C61.5 — Not done
+
+`tipover` has 2 unacked rows in dev and is unrelated. The `d2c-pre-token` /
+`audit-forwarder` dev↔prod drift from §C60.5 is still open.
+
+---
+
+*Entry owner: Claude (portal session, 2026-07-28). No firmware impact; RSRP
+collection and dashboards unchanged, only alerting stopped.*

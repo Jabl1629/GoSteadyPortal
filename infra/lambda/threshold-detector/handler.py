@@ -49,7 +49,7 @@ from _shared import (
 )
 from _shared.open_alerts import auto_ack_alert, claim_open_alert
 from _shared.pause_check import is_currently_paused
-from _shared.thresholds import merge_thresholds
+from _shared.thresholds import merge_thresholds, signal_alerts_enabled
 from aws_lambda_powertools.metrics import MetricUnit
 
 # Per `docs/specs/2026-05-26-alert-recurrence-policy.md` — types that
@@ -322,10 +322,14 @@ def _auto_ack_cleared_thresholds(
         - < batteryCritical             → battery_critical active
         - [batteryCritical, batteryLow) → battery_low active
         - >= batteryLow                 → neither active (fine state)
-      rsrp_dbm:
+      rsrp_dbm (ONLY when signal alerting is enabled — off by default
+      since 2026-07-28, see `_shared/thresholds`):
         - <= rsrpLost                   → signal_lost active
         - (rsrpLost, rsrpWeak]          → signal_weak active
         - > rsrpWeak                    → neither active
+      When signal alerting is DISABLED, neither is ever active and both
+      slots are cleared unconditionally, so alerts left open by the
+      shutoff drain on each device's next shadow update.
 
     Examples:
       - Recovery (battery 0.03 → 0.50): battery_critical slot acks;
@@ -347,7 +351,8 @@ def _auto_ack_cleared_thresholds(
             active.add("battery_critical")
         elif battery_pct < t["batteryLow"]:
             active.add("battery_low")
-    if rsrp_dbm is not None:
+    signal_on = signal_alerts_enabled()
+    if rsrp_dbm is not None and signal_on:
         if rsrp_dbm <= t["rsrpLost"]:
             active.add("signal_lost")
         elif rsrp_dbm <= t["rsrpWeak"]:
@@ -362,7 +367,14 @@ def _auto_ack_cleared_thresholds(
         for at in ("battery_critical", "battery_low"):
             if at not in active:
                 cleared.append(at)
-    if rsrp_dbm is not None:
+    # Signal: when alerting is DISABLED (default since 2026-07-28), clear
+    # both slots unconditionally — not gated on `rsrp_dbm is not None`.
+    # A device whose open signal alert predates the shutoff must be able to
+    # close it even if it never reports RSRP again, otherwise the slot (and
+    # the caregiver's unacked row) is stuck forever.
+    if not signal_on:
+        cleared.extend(("signal_lost", "signal_weak"))
+    elif rsrp_dbm is not None:
         for at in ("signal_lost", "signal_weak"):
             if at not in active:
                 cleared.append(at)
