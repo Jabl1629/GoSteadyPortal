@@ -10095,3 +10095,108 @@ Re-run of the script is a clean no-op (idempotency confirmed on dev).
 
 *Entry owner: Claude (portal session, 2026-07-28). No firmware impact; RSRP
 collection and dashboards unchanged, only alerting stopped.*
+
+---
+
+# §C62 — [firmware] ROOT CAUSE of the GS0002000002 blackout: session storage exhaustion → LittleFS SAU fault (2026-07-31)
+
+Entry owner: Claude (portal session) | Trigger: `GS0002000002` (Dorothy Iupert's
+prod rollator) went dark 3 d 20 hr. Device recovered on the bench; the fault
+frame was read live over SWD. **HIGH severity — a cellular outage is currently
+sufficient to crash a deployed unit and destroy the data it collected offline.**
+Not device-specific: any unit in marginal coverage walks the same path.
+
+**Firmware spec (fix options):** `gosteady-firmware/docs/specs/2026-07-31-session-storage-exhaustion.md`.
+**Nothing is fixed yet** — this entry is the diagnosis.
+
+## C62.1 — The fault
+
+Read from the live in-RAM forensics record (`nrfutil device read --address
+0x2001cfcc`; the persisted copy is in the external-flash `crash_forensics`
+partition, which SWD cannot address directly — `forensics_init` loads it into a
+static at every boot, so the RAM copy is readable without touching flash):
+
+```
+PC     0x0005F2F2 → lfs_file_write_ +0x6      thread "auto_start"
+LR     0x00059FB6 → littlefs_write  +0x20     reason 41 = K_ERR_ARM_SECURE_ATTRIBUTION_UNIT
+uptime 35,030,251 ms (9 h 43 m)               boot 9 / faults 2 / wdt 0
+```
+
+Crashed **inside LittleFS while writing session samples**. On nRF9151+TF-M a
+wild pointer surfaces as an SAU violation rather than a plain bus fault.
+
+**Timing cross-check:** the last successful heartbeat reported `uptime_s: 30424`
+(8 h 27 m); the fault fired at 9 h 43 m — **~77 min after the device last
+reached the cloud.** This is the blackout event, not a stale fault. `wdt=0`
+rules out a hang.
+
+## C62.2 — Why it filled: the retention policy IS the uplink
+
+`gosteady_sample` = 28 B (`uint32 t_ms` + 6 × `float`) at 100 Hz = **2,800 B/s**.
+`/lfs` sessions partition = 8,388,608 B → **≈ 50 minutes of cumulative recorded
+motion fills it.** Not per day — ever, if nothing drains it.
+
+Only two deletion paths exist, and **neither works offline**:
+
+1. `gosteady_session_prune()` — fires only on activity **PUBACK**.
+2. `gosteady_session_orphan_sweep()` — boot-time, and see C62.3.
+
+At −127 dBm / SNR −10 uploads failed → nothing pruned → ~50 min of walking
+later, LittleFS faulted. Observed at recovery: `/lfs` **93% full**, 26 orphaned
+`.dat`.
+
+## C62.3 — Two further defects found while diagnosing
+
+- **`orphan_sweep` is not selective.** Despite the name it unlinks **every**
+  `.dat` at boot with no staleness/completeness/published check. So
+  retention-until-PUBACK is worthless across a reboot, and the 26 files swept on
+  this unit were Dorothy's blackout sessions — **unrecoverable**. Nothing ever
+  re-reads a `.dat` to regenerate an activity payload, so the files carry no
+  durability value after the algo runs at session end.
+- **The real backlog is RAM-only, 4 deep** (`ACTIVITY_MSGQ_DEPTH 4`). The
+  `telemetry_queue` partition (256 KB, `0xce2000`) is **carved in `pm_static.yml`
+  but never implemented** (`cloud.c:188` — "waits on FMEA 6.3"). Net effect:
+  78 KB/session of raw samples nothing will ever read is retained on flash,
+  while the ~256 B of derived output anyone actually wants sits in volatile RAM.
+
+## C62.4 — Fix options (detail + tables in the firmware spec)
+
+| # | Option | Verdict |
+|---|---|---|
+| 1 | **Implement `telemetry_queue`; unlink `.dat` at session end** | ★ **the fix.** Changes the scaling law O(recording time) → O(session count); ~78 KB → ~256 B per session ⇒ ~1,024 sessions ≈ **200 days** offline. Also fixes C62.3's RAM-only backlog |
+| 2 | High-water prune on `/lfs` (`statvfs` before session start) | Immediate mitigation; stops the crash but still 2,800 B/s — chooses *which* data to lose instead of crashing |
+| 3 | Kconfig-gate raw retention off in `prj_*_pilot`/`field` | Cheap and effective in shipping builds; forfeits field raw analysis; **depends on all algos being streaming (Q2)** |
+| 4 | Condense the record (`int16` + Δt, 50 Hz, drop gyro) | 28 B → 14/8 B ⇒ 100–350 min. **A multiplier, not a fix**; breaks the `.dat` contract with `ingest_capture.py` |
+| 5 | **Fail gracefully** — pre-flight `statvfs` guard, selective sweep, publish `storage_pct` on heartbeat | ★ **required regardless.** A full FS must return an error, never fault |
+
+Sequencing: 5 + 2 now (small, ships fast, protects units already deployed) → 1
+(retire 2's pruning once it lands) → 4 opportunistically → 3 as policy.
+
+**Note `session.c` already handles `-ENOSPC` correctly** (flags it, clean
+session stop — Phase 1.6 follow-up 2026-05-05). This is *not* unhandled ENOSPC;
+the fault is inside LittleFS internals, so the pointer corruption is a separate
+root cause still to be established (spec Q1 — needs a bench repro at ~95% full).
+
+## C62.5 — Cloud-side gap this exposed
+
+`device_silent` fired correctly at +24 h and **reached nobody** — SNS/SES
+delivery is still the Phase 2C stub (`notification-stack.ts` is 59 lines of
+TODO). The unit was dark **3 d 20 hr** before a human noticed, and only because
+the operator went looking. Detection works; delivery does not exist. Fixing
+storage does not fix that.
+
+Also unresolved for this unit: one `EMM cause 9` (UE identity cannot be derived)
+registration reject observed on the bench — seen **once**, cause unknown, worth
+a look at the Onomondo SIM.
+
+## C62.6 — Firmware-facing impact
+
+**Diagnosis only; no code changed, no flash written.** The device was recovered
+by a `nrfutil device reset` (RESET_SYSTEM, no erase) and is healthy on the
+bench — sessions, algo, LTE, TLS, MQTT and activity uplink all verified
+end-to-end at −120 dBm. Two activity rows landed in prod during verification.
+
+---
+
+*Entry owner: Claude (portal session, 2026-07-31). Diagnosis from the live
+device; fix options in the firmware spec, none implemented.*
