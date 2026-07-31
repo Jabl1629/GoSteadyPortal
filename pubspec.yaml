@@ -25,6 +25,9 @@ dependencies:
   # D2C user-agreement acknowledgment — tappable Terms/Privacy links
   # (d2c-user-agreement.md / d2c-caregiver-agreement.md).
   url_launcher: ^6.2.0
+  # Userdemo "Get in touch" banner — same-tab location.assign (url_launcher's
+  # window.open is popup-blocked in some embedded/mobile browsers).
+  web: ^1.0.0
 
 dev_dependencies:
   flutter_test:

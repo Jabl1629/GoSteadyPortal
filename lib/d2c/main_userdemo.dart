@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_strategy/url_strategy.dart';
+import 'package:web/web.dart' as web;
 
 import '../auth/mock_auth_service.dart';
 import '../theme/app_theme.dart';
@@ -28,16 +29,19 @@ import 'screens/d2c_history_screen.dart';
 /// (Susan Davis); the dashboard's person-icon toggle flips to the
 /// caregiver/Admin view live.
 ///
-/// **Mobile framing**: the D2C product is a mobile-first PWA. By default
-/// the demo adapts to the window: phone-sized windows run the app natively
-/// (someone opened the demo on their actual phone), larger windows render
-/// it inside a phone-shaped frame — scaled down when the window is too
-/// short for the full mock device, so desktop visitors never see a clipped
-/// frame. Re-evaluated live on resize. Force a mode via the URL:
-///   ?w=390    force a 390px frame — iPhone 14 / 13 Pro
-///   ?w=430    force a 430px frame — iPhone 15 Pro Max (the auto default)
-///   ?w=744    force a 744px frame — iPad mini portrait
-///   ?w=full   force no frame — fill the window
+/// **Framing**: by default the app simply fills the window at every size —
+/// a phone visitor gets the native PWA feel, a desktop visitor gets a
+/// full-window web app (screens cap their content width themselves). For
+/// pitch decks / screenshots a phone-shaped frame can be forced via the
+/// URL (scaled down if the window is too short for the mock device):
+///   ?w=390    phone frame — iPhone 14 / 13 Pro
+///   ?w=430    phone frame — iPhone 15 Pro Max
+///   ?w=744    phone frame — iPad mini portrait
+///   ?w=full   explicit no-frame (same as the default; kept for old links)
+///
+/// **Get in touch**: a persistent banner above the app links to the
+/// marketing site's interest form (gosteady.co/get-in-touch) — the demo
+/// doubles as a lead-capture surface for QR-code handouts.
 ///
 /// Reuses the polished wireframe screens verbatim (the same widgets the
 /// `/d2c/preview` design-review hub renders); this entry just presents
@@ -54,12 +58,9 @@ Future<void> main() async {
   final auth = MockAuthService.instance;
   await auth.init();
 
-  // Built once: the adaptive frame rebuilds on window resize, and a
-  // rebuilt router would reset navigation state mid-demo.
-  final router = _buildRouter(auth);
-  runApp(_AdaptiveDeviceFrame(
-    mode: _FrameMode.fromUrl(),
-    child: _UserDemoApp(router: router),
+  runApp(_UserDemoShell(
+    forcedFrameWidth: _forcedFrameWidthFromUrl(),
+    child: _UserDemoApp(router: _buildRouter(auth)),
   ));
 }
 
@@ -277,118 +278,178 @@ class _UserDemoLoginState extends State<_UserDemoLogin> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Adaptive phone-frame viewport (phones run native; desktop gets a
-// scaled-to-fit phone frame; `?w=` forces a mode)
+// Demo shell: "Get in touch" banner over the app; optional forced phone
+// frame via `?w=` (default is the app filling the window at any size)
 // ─────────────────────────────────────────────────────────────────────
 
-/// Framing requested via the page URL. Default is [auto] — decided per
-/// window size in [_AdaptiveDeviceFrame] rather than once at startup.
-class _FrameMode {
-  const _FrameMode._({this.explicitWidth, this.forceFull = false});
-
-  /// `?w=NNN` — always frame at this width, whatever the window.
-  final double? explicitWidth;
-
-  /// `?w=full` — never frame; the app fills the window.
-  final bool forceFull;
-
-  static const auto = _FrameMode._();
-
-  static _FrameMode fromUrl() {
-    try {
-      final w = Uri.base.queryParameters['w'];
-      if (w == null) return auto;
-      if (w == 'full') return const _FrameMode._(forceFull: true);
-      final width = double.tryParse(w);
-      if (width == null || width < 200 || width > 2000) return auto;
-      return _FrameMode._(explicitWidth: width);
-    } catch (_) {
-      return auto;
-    }
+/// `?w=NNN` from the page URL, or null for the default no-frame fill
+/// (absent, `full`, or an out-of-range value all mean null).
+double? _forcedFrameWidthFromUrl() {
+  try {
+    final w = Uri.base.queryParameters['w'];
+    if (w == null || w == 'full') return null;
+    final width = double.tryParse(w);
+    if (width == null || width < 200 || width > 2000) return null;
+    return width;
+  } catch (_) {
+    return null;
   }
 }
 
-/// Renders [child] either natively (phone-sized windows — the app IS the
-/// page) or centered inside a phone-shaped frame (desktop / tablet
-/// windows). The frame is scaled down via [FittedBox] when the window is
-/// shorter than the mock device, so it is never clipped. [LayoutBuilder]
-/// re-decides on every window resize.
-class _AdaptiveDeviceFrame extends StatelessWidget {
-  const _AdaptiveDeviceFrame({required this.mode, required this.child});
-  final _FrameMode mode;
+/// Root of the demo page: the lead-capture banner pinned above the app,
+/// which renders natively (default) or inside a forced phone frame.
+/// Sits above [MaterialApp], hence the explicit [Directionality].
+class _UserDemoShell extends StatelessWidget {
+  const _UserDemoShell({required this.forcedFrameWidth, required this.child});
+  final double? forcedFrameWidth;
   final Widget child;
-
-  static const double _defaultPhoneWidth = 430;
-
-  /// Auto mode: windows narrower than this are a real phone (or a
-  /// deliberately phone-sized window) — run the app natively. The frame
-  /// needs ~430px + margins before it stops looking cramped anyway.
-  static const double _nativeMaxWidth = 520;
-
-  /// Keeps the app subtree's element (router state, scroll positions,
-  /// in-progress text) alive when a resize crosses the framed ↔ native
-  /// threshold and the wrapper tree around it changes shape.
-  static final GlobalKey _appKey = GlobalKey();
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        double? frameWidth;
-        if (mode.forceFull) {
-          frameWidth = null;
-        } else if (mode.explicitWidth != null) {
-          frameWidth = mode.explicitWidth;
-        } else {
-          frameWidth = constraints.maxWidth >= _nativeMaxWidth
-              ? _defaultPhoneWidth
-              : null;
-        }
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: Column(
+        children: [
+          const _GetInTouchBanner(),
+          Expanded(
+            child: forcedFrameWidth == null
+                ? child
+                : _DeviceFrame(width: forcedFrameWidth!, child: child),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
-        final app = KeyedSubtree(key: _appKey, child: child);
-        if (frameWidth == null) return app;
+/// Where the banner sends interested visitors — the marketing site's
+/// Netlify interest form. `src=userdemo` tags the lead's origin.
+const _getInTouchUrl = 'https://gosteady.co/get-in-touch?src=userdemo';
 
-        final frameHeight = frameWidth <= 500
-            ? frameWidth * (19.5 / 9.0)
-            : frameWidth * (4.0 / 3.0);
-        return ColoredBox(
-          color: const Color(0xFFE5E0D8),
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              // scaleDown: full size when it fits, shrunk to the window
-              // when it doesn't — never clipped.
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Container(
-                  width: frameWidth,
-                  height: frameHeight,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(28),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.12),
-                        blurRadius: 28,
-                        offset: const Offset(0, 12),
-                      ),
-                    ],
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: MediaQuery(
-                    data: MediaQuery.of(context).copyWith(
-                      size: Size(frameWidth, frameHeight),
-                      padding: EdgeInsets.zero,
-                      viewInsets: EdgeInsets.zero,
-                      viewPadding: EdgeInsets.zero,
+/// Same-tab navigation via `location.assign`, deliberately NOT
+/// url_launcher / `window.open`: popup blockers in embedded and some
+/// mobile browsers silently swallow `window.open` (even `_self`, once the
+/// plugin's async hop loses the tap's user-gesture context), and
+/// url_launcher reports success regardless — verified in the in-app
+/// browser pane, where the tap fired but nothing opened. A location
+/// assignment is plain navigation and is never blocked. The form's
+/// success page links back to the demo, so same-tab isn't a dead end —
+/// and the demo is stateless mock data anyway.
+void _openGetInTouch() => web.window.location.assign(_getInTouchUrl);
+
+/// Full-width sage strip above the app on every screen (login included —
+/// QR-code recipients land there). Whole banner is tappable; opens the
+/// interest form in a new tab so the demo stays where it was.
+class _GetInTouchBanner extends StatelessWidget {
+  const _GetInTouchBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppTheme.sage,
+      child: SafeArea(
+        bottom: false,
+        child: InkWell(
+          onTap: _openGetInTouch,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+            child: Row(
+              children: [
+                const Icon(Icons.favorite_rounded,
+                    size: 16, color: Colors.white),
+                const SizedBox(width: 9),
+                const Expanded(
+                  child: Text(
+                    'Want GoSteady for your family?',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.1,
                     ),
-                    child: app,
                   ),
                 ),
+                const SizedBox(width: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Get in touch',
+                        style: TextStyle(
+                          color: AppTheme.sage,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                      SizedBox(width: 4),
+                      Icon(Icons.arrow_forward_rounded,
+                          size: 13, color: AppTheme.sage),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Centers the app inside a fixed phone-shaped box (`?w=` only), scaled
+/// down via [FittedBox] when the window is too short — never clipped.
+class _DeviceFrame extends StatelessWidget {
+  const _DeviceFrame({required this.width, required this.child});
+  final double width;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final height = width <= 500 ? width * (19.5 / 9.0) : width * (4.0 / 3.0);
+    return ColoredBox(
+      color: const Color(0xFFE5E0D8),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Container(
+              width: width,
+              height: height,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(28),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.12),
+                    blurRadius: 28,
+                    offset: const Offset(0, 12),
+                  ),
+                ],
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  size: Size(width, height),
+                  padding: EdgeInsets.zero,
+                  viewInsets: EdgeInsets.zero,
+                  viewPadding: EdgeInsets.zero,
+                ),
+                child: child,
               ),
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }

@@ -44,10 +44,21 @@ facility demo has to the live facility portal.
   requests (approve/deny), member management, last-Admin guard.
 - **Account**: settings, notification-preferences matrix, "who's accessed
   the data" audit log, device settings.
-- Phone-first framing, **adaptive** (2026-07-31): phone-sized windows run
-  the app natively; larger windows render it inside a phone-shaped frame
-  scaled to fit the window (previously the fixed 430×932 frame was forced
-  for everyone and clipped on typical laptop-height windows).
+- **Native fill at every window size** (2026-07-31): the app just fills
+  the window — phones get the real PWA feel, desktop gets a full-window
+  web app (screens cap their own content width). The phone-shaped frame
+  is now opt-in via `?w=` only (previously the fixed 430×932 frame was
+  forced for everyone and clipped on typical laptop-height windows).
+- **"Get in touch" banner** (2026-07-31): a persistent sage strip above
+  the app on every screen (login included) linking to
+  `gosteady.co/get-in-touch?src=userdemo` — the demo doubles as the
+  lead-capture surface for QR-code handouts. Same-tab navigation via
+  `location.assign`, deliberately not `window.open` (popup blockers in
+  embedded/mobile browsers silently swallow it; url_launcher reports
+  success regardless). The form is a Netlify form (`device-interest`) on
+  the marketing site; submissions land in the Netlify dashboard with a
+  `source` field recording where the visitor came from, and its success
+  page links back to the demo.
 
 ### Demo-appeal data choices (2026-07-31)
 The seed data is deliberately best-case — partners should see a healthy,
@@ -139,16 +150,15 @@ Run locally:
 flutter run -d chrome -t lib/d2c/main_userdemo.dart
 ```
 
-URL viewport overrides. The product is a mobile PWA; by default the demo
-**adapts to the window** — phone-sized windows (<520px) run the app
-natively, larger windows get the phone frame, scaled down when the window
-is too short for the full mock device (re-evaluated live on resize).
-Force a mode explicitly:
+URL viewport overrides. By default the app **fills the window at every
+size** (no frame). For pitch decks / screenshots, force a phone-shaped
+frame — scaled down automatically when the window is too short for the
+mock device:
 ```
-?w=390    force a 390px frame — iPhone 14 / 13 Pro
-?w=430    force a 430px frame — iPhone 15 Pro Max (the auto-frame default)
-?w=744    force a 744px frame — iPad mini portrait
-?w=full   force no frame — fill the window
+?w=390    phone frame — iPhone 14 / 13 Pro
+?w=430    phone frame — iPhone 15 Pro Max
+?w=744    phone frame — iPad mini portrait
+?w=full   explicit no-frame (same as the default; kept for old links)
 ```
 
 ---
