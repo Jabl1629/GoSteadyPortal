@@ -1,6 +1,6 @@
 # GoSteady D2C User Demo — Spec
 
-> **Status:** Built (2026-06-29) | **Branch:** `feature/infra-scaffold` | **Owner:** Jace
+> **Status:** Built (2026-06-29); caught up to the live app + redeployed (2026-07-31) | **Branch:** `feature/infra-scaffold` | **Owner:** Jace
 > **Live URL (target):** https://gosteady.co/userdemo/
 
 ---
@@ -30,15 +30,32 @@ facility demo has to the live facility portal.
 
 ### In scope
 - One-click mock sign-in → signed-in consumer app.
-- **Activity** (dashboard): greeting + today's stats, 7-day trend, today's
-  walks, alerts, care note, device health. Person-icon toggle flips between
-  the walker-user POV and the caregiver/Admin POV live.
+- **Activity** (dashboard): greeting + today's stats, two trend charts
+  (active minutes + distance) under the shared Today / 7-day / 30-day zoom
+  stack with tap-a-day drill-down (the day zoom superseded the old
+  standalone "Today's walks" tile), care note, device health. Person-icon
+  toggle flips between the walker-user POV and the caregiver/Admin POV live.
+- **Coach ("Steady")**: the 4th-tab AI activity coach, mock-backed — seeded
+  greeting + morning note, canned warm replies, "What Steady knows" memory
+  screen with editable facts/goals, tone + SMS-teaser prefs. The walker-POV
+  dashboard shows the coach-nudge card until the tab is first opened.
 - **History**: 30/90-day trend view.
 - **Care Team**: Admin view — roster, pending invites, walk-up access
   requests (approve/deny), member management, last-Admin guard.
 - **Account**: settings, notification-preferences matrix, "who's accessed
   the data" audit log, device settings.
 - Phone-first framing (renders in a phone-shaped frame by default).
+
+### Demo-appeal data choices (2026-07-31)
+The seed data is deliberately best-case — partners should see a healthy,
+calm household, not an ops problem:
+- **No open alerts** on the dashboard (the old seed showed a "Battery is
+  getting low — 12%" warning card). Alerting capability still shows via
+  Account → Notification preferences.
+- **Healthy device everywhere**: battery 84% (sage, not warn-orange) +
+  "Excellent" signal on both the dashboard device card and Device settings.
+- The customer audit log's "acknowledged a low-battery alert" row became
+  "updated notification preferences".
 
 ### Non-goals
 - Real Cognito / SMS-OTP (mock auth only — partners don't sign up at a booth).
@@ -87,9 +104,11 @@ lib/d2c/
     d2c_dashboard_screen.dart
     d2c_history_screen.dart
     d2c_care_team_screen.dart
+    d2c_coach_screen.dart   # Coach tab + memory screen (mock-backed hosts)
     d2c_account_screens.dart
   widgets/d2c_bottom_nav.dart
   data/d2c_mock_data.dart
+  data/d2c_repository.dart  # D2CMockRepository — in-memory coach/care-circle state
 ```
 
 `main_userdemo.dart` is a thin entry: a mock-auth gate + a `GoRouter` that

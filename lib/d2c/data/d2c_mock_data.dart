@@ -656,7 +656,7 @@ class D2CMockData {
         ),
         AuditEntry(
           actorName: 'Sarah Davis',
-          action: 'acknowledged a low-battery alert',
+          action: 'updated notification preferences',
           at: DateTime.now().subtract(const Duration(days: 1, hours: 2)),
         ),
         AuditEntry(
@@ -921,16 +921,9 @@ class D2CMockData {
           distanceFt: 191,
         ),
       ],
-      openAlerts: const [
-        WalkerAlert(
-          id: 'alert_1',
-          icon: Icons.battery_alert_outlined,
-          title: 'Battery is getting low',
-          detail: 'Battery at 12% — replace the AAs in the next day or two.',
-          severity: AlertSeverity.warning,
-          openedMinAgo: 47,
-        ),
-      ],
+      // Demo-appeal choice: no open alerts — the dashboard reads "all is
+      // well" (alerting still shows via Account → Notification preferences).
+      openAlerts: const [],
       careNote: CareNote(
         text: 'Started a new walking routine after PT — aiming for two laps around the building every morning.',
         updatedByName: 'Sarah',
@@ -938,8 +931,8 @@ class D2CMockData {
       ),
       device: const DeviceHealth(
         connected: true,
-        batteryPct: 0.12,
-        signalLabel: 'Good',
+        batteryPct: 0.84,
+        signalLabel: 'Excellent',
         lastSeenMinAgo: 18,
       ),
     );

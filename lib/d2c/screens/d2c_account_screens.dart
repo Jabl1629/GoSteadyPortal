@@ -617,9 +617,9 @@ class D2CDeviceSettingsScreen extends StatelessWidget {
                             fontSize: 15,
                             fontWeight: FontWeight.w600)),
                     const Spacer(),
-                    const Text('Battery 12%',
+                    const Text('Battery 84%',
                         style: TextStyle(
-                            color: AppTheme.statusWarn,
+                            color: AppTheme.sage,
                             fontSize: 13,
                             fontWeight: FontWeight.w600)),
                   ],
