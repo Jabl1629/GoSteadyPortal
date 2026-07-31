@@ -44,7 +44,10 @@ facility demo has to the live facility portal.
   requests (approve/deny), member management, last-Admin guard.
 - **Account**: settings, notification-preferences matrix, "who's accessed
   the data" audit log, device settings.
-- Phone-first framing (renders in a phone-shaped frame by default).
+- Phone-first framing, **adaptive** (2026-07-31): phone-sized windows run
+  the app natively; larger windows render it inside a phone-shaped frame
+  scaled to fit the window (previously the fixed 430×932 frame was forced
+  for everyone and clipped on typical laptop-height windows).
 
 ### Demo-appeal data choices (2026-07-31)
 The seed data is deliberately best-case — partners should see a healthy,
@@ -136,13 +139,16 @@ Run locally:
 flutter run -d chrome -t lib/d2c/main_userdemo.dart
 ```
 
-URL viewport overrides (the product is a mobile PWA, so the demo renders in
-a phone frame by default):
+URL viewport overrides. The product is a mobile PWA; by default the demo
+**adapts to the window** — phone-sized windows (<520px) run the app
+natively, larger windows get the phone frame, scaled down when the window
+is too short for the full mock device (re-evaluated live on resize).
+Force a mode explicitly:
 ```
-?w=390    iPhone 14 / 13 Pro
-?w=430    iPhone 15 Pro Max  (default)
-?w=744    iPad mini portrait
-?w=full   no frame — fill the window
+?w=390    force a 390px frame — iPhone 14 / 13 Pro
+?w=430    force a 430px frame — iPhone 15 Pro Max (the auto-frame default)
+?w=744    force a 744px frame — iPad mini portrait
+?w=full   force no frame — fill the window
 ```
 
 ---

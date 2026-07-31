@@ -28,13 +28,16 @@ import 'screens/d2c_history_screen.dart';
 /// (Susan Davis); the dashboard's person-icon toggle flips to the
 /// caregiver/Admin view live.
 ///
-/// **Mobile framing**: the D2C product is a mobile-first PWA, so the demo
-/// renders inside a phone-shaped frame by default (compelling for partners
-/// who'll experience it on a phone). Override via the URL:
-///   ?w=390    iPhone 14 / 13 Pro          (390 x 844)
-///   ?w=430    iPhone 15 Pro Max  (default) (430 x 932)
-///   ?w=744    iPad mini portrait          (744 x 1133)
-///   ?w=full   no frame — fill the window
+/// **Mobile framing**: the D2C product is a mobile-first PWA. By default
+/// the demo adapts to the window: phone-sized windows run the app natively
+/// (someone opened the demo on their actual phone), larger windows render
+/// it inside a phone-shaped frame — scaled down when the window is too
+/// short for the full mock device, so desktop visitors never see a clipped
+/// frame. Re-evaluated live on resize. Force a mode via the URL:
+///   ?w=390    force a 390px frame — iPhone 14 / 13 Pro
+///   ?w=430    force a 430px frame — iPhone 15 Pro Max (the auto default)
+///   ?w=744    force a 744px frame — iPad mini portrait
+///   ?w=full   force no frame — fill the window
 ///
 /// Reuses the polished wireframe screens verbatim (the same widgets the
 /// `/d2c/preview` design-review hub renders); this entry just presents
@@ -51,9 +54,13 @@ Future<void> main() async {
   final auth = MockAuthService.instance;
   await auth.init();
 
-  final app = _UserDemoApp(auth: auth);
-  final frame = _DeviceOverride.fromUrl();
-  runApp(frame == null ? app : _DeviceFrame(deviceOverride: frame, child: app));
+  // Built once: the adaptive frame rebuilds on window resize, and a
+  // rebuilt router would reset navigation state mid-demo.
+  final router = _buildRouter(auth);
+  runApp(_AdaptiveDeviceFrame(
+    mode: _FrameMode.fromUrl(),
+    child: _UserDemoApp(router: router),
+  ));
 }
 
 /// Path the account screen's "Sign out" routes to (see
@@ -62,9 +69,9 @@ Future<void> main() async {
 const _loginPath = '/d2c/preview/onboarding/sign-in';
 
 class _UserDemoApp extends StatelessWidget {
-  const _UserDemoApp({required this.auth});
+  const _UserDemoApp({required this.router});
 
-  final MockAuthService auth;
+  final GoRouter router;
 
   @override
   Widget build(BuildContext context) {
@@ -72,7 +79,7 @@ class _UserDemoApp extends StatelessWidget {
       title: 'GoSteady',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.build(),
-      routerConfig: _buildRouter(auth),
+      routerConfig: router,
     );
   }
 }
@@ -270,77 +277,118 @@ class _UserDemoLoginState extends State<_UserDemoLogin> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Phone-frame viewport override (ported from the facility demo)
+// Adaptive phone-frame viewport (phones run native; desktop gets a
+// scaled-to-fit phone frame; `?w=` forces a mode)
 // ─────────────────────────────────────────────────────────────────────
 
-/// Viewport override read from the page URL. The D2C product is a mobile
-/// PWA, so the demo defaults to a phone-shaped frame (430px) unless
-/// `?w=full` is given or another width is requested.
-class _DeviceOverride {
-  final double width;
-  final double height;
-  const _DeviceOverride(this.width, this.height);
+/// Framing requested via the page URL. Default is [auto] — decided per
+/// window size in [_AdaptiveDeviceFrame] rather than once at startup.
+class _FrameMode {
+  const _FrameMode._({this.explicitWidth, this.forceFull = false});
 
-  static const double _defaultPhoneWidth = 430;
+  /// `?w=NNN` — always frame at this width, whatever the window.
+  final double? explicitWidth;
 
-  static _DeviceOverride? fromUrl() {
+  /// `?w=full` — never frame; the app fills the window.
+  final bool forceFull;
+
+  static const auto = _FrameMode._();
+
+  static _FrameMode fromUrl() {
     try {
       final w = Uri.base.queryParameters['w'];
-      if (w == 'full') return null;
-      final width = w == null ? _defaultPhoneWidth : double.tryParse(w);
-      if (width == null || width < 200 || width > 2000) {
-        return _frameFor(_defaultPhoneWidth);
-      }
-      return _frameFor(width);
+      if (w == null) return auto;
+      if (w == 'full') return const _FrameMode._(forceFull: true);
+      final width = double.tryParse(w);
+      if (width == null || width < 200 || width > 2000) return auto;
+      return _FrameMode._(explicitWidth: width);
     } catch (_) {
-      return _frameFor(_defaultPhoneWidth);
+      return auto;
     }
-  }
-
-  static _DeviceOverride _frameFor(double width) {
-    final height = width <= 500 ? width * (19.5 / 9.0) : width * (4.0 / 3.0);
-    return _DeviceOverride(width, height);
   }
 }
 
-/// Centers the app inside a fixed-size box so downstream layout sees a
-/// phone-sized viewport. Surrounding area stays a neutral warm grey.
-class _DeviceFrame extends StatelessWidget {
-  const _DeviceFrame({required this.deviceOverride, required this.child});
-  final _DeviceOverride deviceOverride;
+/// Renders [child] either natively (phone-sized windows — the app IS the
+/// page) or centered inside a phone-shaped frame (desktop / tablet
+/// windows). The frame is scaled down via [FittedBox] when the window is
+/// shorter than the mock device, so it is never clipped. [LayoutBuilder]
+/// re-decides on every window resize.
+class _AdaptiveDeviceFrame extends StatelessWidget {
+  const _AdaptiveDeviceFrame({required this.mode, required this.child});
+  final _FrameMode mode;
   final Widget child;
+
+  static const double _defaultPhoneWidth = 430;
+
+  /// Auto mode: windows narrower than this are a real phone (or a
+  /// deliberately phone-sized window) — run the app natively. The frame
+  /// needs ~430px + margins before it stops looking cramped anyway.
+  static const double _nativeMaxWidth = 520;
+
+  /// Keeps the app subtree's element (router state, scroll positions,
+  /// in-progress text) alive when a resize crosses the framed ↔ native
+  /// threshold and the wrapper tree around it changes shape.
+  static final GlobalKey _appKey = GlobalKey();
 
   @override
   Widget build(BuildContext context) {
-    final size = Size(deviceOverride.width, deviceOverride.height);
-    return ColoredBox(
-      color: const Color(0xFFE5E0D8),
-      child: Center(
-        child: Container(
-          width: size.width,
-          height: size.height,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(28),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.12),
-                blurRadius: 28,
-                offset: const Offset(0, 12),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        double? frameWidth;
+        if (mode.forceFull) {
+          frameWidth = null;
+        } else if (mode.explicitWidth != null) {
+          frameWidth = mode.explicitWidth;
+        } else {
+          frameWidth = constraints.maxWidth >= _nativeMaxWidth
+              ? _defaultPhoneWidth
+              : null;
+        }
+
+        final app = KeyedSubtree(key: _appKey, child: child);
+        if (frameWidth == null) return app;
+
+        final frameHeight = frameWidth <= 500
+            ? frameWidth * (19.5 / 9.0)
+            : frameWidth * (4.0 / 3.0);
+        return ColoredBox(
+          color: const Color(0xFFE5E0D8),
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              // scaleDown: full size when it fits, shrunk to the window
+              // when it doesn't — never clipped.
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Container(
+                  width: frameWidth,
+                  height: frameHeight,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(28),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.12),
+                        blurRadius: 28,
+                        offset: const Offset(0, 12),
+                      ),
+                    ],
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: MediaQuery(
+                    data: MediaQuery.of(context).copyWith(
+                      size: Size(frameWidth, frameHeight),
+                      padding: EdgeInsets.zero,
+                      viewInsets: EdgeInsets.zero,
+                      viewPadding: EdgeInsets.zero,
+                    ),
+                    child: app,
+                  ),
+                ),
               ),
-            ],
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              size: size,
-              padding: EdgeInsets.zero,
-              viewInsets: EdgeInsets.zero,
-              viewPadding: EdgeInsets.zero,
             ),
-            child: child,
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
