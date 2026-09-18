@@ -10200,3 +10200,105 @@ end-to-end at −120 dBm. Two activity rows landed in prod during verification.
 
 *Entry owner: Claude (portal session, 2026-07-31). Diagnosis from the live
 device; fix options in the firmware spec, none implemented.*
+
+# §C63 — [cross-functional] Family Assistance Alert: umbrella spec drafted (2026-09-18)
+
+Entry owner: Claude (single session over both repos) | Trigger: **PRD V2.2 Draft
+(2026-09-18) §5** replaces the proposed professional-PERS layer with a
+Care-Circle-only **Family Assistance Alert**: a deliberate button on the rollator,
+spoken feedback through a speaker, an assistance request with best-available
+location over LTE-M, and concurrent **Retell voice calls + Twilio SMS** to every
+enrolled Care Circle member. No monitoring center, no EMS, not fall detection.
+
+**Spec:** `docs/specs/family-assistance-alert.md` (umbrella, v0.1). Nothing is
+implemented. This entry records what the survey established and what the two
+teams need to know before touching code.
+
+## C63.1 — Hardware findings that gate the prototype (Thingy:91 X + DFR0534)
+
+- **No spare UARTE on the nRF9151.** UARTE/SPIM/TWIM share one peripheral slot
+  per index: slot 0 = uart0 (console), slot 1 = uart1 (nRF5340 dump bridge),
+  slot 2 = **i2c2** (ADXL367 + nPM1300), slot 3 = **spi3** (flash + BMI270).
+  `uart2`/`uart3` are therefore unavailable. Routes: **R1** re-pin `uart1` onto
+  the P1 GPIOs at 9600 baud in assistance builds (loses the bench dump/BLE
+  channel, already unused in every FIELD_MODE image) or **R2** an I²C→UART
+  bridge (SC16IS750) on P1 with no solder-bridge surgery.
+- **SB8/SB9 topology is undocumented.** The HW user guide says P1 pins 3/4
+  "can be used as regular nRF9151 GPIOs by cutting SB8 and SB9" but never names
+  the GPIOs; the board DTS defines none; DevZone case 346589 asked and got no
+  confirmed answer. If the bridges sit between the nRF9151's own P0.08/P0.09 and
+  the shared sensor bus, cutting them **kills the ADXL367 wake path and the fuel
+  gauge**. Spec §4.3 has a 20-minute bench check (continuity TP32/TP33 ↔
+  TP9/TP10, then a candidate-GPIO toggle test on P0.18/19/21–25) that must run
+  **before** any cut. R2 works under every reading.
+- **Power gating is mandatory.** P1's 3.3 V (`VDD_EXP_BRD`) is nPM1300 BUCK2
+  (200 mA) through load switch U14, enabled by nRF9151 **P0.03**
+  (`exp_board_enable`, off by default). The DFR0534's idle current is
+  unpublished (class ≈ 10–20 mA ⇒ 7–15 Ah/month if left on). The module is
+  powered only from press to end-of-prompt.
+- **Button 1 (P0.26) is also `mcuboot-button0`** and the rollator pilot image
+  builds MCUboot with `CONFIG_BOOT_SERIAL_ENTRANCE_GPIO=y`, detect delay 0. An
+  actuator held during battery insert/reset drops the unit into serial
+  recovery. Deployment images must set `CONFIG_BOOT_SERIAL_ENTRANCE_GPIO=n`.
+- **GNSS hardware is ready** (onboard antenna + LNA, LNA power via COEX2, the
+  board's `MODEM_ANTENNA` default applies `%XCOEX0`; the lte_link_control
+  default system mode already includes GPS). Firmware has zero GNSS code; the
+  spec uses raw `nrf_modem_gnss` single-fix mode, not the `location` library.
+- Rail-sag risk: the amp's transients at 3.3 V into 8 Ω vs BUCK2's 200 mA
+  (which also feeds the GNSS LNA and LEDs) — scope it at HW-0.
+
+## C63.2 — Firmware-facing contract (proposed; locks at FA-2)
+
+- New uplink class **`gs/{serial}/assist`** (QoS 1, ≤ 640 B): `event`
+  (`request` | `location`), device-generated `incident_id` (idempotency key
+  across retries), `seq`, `pressed_at` + uptime/boot_count/clock fields per the
+  0.17.0-time rules, battery/radio snapshot, `location{status: fix|stale|
+  acquiring|unavailable, lat, lon, acc_m, captured_at, age_s}`, serving `cell`
+  tuple, `session_active`.
+- New downlink cmds on the existing envelope: **`assist_ack`**
+  (`cmd_id asst_<uuid>`, `incident_id`, `mode live|test`, `status accepted|
+  not_ready`) and **`assist_arm`** (`cmd_id asstarm_<uuid>`, `enabled`,
+  `version`; coordinator-republished, persisted, cleared by wipe).
+- Heartbeat extras: `assist_capable`, `assist_armed`, `audio_ok`,
+  `gnss_fix_age_s`.
+- Timeline: T0 prompt (~1.5 s after press, audio boot) + connect now; T10 tone
+  + prompt; second press cancels (no publish); T20 publish; ack wait 30 s;
+  retries +30/+90/+210 s then "still trying" prompt; awake ≤ 10 min; pending
+  incident persisted in `/lfs/assist/pending.json` (resumes after reboot);
+  **GNSS only after the ack** (radio is time-shared; the notification must not
+  wait on TTFF); one follow-up `location` event.
+- `"Contacted care circle"` is spoken **only** on `assist_ack` — broker PUBACK
+  is not acceptance.
+- Version line `rol-0.2.0-*`; Kconfig `GOSTEADY_ASSIST_ENABLE/_AUDIO/_GNSS` +
+  timing ints; button wired under FIELD_MODE when assist is on.
+
+## C63.3 — Cloud-facing plan
+
+Dedicated IoT rule → new `assistance-dispatcher` (incident table
+`gosteady-{env}-assistance-incidents`, IdentityKey CMK; Alert History
+projection `assistance_request` critical; SQS fan-out one job per member ×
+channel; ack **after** PutItem + enqueue); `assistance-notifier` in the
+(finally real) Notification stack (Retell `create-phone-call` + Twilio SMS with
+`StatusCallback`); signature-verified webhooks; `assistance-api` under
+`/api/v1/d2c/assistance/*`; readiness = flag ∧ enabled ∧ consent ∧
+`active_monitoring` ∧ ≥ 1 eligible member → `assist_arm`. Test mode is armed in
+the app for 10 min; the device runs the identical path and the ack says
+`mode:test`. Walker sees their own incident (allow-list amendment). Recipients'
+numbers come from `RoleAssignments.phone` (raw E.164 already stored, CMK).
+Pause suppression is bypassed. Per-type alert enum + `alert-handler` untouched.
+
+## C63.4 — Open items for the operator (spec §12)
+
+Q1 have SB8/SB9 already been cut on the bench unit; Q2 fetch the Thingy:91 X
+schematic (settles the topology without the bench test); Q3 Retell account +
+number + live/test agents; Q4 test phones + a GoSteady-owned canary number;
+Q7 cell-based coarse location provider (recommended: yes); Q13 counsel review
+of the copy/consent.
+
+**Prerequisite restated:** the §C62 session-storage-exhaustion fix is a hard
+gate for any assistance pilot — a unit that crashes in a blackout is not a
+safety device.
+
+---
+
+*Entry owner: Claude (2026-09-18). Spec only; no code, no flash, no deploy.*

@@ -1,6 +1,6 @@
 # GoSteady Portal — Master Architecture & Phase Plan
 
-> **Last updated:** 2026-07-20 | **Branch:** `feature/infra-scaffold`
+> **Last updated:** 2026-09-18 | **Branch:** `feature/infra-scaffold`
 > **Repository:** [GoSteadyPortal](https://github.com/Jabl1629/GoSteadyPortal)
 
 ---
@@ -1540,6 +1540,10 @@ An in-app AI activity coach for D2C walker/rollator users — text chat (C1) + p
 
 ---
 
+### Family Assistance Alert 🟡 **Umbrella spec drafted 2026-09-18 (nothing implemented)**
+
+PRD V2.2 §5 (2026-09-18) adds a deliberate assistance button on the rollator: spoken countdown through a speaker (DFR0534 prototype), an `assistance_request` with best-available location over LTE-M, and **concurrent Retell voice calls + Twilio SMS to every enrolled Care Circle member** — Care Circle only, no monitoring center / EMS, not fall detection. Cross-system design in [family-assistance-alert.md](family-assistance-alert.md): new Core-contract uplink class `gs/{serial}/assist` + cmds `assist_ack` / `assist_arm`, `assistance-dispatcher` → incidents table (CMK) → SQS fan-out → `assistance-notifier` (the Notification stack's first real resources) → signature-verified Retell/Twilio webhooks; `assistance-api` under `/api/v1/d2c/assistance/*`; app surfaces for consent/readiness/test/incident. Phased FA-0 (hardware gate: no spare UARTE on the nRF9151, undocumented SB8/SB9 topology, mandatory power gating, MCUboot recovery shares Button 1) → FA-6 (pilot validation). Hard prerequisite: the §C62 session-storage-exhaustion fix. Coord §C63.
+
 ### ❌ Cut from Roadmap
 
 The following phases are **removed from the active plan** and reclassified as conditional future work. They will only be reopened on a triggering event (e.g., signed partner contract requiring the capability).
@@ -1858,6 +1862,7 @@ Surfaced by the first physical-device activation through the facility portal on 
 | DT-1 | Rollator Bench Bring-up + Capture Readiness | [`phase-dt1-rollator-bench-bringup.md`](phase-dt1-rollator-bench-bringup.md) | 🟡 Implemented + flashed 2026-07-01/02 (coord §C49) — firmware product split (`GOSTEADY_PRODUCT` choice; `rol-0.1.0-bench` on `GS9999999981`; heartbeat `device_type` both products; rollator activity = active_min + Core envelope), capture stack rollator-ready (39-run protocol + workbook + tooling), cloud prep done, 9.5 h fault-free soak. ~~Blocked on operator SIM claim~~ **SIM resolved — unit live on LTE-M since 2026-07-02** (facility bench patient, hourly heartbeats). **2026-07-17: `GS9999999981` rotated OUT of `client_rd_test` into the operator's D2C household** via the claim-binding rotate flow (first rollator-firmware wipe-ack recycle proven live; bench patient discharged — "Start Monitoring Again" restores it when bench capture resumes; see d2c-care-circle.md changelog) |
 | 5A | Device Onboarding | — | ⬜ Future |
 | 5B | End-to-End Validation | — | ⬜ Future |
+| FA | Family Assistance Alert (umbrella: firmware + cloud + app) | [`family-assistance-alert.md`](family-assistance-alert.md) | 🟡 **Draft v0.1 2026-09-18** — PRD V2.2 §5 traceability, hardware gate (FA-0), phasing FA-0…FA-6, D1–D15, Q1–Q15. Nothing implemented; coord §C63 |
 
 > Phases 4A/4B/4C (FHIR, HL7v2, Bulk Export) are **cut from active roadmap**. See §12 for trigger criteria to reopen.
 
