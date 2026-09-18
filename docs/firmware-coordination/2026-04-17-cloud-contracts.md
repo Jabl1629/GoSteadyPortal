@@ -10332,6 +10332,36 @@ safety device.
 - Base-config note: `prj.conf` alone still does not link at 0.17.0 (`date_time`);
   the bench overlay adds `CONFIG_DATE_TIME=y` / `CONFIG_DATE_TIME_NTP=n`.
 
+## C63.6 — Button → speaker PROVEN on the bench (2026-09-18, evening)
+
+- Jace cut SB8 + SB9. `build_assist_bench` flashed over the J-Link
+  (`nrfutil device program … ext_mem_erase_mode=ERASE_NONE`) onto the USB-
+  attached dev unit (boot_count 4185). After the cut the sensor bus is intact:
+  ADXL367 armed, BMI270 suspended at boot, `/lfs` mounted, boot counter
+  persisted.
+- **First image: no reply from the module** (status query timed out at
+  3.25 s), full countdown still ran on fixed timing. Cause: TX/RX orientation.
+  The DFR0534 header reads **`T R - +`** left→right and the SparkFun
+  Qwiic→Gravity cable lands **blue / yellow / black / red** on it — i.e. the
+  cable DOES cross power to the right-hand pins (module powered), and DFRobot
+  labels `T`/`R` from the host's point of view. **Canonical mapping: our TX =
+  P0.18 (P1 pin 3 / EXP_BOARD_PIN2 / blue → `T`), our RX = P0.19 (P1 pin 4 /
+  EXP_BOARD_PIN1 / yellow → `R`).** Overlay + driver comments corrected in the
+  firmware repo.
+- **Swapped image: works.** Log: `audio: powered, module answered after 566 ms
+  (status=0), volume=20` → first prompt at **t+618 ms** → tone at 10.0 s →
+  publish at 20.0 s → stub ack → `CONFIRMED` at 22.0 s → powered off. Factory
+  clips ("silly piano noises") came out of the FIT0502 speaker at volume 20 —
+  Jace: sound quality is decent. Two consecutive incidents ran cleanly.
+- **Measured:** module boot-to-ready ≈ 570 ms (spec assumed 1–2 s → first
+  prompt now ~0.6 s after the press). `gs_audio_wait_done` polling works
+  (track transitions gated on the module's own status).
+- **Still open for FA-0:** the real prompt WAVs need a micro-USB *data* cable
+  (the first cable was charge-only: module lit, never enumerated); DFR0534
+  idle/playback current, VDD_EXP_BRD sag at the loudest prompt, GNSS TTFF.
+- Cleanup: the `_swap` scratch build was deleted; `build_assist_bench` rebuilt
+  from the corrected overlay is the reference image.
+
 ---
 
-*Entry owner: Claude (2026-09-18). Spec + bench firmware; nothing flashed, no cloud code, no deploy.*
+*Entry owner: Claude (2026-09-18). Bench-proven button → speaker; no cloud code, no deploy.*
