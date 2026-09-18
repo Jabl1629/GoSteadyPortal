@@ -10299,6 +10299,39 @@ of the copy/consent.
 gate for any assistance pilot — a unit that crashes in a blackout is not a
 safety device.
 
+## C63.5 — Topology resolved from the schematic; bench button→speaker harness built (2026-09-18, later)
+
+- **P1 pins resolved.** Jace supplied Nordic's "Thingy:91 X Hardware files 2.0.0"
+  (`PCA20065_Schematic_And_PCB.pdf` + Altium sheets). On the nRF9151 sheet the
+  net labels `EXP_BOARD_PIN1` / `EXP_BOARD_PIN2` sit on the **P0.19** / **P0.18**
+  rows of the GPIO column (bracketed by `nRF53_RESET` = P0.20 above and
+  `SPI_MISO` = P0.15 below). They are dedicated GPIOs; SB8/SB9 merely bridge
+  them onto SCL/SDA. **Cutting SB8 + SB9 is safe and required** (spec §4.3
+  "reading C"). Route **R1** (uart1 re-pinned to TX P0.19 / RX P0.18, 9600
+  baud) is confirmed; R2 stays as the fallback.
+- **Bench harness in the firmware repo** (commit on `main`): `src/assist.c`
+  (incident state machine: debounced press → red LED → speaker power →
+  PRESSED_20S → tone + CONTACTING_10S at 10 s → second press cancels → publish
+  at 20 s → ack → CONTACTED; stub cloud acks after 2 s), `src/audio_dfr0534.c`
+  (power gate via `exp_board_enable`, 9600-baud frames, status/track-count/
+  short-name queries, boot-time self-test), `boards/assist_audio_uart1.overlay`,
+  `prj_assist_bench.conf`, `audio/prompts/` (10 WAVs, bench voice = macOS
+  `say`), `tools/load_dfr0534_prompts.sh`. Kconfig `GOSTEADY_ASSIST_*`;
+  `src/dump.c` is not built when uart1 carries audio. Builds clean:
+  app image FLASH 18.4 %, **RAM 114,944 B (50.4 %)** (bench, no cloud).
+- **Flash gate:** the image drives P0.19 push-pull as UART TX from boot, so it
+  must NOT be flashed until SB8/SB9 are cut (it would fight the I²C master on
+  SCL). Then: load prompts over the module's micro-USB, flash
+  `build_assist_bench/merged.hex` via `nrfutil`, press SW0.
+- **Wi-Fi positioning (Q7):** Jace asked whether the nRF7002 helps — yes, the
+  best indoor fix (scan-only mode exists in NCS for this board). `wifi/scan`
+  sample = 73.5 KB RAM standalone; in-tree incremental cost unmeasured vs
+  ~84 KB headroom → proposed FA-5c behind a RAM gate (spec §5.5, D16).
+- **Retell:** existing number is in use elsewhere; a new one is being obtained
+  (Q3/Q4 follow-up).
+- Base-config note: `prj.conf` alone still does not link at 0.17.0 (`date_time`);
+  the bench overlay adds `CONFIG_DATE_TIME=y` / `CONFIG_DATE_TIME_NTP=n`.
+
 ---
 
-*Entry owner: Claude (2026-09-18). Spec only; no code, no flash, no deploy.*
+*Entry owner: Claude (2026-09-18). Spec + bench firmware; nothing flashed, no cloud code, no deploy.*

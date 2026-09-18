@@ -1,6 +1,6 @@
 # Family Assistance Alert — button → speaker → cloud → Care Circle voice + SMS (umbrella spec)
 
-> **Status:** 🟡 **Draft v0.1 — 2026-09-18.** Scoping + cross-system design; nothing implemented. Written against **PRD V2.2 Draft (2026-09-18) §5** (the product authority for this feature) and the repo evidence surveyed the same day (firmware `main`@`55dbf92`, portal `feature/infra-scaffold`@`1f2c784`).
+> **Status:** 🟡 **Draft v0.2 — 2026-09-18.** Scoping + cross-system design. **FA-0 in progress:** P1 topology resolved from the schematic (P0.19/P0.18), route R1 chosen, bench button→speaker harness built (`gosteady-firmware` `prj_assist_bench.conf`, not yet flashed — awaiting the SB8/SB9 cut + prompt load). No cloud code. Written against **PRD V2.2 Draft (2026-09-18) §5** (the product authority for this feature) and the repo evidence surveyed the same day (firmware `main`@`55dbf92`, portal `feature/infra-scaffold`@`1f2c784`).
 > **Scope:** A deliberate assistance button on the rollator device that (1) gives the walker user spoken feedback through a speaker, (2) publishes an assistance request with best-available location over LTE-M, and (3) makes the cloud **concurrently call (Retell) and text (Twilio) every enrolled Care Circle member**, tracking delivery and acknowledgement in a durable incident record. **Care Circle only — no monitoring center, no EMS dispatch, no fall detection.**
 > **Spans:** firmware (`gosteady-firmware`), cloud (`infra/`), consumer app (`lib/d2c/`), hardware prototype (Thingy:91 X + DFR0534).
 > **Depends on (deployed):** Core Device Contract v1 (`activate`/`wipe` cmds, `last_cmd_id` echo, connection-coordinator), 1A/1B ingestion, D2C auth pool + claim, Care Circle (`d2c-care-circle.md`), Twilio SMS (`_shared/sms.py`), 1.7 audit, 2A-AA ack.
@@ -125,7 +125,7 @@ Dashboard renders `openAlerts` as `_AlertCard`s with an ack action; screens: das
 | Item | Fact | Implication |
 |---|---|---|
 | Button 1 | SW3 → nRF9151 **P0.26**, active-low, pull-up; DT alias `sw0` **and** `mcuboot-button0` | The assistance actuator; also the MCUboot serial-recovery entry pin (§4.6) |
-| P1 connector | JST **SM04B-SRSS-TB** (Qwiic/STEMMA QT). Pin 1 GND, pin 2 **VDD_EXP_BRD** (3.3 V), pins 3/4 signal, 1.8 V-side nets `EXP_BOARD.PIN2` / `EXP_BOARD.PIN1` through a **TXS0102** level shifter (U24), bridged to the sensor I²C bus (SDA/SCL) by **SB9 / SB8** | Two signal lines, exactly what a UART needs; TXS0102 handles push-pull at 9600 baud |
+| P1 connector | JST **SM04B-SRSS-TB** (Qwiic/STEMMA QT). Pin 1 GND, pin 2 **VDD_EXP_BRD** (3.3 V), pin 3 = `EXP_BOARD.PIN2` = **nRF9151 P0.18** (bridged to SDA by SB9), pin 4 = `EXP_BOARD.PIN1` = **nRF9151 P0.19** (bridged to SCL by SB8), both through a **TXS0102** level shifter (U24). **Resolved 2026-09-18 from schematic PCA20065 v2.0.0** (nRF9151 sheet net labels; the label column lines up with P0.20 = `nRF53_RESET` above and P0.15…12 = SPI/FLASH_CS below) | Two dedicated GPIOs — exactly what a UART needs; TXS0102 handles push-pull at 9600 baud |
 | VDD_EXP_BRD | From nPM1300 **BUCK2 (3.3 V, 200 mA max)** through load switch **U14 (TCK106AG)**, enable = nRF9151 **P0.03** (`exp_board_enable`, off by default) | Free power gate for the audio module (L8). BUCK2 also feeds LED1/2 and the GNSS LNA / RF front-end switch → rail sag risk (§4.7) |
 | I²C bus (i2c2) | nRF9151 SDA **P0.09** / SCL **P0.08**, 100 kHz; carries **nPM1300 (0x6b)** and **ADXL367 (0x1d)** — the fuel gauge and the wake-on-motion path | Anything that isolates the nRF9151 from this bus is fatal to the product |
 | Serial instances | nRF91 shares one peripheral slot per index: UARTE0/SPIM0/TWIM0 @ 0x8000 … UARTE3/SPIM3/TWIM3 @ 0xB000. In use: **uart0** (console, P0.00/01), **uart1** (nRF5340 bridge dump channel, P0.04/05, 1 Mbaud), **i2c2 = TWIM2** (slot 2), **spi3 = SPIM3** (slot 3, flash + BMI270 + nRF7002) | **There is no free UARTE.** `uart2` collides with i2c2, `uart3` with spi3 (§4.3) |
@@ -142,21 +142,20 @@ Dashboard renders `openAlerts` as `_AlertCard`s with an ack action; screens: das
 | **R2 — I²C→UART bridge on P1** (no cut) | SC16IS750 breakout on the P1 I²C bus (0x48–0x4F, no conflict with 0x1d/0x6b); its UART drives the DFR0534, its GPIOs read BUSY; whole thing behind the same VDD_EXP_BRD gate (TXS0102's VCC-isolation keeps unpowered P1 devices off the 1.8 V bus) | +1 IC (~$5–10), ~150-line register driver, a transport abstraction so production can use a native UARTE | **Any** topology — needs no solder-bridge surgery |
 | R3 — bit-banged TX on a P1 GPIO | Software UART TX (9600 8N1 is 104 µs/bit) from a dedicated thread | Jitter risk from modem-lib/sampler ISRs; RX (status) hard | Same dependency as R1; strictly worse than R1 |
 
-**Topology.** The user guide says *"Pins 3 and 4 … can be used as regular nRF9151 SiP GPIOs by cutting SB8 and SB9"* and Table 6 says SB8/SB9 *"disconnect SCL/SDA from EXP.BOARD pin 1/2"* — but it never names the nRF9151 GPIOs behind `EXP_BOARD.PIN1/PIN2`, the board DTS defines none, and the DevZone thread that asked (case 346589, which guessed P0.03/P0.04 — wrong: those are the load-switch enable and uart1 RX) never got a confirmed answer. Three readings are electrically possible:
+**Topology — RESOLVED 2026-09-18 from the schematic** (`PCA20065_Schematic_And_PCB.pdf` v2.0.0 and the Altium `pca20065_nrf9151.SchDoc` in Nordic's "Thingy:91 X Hardware files 2.0.0"): `EXP_BOARD_PIN1` and `EXP_BOARD_PIN2` are net labels on the nRF9151 GPIO column at the **P0.19** and **P0.18** rows — dedicated GPIOs ("reading C" below). SB8/SB9 only bridge those two nets onto SCL/SDA, so cutting them is safe **and required** (closed, a UART TX on P0.19 fights the I²C master). **Route R1 selected** (D15); `boards/assist_audio_uart1.overlay` re-pins uart1 to TX P0.19 / RX P0.18 at 9600 baud.
 
-| Reading | What SB8/SB9 sit between | If you cut them |
+For the record, the readings that were open before the schematic arrived:
+
+| Reading | What SB8/SB9 sit between | Outcome |
 |---|---|---|
-| **A** | nRF9151 **P0.08/P0.09** and the shared sensor bus | P1 pins become GPIOs **but the nRF9151 loses the ADXL367 and nPM1300** → product-fatal. Reversible only by re-closing the bridges |
-| **B** | the shared bus and a **floating** level-shifter net | P1 pins become dead ends; harmless but useless |
-| **C** | the shared bus and **dedicated GPIOs** (P0.18/P0.19 are the natural candidates) | P1 pins 3/4 become two free nRF9151 GPIOs → **R1** |
+| A | nRF9151 **P0.08/P0.09** and the shared sensor bus | ruled out — would have killed the ADXL367 + nPM1300 |
+| B | the shared bus and a **floating** level-shifter net | ruled out |
+| **C** ✅ | the shared bus and **dedicated GPIOs P0.19 / P0.18** | **confirmed** |
 
-**HW-0 bench check (≈ 20 min, do this before any cut):**
-1. Bridges intact: confirm continuity TP33 (`EXP_BOARD_PIN1`) ↔ TP9 (SCL) and TP32 (`EXP_BOARD_PIN2`) ↔ TP10 (SDA). Expected: continuous.
-2. Flash a bench image that toggles **one candidate GPIO at a time** (P0.18, P0.19, P0.21…P0.25) at 1 Hz as push-pull output, and watch P1 pin 3 / pin 4 (3.3 V side) with the meter. A pin that follows a candidate ⇒ **reading C** with that mapping. (Driving a candidate that is actually tied to SCL/SDA will briefly stall the bus — keep the toggle short and reboot after.)
-3. If nothing follows: cut **SB8 only**, reboot, check the console: `battery.c` fuel-gauge reads and the ADXL367 wake-on-motion init both still succeed ⇒ **reading B** (re-close SB8, use R2). Either fails ⇒ **reading A** (re-close SB8 immediately, use R2).
-4. Record the result in coord §C63.x and pick R1 or R2. The Qwiic→Gravity cable is correct for both.
-
-Get the schematic (`PCA20065_Schematic_And_PCB.pdf` inside Nordic's "Thingy:91 X Hardware files 1.0.0" zip) if available — it settles the reading in one look; the bench check is the fallback.
+**HW-0 bench checks that remain (≈ 10 min, before flashing the audio image):**
+1. Cut SB8 and SB9 (top side). Meter: TP33 ↔ TP9 (SCL) and TP32 ↔ TP10 (SDA) must now read **open**.
+2. Cable orientation: with the Qwiic→Gravity cable seated, module header **R** ↔ P1 pin 4 (the TP33 / P0.19 side) and module **T** ↔ P1 pin 3 (TP32 / P0.18). If swapped, swap the two `psels` in the overlay — never the cable.
+3. Flash `build_assist_bench`; on the uart0 console confirm the fuel-gauge and ADXL367 init lines still appear (sensor bus intact) and the audio self-test lists the 10 prompt tracks.
 
 ### 4.4 Power gating is mandatory
 - The DFR0534/JQ8400-class modules idle in the **10–20 mA** range (unpublished; measure). Left powered that is 7–15 Ah/month — thousands of times the 48 mAh/month pre-activation budget. Therefore the module is powered **only** from press to end-of-prompt (plus tests), via `exp_board_enable` (P0.03) → U14 → VDD_EXP_BRD. Zephyr already models it as a `regulator-fixed`; firmware calls `regulator_enable/disable()`.
@@ -284,6 +283,7 @@ Authentication of the ack: it arrives on the device's mutually-authenticated TLS
 - `gnss.c`: `nrf_modem_gnss_use_case_set(MULTIPLE_HOT_START | LOW_ACCURACY)`, `fix_interval_set(0)` (single fix), `fix_retry_set(CONFIG_GOSTEADY_ASSIST_GNSS_TIMEOUT_S = 180)`; on `EVT_FIX` cache PVT (lat/lon/accuracy/sats/uptime + wall time if synced) in RAM and `/lfs/assist/lastfix.bin`; on `EVT_SLEEP_AFTER_TIMEOUT` report `unavailable`. `EVT_AGNSS_REQ` is logged only in v1 (assistance data via nRF Cloud A-GNSS is a v1.1 option, Q8).
 - **Location ladder in the request:** cached fix < 15 min old → `fix`; < 24 h → `stale` (with `age_s`); else `unavailable`. The cloud additionally receives the serving-cell tuple every time; cell-based coarse location (cloud-side) is FA-5b (Q7) — the only thing that works indoors.
 - Energy: GNSS acquisition ≈ 30–45 mA for ≤ 180 s ≈ 1.5–2.3 mAh — bounded per incident.
+- **Wi-Fi scan positioning (FA-5c, proposed — Q7).** The Thingy:91 X carries an nRF7002 (spi3, its own nPM6001 rail, off in every GoSteady build today). NCS supports a **scan-only** mode (`CONFIG_NRF70_SCAN_ONLY`; the `cellular/location` sample runs it on this exact board). A 2.4 GHz BSSID/RSSI scan takes ~1–3 s, does not contend with LTE, and works **indoors where GNSS never will**; the cloud resolves BSSIDs (+ the serving-cell tuple) with one Google Geolocation API call, typically ±20–50 m in homes. Cost: RAM is the gate — the standalone `wifi/scan` sample is **73.5 KB RAM** on this board (measured 2026-09-18) and the incremental cost inside our tree is unmeasured against ~84 KB headroom on the pilot build; power ≈ 0.05–0.1 mAh per scan plus switching the nRF7002 rail. If it fits, the request timeline becomes: countdown → Wi-Fi scan + cell tuple (so the **initial** call/SMS already carries a usable location) → publish → ack → GNSS refinement outdoors. Decide after an in-tree RAM measurement (FA-5c gate).
 
 ### 5.6 Arming, persistence, wipe
 - `/lfs/assist/armed.bin` `{enabled, version}` (written by `assist_arm`), `/lfs/assist/pending.json` (unacked incident), `/lfs/assist/lastfix.bin`. All three are wiped by the `wipe` cmd (wipe scope amendment, DL15) and cleared on de-provision (`activated_at` → null ⇒ armed := false).
@@ -424,7 +424,7 @@ Companion changes:
 ### 6.8 Location services
 - Reverse geocoding for the voice script: **Amazon Location Service** Place Index (`SearchPlaceIndexForPosition`, Esri provider) → `location.geocodedText` ("near 4200 Speedway, Austin TX"). D11.
 - SMS map link: `https://maps.google.com/?q={lat},{lon}` (opens Apple/Google Maps universally) + "±{acc} m, captured {age}".
-- No fix: voice and SMS say *"Their location is not available yet."* Cell-based coarse location (Google Geolocation API or nRF Cloud ground-fix from the reported cell tuple) is **FA-5b, decision pending** (Q7) — recommended, because GNSS indoors ≈ never.
+- No fix: voice and SMS say *"Their location is not available yet."* Network-based location — **Google Geolocation API** fed with the reported cell tuple (FA-5b) and, if the firmware can afford it, Wi-Fi BSSIDs (FA-5c, §5.5) — is the indoor answer; **accepted in principle 2026-09-18 (Q7)**, provider secret `gosteady/{env}/geolocation`.
 - Optional household "home address on file" is **not** included in messages in v1 (misleading when away; Q9).
 
 ### 6.9 Downlink additions
@@ -492,7 +492,7 @@ Facility portal: none in v1 (L11).
 
 | Phase | Scope | Exit criteria | Depends on |
 |---|---|---|---|
-| **FA-0 Hardware gate** (≈ 1 week, bench) | §4.3 topology check → choose R1/R2; audio proven from a bench image (prompts play, BUSY/status works, volume set); DFR0534 idle/playback current + rail-sag measured; power-gate proven (0 mA off); GNSS TTFF measured on a rollator indoors/outdoors/window (10 fixes each) with a throwaway `nrf_modem_gnss` image; speaker mating confirmed | Numbers recorded in coord §C63.x; go/no-go on R1 vs R2; energy line in §5.8 replaced with measurements | Hardware on the bench (done) |
+| **FA-0 Hardware gate** (≈ 1 week, bench) | ~~§4.3 topology check → choose R1/R2~~ **done 2026-09-18 (schematic; R1)**; **bench harness built** (`prj_assist_bench.conf` + `boards/assist_audio_uart1.overlay` + `src/assist.c` + `src/audio_dfr0534.c`, stub cloud ack, prompt set `audio/prompts/`, loader `tools/load_dfr0534_prompts.sh`) — **next: cut SB8/SB9, load prompts, flash, press**; then DFR0534 idle/playback current + rail-sag measured; power-gate proven (0 mA off); GNSS TTFF measured on a rollator indoors/outdoors/window (10 fixes each); speaker mating confirmed | Numbers recorded in coord §C63.x; energy line in §5.8 replaced with measurements | Hardware on the bench (done) |
 | **FA-1 Firmware core** | `assist.c` + audio driver + button un-gate + LED + persistence/retry + `assist_ack/arm` cmd handling + heartbeat extras + MCUboot entrance fix + shell hooks; **no GNSS**; acceptance with the bench ack stub | Bench: press → prompts at 1.5/10 s → publish at 20 s → stub ack → "Contacted care circle"; cancel path; retry path with the antenna wrapped; reboot mid-`AWAIT_ACK` resumes; RAM/flash deltas recorded; 0 faults over a 24 h soak with hourly presses | FA-0 |
 | **FA-2 Cloud pipeline** | Policy + rule, incidents table, dispatcher (request/location), ack, projection, Patient/RoleAssignments fields, readiness + `assist_arm`, heartbeat/coordinator dispatch, `e2e-assistance-alert.py` (synthetic device + JWTs) | Real device: ack latency p95 < 10 s from PUBACK on dev; duplicate request ⇒ same ack; not-ready ⇒ P09 + disarm; alert card visible in the D2C app via the existing alerts read | FA-1 |
 | **FA-3 Notifications** | Notification stack real: queue, notifier (Retell + Twilio + StatusCallback), webhooks, retries, roll-up, canary, alarms, dashboard | Live two-phone test: one press ⇒ both members get a call **and** a text within 60 s of the ack; outcomes visible in the incident; voicemail + no-answer + STOP cases recorded; canary green 3 days | FA-2, Retell account + number, test numbers |
@@ -554,19 +554,20 @@ Facility portal: none in v1 (L11).
 | D12 | Prompts pre-rendered with a neural TTS voice (Polly), same persona as the Retell agent | on-device TTS; recorded human | Consistent voice across device and phone; regenerable when copy changes |
 | D13 | Retell recordings/transcripts opted out of storage | keep for QA | Minimises stored PHI-adjacent data; outcome + disconnection reason are enough for reconciliation |
 | D14 | Incident TTL 24 months (hot) | no TTL | Aligns with Alert History; audit trail is retained 6 y regardless |
-| D15 | R1 (uart1 re-pin) preferred if HW-0 confirms reading C; R2 (SC16IS750 on P1) otherwise | bit-bang; give up i2c2 | No free UARTE; R2 works under any topology and needs no surgery |
+| D15 | **R1 (uart1 re-pin to P0.19/P0.18) — confirmed 2026-09-18** by the schematic (reading C); R2 (SC16IS750 on P1) kept as the no-surgery fallback | bit-bang; give up i2c2 | No free UARTE; the dedicated GPIOs exist, so the cheapest route wins |
+| D16 | (proposed) Wi-Fi BSSID scan + cell tuple during the countdown, resolved cloud-side via Google Geolocation; GNSS only after the ack | GNSS-only; cell-only | Indoors is the common case for a rollator user; Wi-Fi is the only fast indoor fix. Gated on the in-tree RAM measurement (FA-5c) |
 
 ---
 
 ## 12. Open questions (need an answer before the phase that cites them)
 
-- [ ] **Q1 (FA-0):** Have SB8/SB9 already been cut on the bench unit? If yes, run HW-0 steps 3–4 first (sensors alive?) before anything else.
-- [ ] **Q2 (FA-0):** Can we get the Thingy:91 X schematic (`PCA20065_Schematic_And_PCB.pdf`) from Nordic's hardware-files zip? It replaces the bench topology test.
-- [ ] **Q3 (FA-3):** Retell account, purchased number, and two agents (live/test) — who owns setup? Webhook URL is per agent or account (agent-level recommended).
+- [x] **Q1 (FA-0):** ~~Have SB8/SB9 already been cut?~~ **No (2026-09-18)** — good: cut them now per §4.3 (safe, confirmed by the schematic) **before** flashing the audio image.
+- [x] **Q2 (FA-0):** ~~Schematic?~~ **Provided 2026-09-18** (`pca20065-thingy91-x-2_0_0.zip`); topology resolved (§4.3). The second zip (`thingy91x_mfw-2.0.4_sdk-3.2.1`) is the modem-firmware/factory-image bundle already kept under `nordic resources/` — not needed here.
+- [ ] **Q3 (FA-3):** Retell account, purchased number, and two agents (live/test) — **operator: the existing Retell number is in use on another project; a new number is being obtained (2026-09-18)**. Webhook URL per agent (recommended).
 - [ ] **Q4 (FA-3):** Test phone numbers (≥ 2 real phones + one GoSteady-owned number for the canary).
 - [ ] **Q5 (FA-3):** Twilio STOP handling — toll-free sender handles STOP automatically at the carrier; confirm the Messaging Service opt-out behaviour and whether an opted-out member should be flagged `sms:false` via a Twilio inbound webhook (not built).
 - [ ] **Q6 (FA-3):** Voice retry policy — one retry after 120 s for no-answer/busy is proposed; PRD is silent. Also: should a member who **answered** suppress retries to others? (Proposed: no — everyone is notified; L4 puts response on the family.)
-- [ ] **Q7 (FA-5b):** Cell-based coarse location provider (Google Geolocation API vs nRF Cloud ground-fix vs none). Recommended: yes, Google, ±0.5–2 km, indoors-capable.
+- [x] **Q7 (FA-5b/5c):** ~~Cell-based coarse location?~~ **Yes (2026-09-18)** — Google Geolocation API for cell + Wi-Fi; Wi-Fi scan-only on the nRF7002 proposed as FA-5c, gated on RAM (§5.5, D16).
 - [ ] **Q8 (FA-5):** A-GNSS via nRF Cloud to cut TTFF (needs an nRF Cloud account + device JWT flow) — decide after FA-0 TTFF numbers.
 - [ ] **Q9 (FA-4):** Optional "home address on file" in the household profile — include in messages when no fix, clearly labelled? Proposed v1: no.
 - [ ] **Q10 (FA-2):** Member cap for fan-out (no cap exists). Proposed: notify at most 10 members per incident, oldest-joined first, and surface the cap in the app.
@@ -599,3 +600,4 @@ Facility portal: none in v1 (L11).
 | Date | Author | Change |
 |---|---|---|
 | 2026-09-18 | Claude (with Jace) | Initial umbrella spec v0.1: PRD V2.2 traceability, hardware findings (no free UARTE; SB8/SB9 topology gate; power gating; MCUboot recovery on Button 1), firmware/cloud/app design, phasing FA-0…FA-6, decisions D1–D15, open questions Q1–Q15 |
+| 2026-09-18 | Claude (with Jace) | v0.2: P1 topology resolved from the PCA20065 v2.0.0 schematic (EXP_BOARD_PIN1 = P0.19, PIN2 = P0.18; R1 confirmed, D15); bench harness built in firmware (`prj_assist_bench.conf`, overlay, `assist.c`, `audio_dfr0534.c`, prompt set + loader); Wi-Fi scan positioning proposed (§5.5, D16); Q1/Q2/Q7 answered, Q3 updated |
