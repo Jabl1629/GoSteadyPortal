@@ -10365,3 +10365,73 @@ safety device.
 ---
 
 *Entry owner: Claude (2026-09-18). Bench-proven button → speaker; no cloud code, no deploy.*
+
+# §C64 — [cross-functional] Family Assistance pivot: speaker → Qwiic buzzer, press-and-hold cancel (2026-09-18, night)
+
+Entry owner: Claude (single session over both repos) | Trigger: product decision
+by Jace after the §C63.6 speaker bench success — the DFR0534 speaker is not
+feasible for the cupholder (size + BOM), and family-only notification does not
+need speech. **New behaviour: the device beeps for 20 s before the request is
+sent; pressing and holding the button for 3 s during those 20 s cancels.**
+Feedback device: **SparkFun Qwiic Buzzer BOB-24474** on the P1 Qwiic connector.
+
+**Spec:** `docs/specs/family-assistance-alert.md` v0.4 (§4 rewritten; §5.1–5.3
+timeline + pattern set; D17–D20; Q16/Q17; **§15 = proposed PRD V2.3 amendment
+text**). PRD V2.2 rows AST-HW-03 / AST-FW-02 / AST-FW-04 / AST-FW-06 are
+superseded pending Jace's docx edit.
+
+## C64.1 — Why this is easier, not harder
+
+- I²C device on the **existing sensor bus** through P1 → no UART, no uart1
+  re-pin, no SB8/SB9 cutting, every unmodified unit works as-is. The "no spare
+  UARTE" finding becomes moot.
+- Register interface (SparkFun library/firmware sources): addr **0x34**, ID reg
+  `0x00` = **0x5E**, 5-byte burst from `0x03` (freq MSB/LSB, volume 0–4,
+  duration MSB/LSB ms), `ACTIVE` `0x08` (self-clears after the duration;
+  duration 0 = until cleared). Loudest at **2730 Hz**; **~95 mA** sounding at
+  volume 4; the ATtiny84 only IDLE-sleeps → **stays power-gated** via P0.03.
+- Energy per incident drops (≈ 0.15 mAh of buzzer vs ≈ 0.7 mAh of speaker);
+  zero standing current unchanged.
+
+## C64.2 — Firmware landed (compiling; buzzer on order, not yet exercised)
+
+- `src/feedback.h` abstraction (`begin/end`, `countdown_start/mid`,
+  `tick(phase)`, `hold_tone`, `cancelled`, `confirmed(test)`, `failed`,
+  `not_setup`, `fault`, `selftest`) with **two backends**:
+  `feedback_buzzer.c` (Qwiic, product) and `feedback_speaker.c` (wraps the
+  bench-proven DFR0534 driver — archived, selectable via
+  `GOSTEADY_ASSIST_FEEDBACK_SPEAKER`).
+- `src/assist.c` rewritten: 50 ms button polling; **hold ≥ 0.6 s → steady low
+  tone; hold ≥ 3.0 s → cancelled** (the initial press counts, so sustained
+  accidental pressure can never send); cadence phases at 10 s (double beep)
+  and 17 s (rapid); outcomes as pitch movement (rising = contacted, falling =
+  cancelled, deep = failed). Stub-cloud ack path unchanged.
+- Devicetree: `dts/bindings/sparkfun,qwiic-buzzer.yaml`;
+  `boards/assist_buzzer_i2c2.overlay` (unmodified boards — production-
+  representative) and `boards/assist_buzzer_bitbang.overlay` (the cut bench
+  unit: Zephyr `gpio-i2c` on P0.18/P0.19 so it stays useful, D19).
+- Kconfig: `GOSTEADY_ASSIST_FEEDBACK` choice (BUZZER default / SPEAKER /
+  NONE), `GOSTEADY_ASSIST_CANCEL_HOLD_MS=3000`, `_BUZZER_VOLUME`, `_FREQ_HZ`,
+  `_FEEDBACK_SELFTEST`. `prj_assist_bench.conf` = buzzer bench;
+  `prj_assist_speaker_bench.conf` = archived speaker bench.
+- Build: bit-bang buzzer bench image **RAM 120,608 B (52.9 %)**, FLASH 19.2 %
+  (bench posture, no cloud). i2c2 + speaker variants built as regression.
+
+## C64.3 — Next at the bench
+
+1. Buzzer arrives → Qwiic cable to P1 → flash `build_assist_bench_bitbang`
+   (cut unit) or `build_assist_bench` (any other unit) → boot self-test chirp
+   → press: cadence, 10 s/17 s phase changes, hold-cancel (from 5 s, from
+   18 s, initial hold, and a 2.5 s release that must NOT cancel), contacted
+   tone at ~22 s (stub).
+2. Measure buzzer current (PWR_LED/STAT jumpers cut) + rail sag at volume 4.
+3. Then FA-1 (persistence + real transport) / FA-2 (cloud pipeline) — neither
+   depends on the buzzer.
+
+**Open (Jace):** Q16 — is the Retell voice call still in V1 next to SMS (the
+pivot note said "sending the text out")? Q17 — loudness target / app-selectable
+volume. Retell number still pending. PRD V2.3 docx edit per spec §15.
+
+---
+
+*Entry owner: Claude (2026-09-18). Firmware compiles; nothing flashed with a buzzer yet; no cloud code, no deploy.*

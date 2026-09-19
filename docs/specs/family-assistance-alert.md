@@ -1,8 +1,8 @@
 # Family Assistance Alert — button → speaker → cloud → Care Circle voice + SMS (umbrella spec)
 
-> **Status:** 🟡 **Draft v0.3 — 2026-09-18.** Scoping + cross-system design. **FA-0: button → speaker PROVEN on the bench** (SB8/SB9 cut, `prj_assist_bench.conf` flashed, full 20 s sequence with the module's factory clips, module answers in 570 ms; coord §C63.6). Remaining FA-0: load the real prompts (needs a micro-USB *data* cable), current/rail-sag measurements, GNSS TTFF. No cloud code. Written against **PRD V2.2 Draft (2026-09-18) §5** (the product authority for this feature) and the repo evidence surveyed the same day (firmware `main`@`55dbf92`, portal `feature/infra-scaffold`@`1f2c784`).
-> **Scope:** A deliberate assistance button on the rollator device that (1) gives the walker user spoken feedback through a speaker, (2) publishes an assistance request with best-available location over LTE-M, and (3) makes the cloud **concurrently call (Retell) and text (Twilio) every enrolled Care Circle member**, tracking delivery and acknowledgement in a durable incident record. **Care Circle only — no monitoring center, no EMS dispatch, no fall detection.**
-> **Spans:** firmware (`gosteady-firmware`), cloud (`infra/`), consumer app (`lib/d2c/`), hardware prototype (Thingy:91 X + DFR0534).
+> **Status:** 🟡 **Draft v0.4 — 2026-09-18 (evening).** **Direction change:** the DFR0534 speaker is retired (size + BOM; family-only notification does not need speech). Feedback is now a **SparkFun Qwiic Buzzer** on the P1 Qwiic connector: **20 s of beeps before the request goes out; press-and-hold 3 s cancels.** Firmware feedback layer + hold-to-cancel state machine written and compiling (coord §C64); buzzer on order; the speaker path stays selectable as an archived option (bench-proven, §C63.6). PRD V2.3 amendment text in §15. No cloud code. Written against **PRD V2.2 Draft (2026-09-18) §5** (the product authority for this feature) and the repo evidence surveyed the same day (firmware `main`@`55dbf92`, portal `feature/infra-scaffold`@`1f2c784`).
+> **Scope:** A deliberate assistance button on the rollator device that (1) gives the walker user audible feedback through a small buzzer, (2) publishes an assistance request with best-available location over LTE-M, and (3) makes the cloud **concurrently call (Retell) and text (Twilio) every enrolled Care Circle member**, tracking delivery and acknowledgement in a durable incident record. **Care Circle only — no monitoring center, no EMS dispatch, no fall detection.**
+> **Spans:** firmware (`gosteady-firmware`), cloud (`infra/`), consumer app (`lib/d2c/`), hardware prototype (Thingy:91 X + SparkFun Qwiic Buzzer BOB-24474).
 > **Depends on (deployed):** Core Device Contract v1 (`activate`/`wipe` cmds, `last_cmd_id` echo, connection-coordinator), 1A/1B ingestion, D2C auth pool + claim, Care Circle (`d2c-care-circle.md`), Twilio SMS (`_shared/sms.py`), 1.7 audit, 2A-AA ack.
 > **Adjacent gaps this feature does NOT fix but is gated by:** session-storage exhaustion (firmware spec `2026-07-31-session-storage-exhaustion.md`, coord §C62) and outbound alert delivery (PRD APP-06, Phase 2C stub). See §9.
 > **Related:** [ARCHITECTURE.md](ARCHITECTURE.md) §4/§6/§7, [2026-07-01-device-types.md](2026-07-01-device-types.md) (Core vs per-type contracts), [d2c-care-circle.md](d2c-care-circle.md), [d2c.md](d2c.md), [phase-1c-slim-notifications.md](phase-1c-slim-notifications.md), coord doc §C63.
@@ -11,20 +11,20 @@
 
 ## 0. In one paragraph
 
-The walker user presses the large actuator on the cupholder. Within ~1.5 s the speaker says *"Assistance button pressed, contacting care circle in 20 seconds."* The device immediately brings the modem out of PSM and opens its MQTT session while the countdown runs; at 10 s it plays a tone and says *"Contacting care circle in 10 seconds."* A second press cancels with distinct feedback. At 20 s it publishes an `assistance_request` (unique incident id, press + send timestamps, battery/radio, and whatever location it has — usually *none yet*) on a new, policy-restricted topic `gs/{serial}/assist`. The cloud writes a durable incident, projects it into the D2C dashboard as a critical alert, enqueues one voice-call job and one SMS job **per enrolled member**, and only then sends an authenticated `assist_ack` downlink — which is what makes the device say *"Contacted care circle."* Retell then places the calls and Twilio sends the texts, both stating plainly that this is a family notification and not emergency services; webhooks record who answered / got voicemail / was delivered. After the ack, the device runs a bounded GNSS acquisition and publishes a follow-up location, which triggers one follow-up SMS with a map link. Care Circle members tap "I'm on it" in the app; the incident closes when a member marks it resolved. A test mode, armed from the app, exercises the exact same path but routes only to the tester.
+The walker user presses the large actuator on the cupholder. The device chirps back within a few hundred milliseconds, lights its LED, and starts a **20-second beep countdown**: one beep per second, a double beep per second after 10 s, rapid beeps in the last 3 s. Meanwhile it brings the modem out of PSM and opens its MQTT session. **Pressing and holding the button for 3 seconds at any point cancels** (a steady low tone confirms the hold is registering, then a falling two-note says "cancelled"); nothing is sent. At 20 s it publishes an `assistance_request` (unique incident id, press + send timestamps, battery/radio, and whatever location it has — usually *none yet*) on a new, policy-restricted topic `gs/{serial}/assist`. The cloud writes a durable incident, projects it into the D2C dashboard as a critical alert, enqueues one voice-call job and one SMS job **per enrolled member**, and only then sends an authenticated `assist_ack` downlink — which is what makes the device play its rising "contacted" tone. Retell then places the calls and Twilio sends the texts, both stating plainly that this is a family notification and not emergency services; webhooks record who answered / got voicemail / was delivered. After the ack, the device runs a bounded GNSS acquisition and publishes a follow-up location, which triggers one follow-up SMS with a map link. Care Circle members tap "I'm on it" in the app; the incident closes when a member marks it resolved. A test mode, armed from the app, exercises the exact same path but routes only to the tester.
 
 ```
- Rollator user                 Device (nRF9151 + DFR0534)                 AWS                              Care Circle
+ Rollator user                 Device (nRF9151 + Qwiic Buzzer)            AWS                              Care Circle
  ─────────────                 ──────────────────────────                 ───                              ───────────
- press ──────────────────────▶ T0   power audio, say 20 s prompt
+ press ──────────────────────▶ T0   power buzzer, chirp, 1 Hz beeps
                                T0   wake modem, MQTT connect (PSM exit)
-                               T10  tone + 10 s prompt
- (2nd press = cancel)          T20  PUBLISH gs/{serial}/assist ──────────▶ assistance-dispatcher
+                               T10  double beeps; T17 rapid beeps
+ (hold 3 s = cancel)           T20  PUBLISH gs/{serial}/assist ──────────▶ assistance-dispatcher
                                                                           • put incident (idempotent)
                                                                           • project Alert History row ───▶ dashboard card
                                                                           • enqueue voice+SMS per member
                                ◀──────────────────── cmd: assist_ack ◀──── • publish ack (cmd topic)
-                               say "Contacted care circle"                assistance-notifier (SQS)
+                               rising "contacted" tone                    assistance-notifier (SQS)
                                GNSS single fix (≤180 s) ──▶ event:location  • Retell create-phone-call ─────▶ voice call
                                                                           • Twilio SMS (+status cb) ──────▶ text
                                                                           webhooks ◀── Retell / Twilio    "I'm on it" ──▶ ack
@@ -38,14 +38,14 @@ The walker user presses the large actuator on the cupholder. Within ~1.5 s the s
 |---|---|---|---|
 | AST-HW-01 | One large tactile actuator mechanically operating the Thingy:91 X center button | §4.2 (Button 1 = SW3 on P0.26; also the MCUboot recovery button — §4.6) | FA-0 (mech: enclosure track) |
 | AST-HW-02 | Resist false actuation during rolling/braking/transport | §5.2 debounce + deliberate-press gesture; §10 T-rows; enclosure track | FA-6 |
-| AST-HW-03 | Speaker: intelligible speech + distinct tones for countdown/cancel/ack/test/fault | §4.3–4.5 DFR0534 route; §5.3 prompt set | FA-0/FA-1 |
+| AST-HW-03 | ~~Speaker: intelligible speech~~ → **buzzer with distinct cadences** for countdown / cancel / ack / test / fault (PRD V2.3 amendment, §15) | §4 Qwiic Buzzer; §5.3 pattern set | FA-0/FA-1 |
 | AST-HW-04 | Ingress/cleaning/structure preserved with actuator + sound opening | Enclosure track (out of firmware/cloud scope; listed as gate) | FA-6 |
-| AST-FW-01 | Validated press → Assistance Pending; start LTE + GNSS work; 20 s cancel window | §5.2 state machine; §5.5 GNSS/LTE coexistence (why "LTE first, GNSS after ack") | FA-1 |
-| AST-FW-02 | Exact spoken prompts at T0 and T10, tone, second-press cancel with distinct feedback | §5.3 prompt table (verbatim strings) | FA-1 |
+| AST-FW-01 | Validated press → Assistance Pending; start LTE + GNSS work; 20 s cancel window | §5.2 state machine (**hold 3 s to cancel**); §5.5 GNSS/LTE coexistence (why "LTE first, GNSS after ack") | FA-1 |
+| AST-FW-02 | ~~Exact spoken prompts, second-press cancel~~ → **beep cadence phases at T0/T10/T17, press-and-hold 3 s cancels with distinct feedback** (§15) | §5.2 timeline, §5.3 patterns | FA-1 |
 | AST-FW-03 | Publish `assistance_request` with incident id, identity, timestamps, battery/radio, best location | §5.4 payload contract | FA-1/FA-2 |
-| AST-FW-04 | Say "Contacted care circle" only after **authenticated** ack that cloud durably accepted + started workflow; bounded retry + failure feedback; priority over routine traffic | §5.4 ack semantics; §6.3 dispatcher ordering; §5.10 priority path | FA-1/FA-2 |
+| AST-FW-04 | Confirmation feedback only after **authenticated** ack that cloud durably accepted + started workflow; bounded retry + failure feedback; priority over routine traffic | §5.4 ack semantics; §5.3 confirmed/failed patterns; §6.3 dispatcher ordering; §5.10 priority path | FA-1/FA-2 |
 | AST-FW-05 | No fix ⇒ still send; send stale fix with age; `location_status` acquiring/unavailable; follow-up location update | §5.5 location ladder; §6.3 `event:location` | FA-5 |
-| AST-FW-06 | Test mode end-to-end without notifying live contacts unless enrolled as test recipients | §6.3 test arming (cloud-armed, device path identical); §7 | FA-3/FA-4 |
+| AST-FW-06 | Test mode end-to-end without notifying live contacts unless enrolled as test recipients | §6.3 test arming (cloud-armed, device path identical; four-note "test complete" tone); §7 | FA-3/FA-4 |
 | AST-SW-01 | One durable incident per confirmed request; concurrent routing to every enrolled member | §6.4 incident table; §6.6 fan-out | FA-2/FA-3 |
 | AST-SW-02 | Each member gets both a Retell call and an SMS; channels independent | §6.6 (one SQS job per member × channel) | FA-3 |
 | AST-SW-03 | Both channels include best GPS info + capture time; voice human-readable location; SMS map link + accuracy + age | §6.8 geocoding; §8 copy | FA-3/FA-5 |
@@ -92,14 +92,14 @@ Dashboard renders `openAlerts` as `_AlertCard`s with an ack action; screens: das
 
 | # | Requirement | Source | Consequence |
 |---|---|---|---|
-| L1 | Prompts are **verbatim** PRD text: T0 *"Assistance button pressed, contacting care circle in 20 seconds."*; T10 tone then *"Contacting care circle in 10 seconds."*; success *"Contacted care circle."* | AST-FW-02/04 | Audio assets are fixed strings; countdown is 20 s with a 10 s mid-prompt |
-| L2 | *"Contacted care circle"* is spoken **only** after an authenticated cloud ack that the incident is durable **and** the notification workflow has started | AST-FW-04 | Ack is sent by the dispatcher after PutItem + SQS enqueue succeed; broker PUBACK is **not** sufficient |
+| L1 | **(amended 2026-09-18)** Feedback is a buzzer, not speech: 20 s beep countdown with phase changes at 10 s and 17 s; **press-and-hold 3 s cancels**; distinct tones for cancelled / contacted / test / failed / not-set-up (PRD V2.3, §15) | Product decision 2026-09-18 | No audio assets; cadences are firmware constants (§5.3) |
+| L2 | The "contacted" tone plays **only** after an authenticated cloud ack that the incident is durable **and** the notification workflow has started | AST-FW-04 | Ack is sent by the dispatcher after PutItem + SQS enqueue succeed; broker PUBACK is **not** sufficient |
 | L3 | Assistance traffic has priority over heartbeat/activity/snippet traffic | AST-FW-04 | New "priority-0" publish path opens its own cellular cycle and may reuse a live session (§5.10) |
 | L4 | Care Circle only. No monitoring center, no EMS, no professional-response language anywhere (copy, app, agreements) | AST-SW-07, PRD §6 | §8 copy includes an explicit "not emergency services" line in every channel |
 | L5 | Not fall detection; tip-over telemetry (ACT-06) never initiates an assistance request | PRD §4.2 / §6 | The only trigger is the deliberate button press (or an app-armed test) |
 | L6 | Core Device Contract v1 is extended, not forked: new uplink class `gs/{serial}/assist`, new cmds `assist_ack` / `assist_arm` using the existing cmd envelope + `last_cmd_id` echo + coordinator republish | DT4/DT5, ARCH §7.0 | No per-type topics; walker cap can adopt later unchanged |
 | L7 | An assistance request bypasses `notificationsPaused` and threshold suppression | AST-SW-01 | Dispatcher never consults `pause_check` |
-| L8 | Audio module is **power-gated**; it draws nothing between incidents | DEV-09 (1-year battery target) | VDD_EXP_BRD load switch (P0.03) is the gate; §4.4 |
+| L8 | The feedback device is **power-gated**; it draws nothing between incidents | DEV-09 (1-year battery target) | VDD_EXP_BRD load switch (P0.03) is the gate; §4.4 |
 | L9 | Every member phone used for fan-out is verified (SMS-OTP possession) and the member has opted in per channel with recorded consent (TCPA prior-express-consent posture) | AST-SW-05 | Fan-out reads `RoleAssignments.phone` **only** for rows with `assistancePrefs.{voice|sms}=true` + `consentedAt` |
 | L10 | Location data is identity-bearing: CMK-encrypted at rest, never logged in plaintext, retention bounded | ARCH §9/§10 | Incidents table is an `IdentityTable`; PII scrubber gains `lat/lon/latitude/longitude/phone/to_number` |
 | L11 | D2C-first; facility channel out of scope for v1 | APP-07 | All routes under `/api/v1/d2c/*`; no facility UI |
@@ -108,86 +108,47 @@ Dashboard renders `openAlerts` as `_AlertCard`s with an ack action; screens: das
 
 ---
 
-## 4. Hardware — prototype path and what the bench must settle first
+## 4. Hardware — Qwiic buzzer on the P1 connector (v0.4)
 
-### 4.1 Prototype BOM (as ordered)
+### 4.1 Feedback device: SparkFun Qwiic Buzzer (BOB-24474)
 
-| Part | Role | Notes |
-|---|---|---|
-| DFRobot **DFR0534** Gravity MP3/voice module | Audio: 8 MB flash, MP3/WAV hardware decode, UART @ 9600, 30 volume levels, onboard amp, BUSY pin | Specs from the DFRobot datasheet (`DFR0534_Web.pdf`): 3.3–5 V; **no idle/playback current is published** → must be measured (§4.7) |
-| SparkFun **CAB-28768** Qwiic (JST-SH 1 mm) → Gravity (JST-PH 2 mm) cable | Thingy:91 X P1 → DFR0534 Gravity header | Pin-for-pin: P1 1→1 … 4→4; which side is T (module TX) vs R (module RX) is verified at bench |
-| DFRobot **FIT0502** 3 W / 8 Ω enclosed speaker | Load matching the DFR0534 amp | Connector family unverified (user's caveat) — confirm mating |
-| Micro-USB data cable | One-time prompt upload (module mounts as a USB drive) | — |
-| #11 blade + multimeter | SB8/SB9 surgery + continuity | **Do not cut before §4.3's check** |
+| Item | Fact (SparkFun docs + firmware/library sources, read 2026-09-18) |
+|---|---|
+| What it is | 1.0″ × 1.0″ Qwiic board: ATtiny84 with a magnetic buzzer, two Qwiic (JST-SH) connectors, `TRIGGER` pin, PWR/STAT LEDs |
+| Interface | I²C, default address **0x34** (changeable 0x08–0x77, saved to EEPROM). Register map: `0x00` ID = **0x5E**, `0x01/0x02` firmware minor/major, `0x03/0x04` tone frequency MSB/LSB (Hz), `0x05` volume (0 off … **4 max**), `0x06/0x07` duration MSB/LSB (ms; **0 = until ACTIVE is cleared**), `0x08` ACTIVE (write 1 to sound; **self-clears when the duration elapses**), `0x09` save settings, `0x0A` address |
+| Loudest pitch | resonant **2730 Hz** |
+| Power | 3.3 V; **~95 mA while sounding at volume 4**; the ATtiny only IDLE-sleeps between commands, so the board is **not** a µA device — hence L8 power gating |
+| Boot | no startup beep; ready within tens of ms (firmware polls the ID register) |
+| Jumpers | I²C pull-ups (2.2 kΩ, three-way), PWR_LED, STAT LED, JP1 (volume resistor) — cut PWR_LED/STAT for current measurements and production |
+| Cost / lead | ~$9 board + a JST-SH Qwiic cable; production replaces the board with a **discrete magnetic buzzer + transistor** on the custom PCB (D20) |
 
-### 4.2 Thingy:91 X facts that shape the design (Nordic HW UG 4492_037 + board DTS in NCS 3.2.4)
+### 4.2 Wiring — nothing to cut
 
-| Item | Fact | Implication |
-|---|---|---|
-| Button 1 | SW3 → nRF9151 **P0.26**, active-low, pull-up; DT alias `sw0` **and** `mcuboot-button0` | The assistance actuator; also the MCUboot serial-recovery entry pin (§4.6) |
-| P1 connector | JST **SM04B-SRSS-TB** (Qwiic/STEMMA QT). Pin 1 GND, pin 2 **VDD_EXP_BRD** (3.3 V), pin 3 = `EXP_BOARD.PIN2` = **nRF9151 P0.18** (bridged to SDA by SB9), pin 4 = `EXP_BOARD.PIN1` = **nRF9151 P0.19** (bridged to SCL by SB8), both through a **TXS0102** level shifter (U24). **Resolved 2026-09-18 from schematic PCA20065 v2.0.0** (nRF9151 sheet net labels; the label column lines up with P0.20 = `nRF53_RESET` above and P0.15…12 = SPI/FLASH_CS below) | Two dedicated GPIOs — exactly what a UART needs; TXS0102 handles push-pull at 9600 baud |
-| VDD_EXP_BRD | From nPM1300 **BUCK2 (3.3 V, 200 mA max)** through load switch **U14 (TCK106AG)**, enable = nRF9151 **P0.03** (`exp_board_enable`, off by default) | Free power gate for the audio module (L8). BUCK2 also feeds LED1/2 and the GNSS LNA / RF front-end switch → rail sag risk (§4.7) |
-| I²C bus (i2c2) | nRF9151 SDA **P0.09** / SCL **P0.08**, 100 kHz; carries **nPM1300 (0x6b)** and **ADXL367 (0x1d)** — the fuel gauge and the wake-on-motion path | Anything that isolates the nRF9151 from this bus is fatal to the product |
-| Serial instances | nRF91 shares one peripheral slot per index: UARTE0/SPIM0/TWIM0 @ 0x8000 … UARTE3/SPIM3/TWIM3 @ 0xB000. In use: **uart0** (console, P0.00/01), **uart1** (nRF5340 bridge dump channel, P0.04/05, 1 Mbaud), **i2c2 = TWIM2** (slot 2), **spi3 = SPIM3** (slot 3, flash + BMI270 + nRF7002) | **There is no free UARTE.** `uart2` collides with i2c2, `uart3` with spi3 (§4.3) |
-| GNSS | Onboard GNSS antenna (A2) + LNA (U9), LNA power via U13 controlled by the modem **COEX2** pin; the board's `MODEM_ANTENNA` Kconfig (default y) issues `AT%XCOEX0=1,1,1565,1586` at modem init | GNSS hardware is ready; firmware only needs the `nrf_modem_gnss` API (§5.5) |
-| Free nRF9151 GPIOs (per DTS) | P0.18, P0.19, P0.21–P0.25 (P0.21–25 are the trace pins on the P9 card edge) | Candidates for `EXP_BOARD.PIN1/2` if they are dedicated GPIOs; none is on a friendly connector otherwise |
-
-### 4.3 Hard finding 1 — no spare UART, and the SB8/SB9 topology is not documented
-
-**No spare UARTE.** The only viable ways to talk to the DFR0534 from the nRF9151:
-
-| Route | How | Cost | Works when… |
+| Board state | Bus | Overlay | Notes |
 |---|---|---|---|
-| **R1 — re-pin uart1** ★ preferred if R-check passes | Move `uart1` from P0.04/05 (bridge) to the two P1 GPIOs at 9600 baud in assistance builds | Loses the uart1 dump/BLE-NUS bench channel in those images (already unused in every `FIELD_MODE` build) | P1 pins 3/4 are **dedicated nRF9151 GPIOs** after cutting SB8/SB9 ("reading C") |
-| **R2 — I²C→UART bridge on P1** (no cut) | SC16IS750 breakout on the P1 I²C bus (0x48–0x4F, no conflict with 0x1d/0x6b); its UART drives the DFR0534, its GPIOs read BUSY; whole thing behind the same VDD_EXP_BRD gate (TXS0102's VCC-isolation keeps unpowered P1 devices off the 1.8 V bus) | +1 IC (~$5–10), ~150-line register driver, a transport abstraction so production can use a native UARTE | **Any** topology — needs no solder-bridge surgery |
-| R3 — bit-banged TX on a P1 GPIO | Software UART TX (9600 8N1 is 104 µs/bit) from a dedicated thread | Jitter risk from modem-lib/sampler ISRs; RX (status) hard | Same dependency as R1; strictly worse than R1 |
+| **Unmodified Thingy:91 X** (every unit except the 2026-09-18 bench board) | P1 → TXS0102 → **i2c2** (SDA P0.09 / SCL P0.08), the sensor bus shared with the ADXL367 and nPM1300 | `boards/assist_buzzer_i2c2.overlay` | The production-representative wiring. Bus power = VDD_EXP_BRD via load switch U14, enable **P0.03** (`exp_board_enable`). With the board unpowered the TXS0102 keeps it off the 1.8 V bus |
+| **Cut bench board** (SB8/SB9 opened for the speaker experiment) | P1 → TXS0102 → **P0.18 (SDA) / P0.19 (SCL)**, now isolated from i2c2 → a bit-banged I²C master (Zephyr `gpio-i2c`, open-drain) | `boards/assist_buzzer_bitbang.overlay` | Same `qwiic_buzzer` node, same driver, zero code difference — the cut board stays useful for bench work. **Not** representative of production wiring |
 
-**Topology — RESOLVED 2026-09-18 from the schematic** (`PCA20065_Schematic_And_PCB.pdf` v2.0.0 and the Altium `pca20065_nrf9151.SchDoc` in Nordic's "Thingy:91 X Hardware files 2.0.0"): `EXP_BOARD_PIN1` and `EXP_BOARD_PIN2` are net labels on the nRF9151 GPIO column at the **P0.19** and **P0.18** rows — dedicated GPIOs ("reading C" below). SB8/SB9 only bridge those two nets onto SCL/SDA, so cutting them is safe **and required** (closed, a UART TX on P0.19 fights the I²C master). **Route R1 selected** (D15); `boards/assist_audio_uart1.overlay` re-pins uart1 to TX P0.19 / RX P0.18 at 9600 baud.
+A plain Qwiic (JST-SH 4-pin) cable connects P1 to either of the buzzer's Qwiic sockets; polarity is keyed. The Qwiic-to-Gravity cable from the speaker experiment is no longer needed.
 
-For the record, the readings that were open before the schematic arrived:
+### 4.3 What the speaker experiment established (kept for the record)
+- `EXP_BOARD_PIN1` = **P0.19**, `EXP_BOARD_PIN2` = **P0.18** (schematic PCA20065 v2.0.0) — dedicated GPIOs behind P1 pins 4/3; SB8/SB9 only bridge them onto SCL/SDA.
+- The nRF9151 has **no spare UARTE** (uart2 ↔ i2c2, uart3 ↔ spi3). Irrelevant for an I²C buzzer; it is why any UART peripheral would have needed the uart1 re-pin.
+- The DFR0534 path is bench-proven (module boot 570 ms, both UART directions, factory clips through the speaker) and stays selectable as `GOSTEADY_ASSIST_FEEDBACK_SPEAKER` with `boards/assist_audio_uart1.overlay` (coord §C63.6). It is not the product.
 
-| Reading | What SB8/SB9 sit between | Outcome |
-|---|---|---|
-| A | nRF9151 **P0.08/P0.09** and the shared sensor bus | ruled out — would have killed the ADXL367 + nPM1300 |
-| B | the shared bus and a **floating** level-shifter net | ruled out |
-| **C** ✅ | the shared bus and **dedicated GPIOs P0.19 / P0.18** | **confirmed** |
+### 4.4 Power gating (unchanged)
+The buzzer board rides VDD_EXP_BRD and is powered from the press to the end of the outcome tone, via the `exp_board_enable` regulator (P0.03). Between incidents the rail is off: zero standing current. BUCK2 (200 mA) also feeds LED1/LED2 and the GNSS LNA; 95 mA of buzzer is within budget but must be scoped once with GNSS active (FA-5).
 
-**HW-0 bench result (2026-09-18, coord §C63.6):** SB8/SB9 cut; sensors intact after the cut (ADXL367 armed, fuel gauge up, boot counter persisted); the DFR0534 header reads **`T R - +`** and the SparkFun cable lands **blue / yellow / black / red** on it — DFRobot labels `T`/`R` from the *host's* side, so **our TX = P0.18 (P1 pin 3, blue → `T`)** and **our RX = P0.19 (P1 pin 4, yellow → `R`)**. The first image had them the other way round (no reply); the swapped mapping answered the status query **~570 ms after power-up** and the full countdown played the module's factory clips at the right times. The canonical overlay now carries this mapping.
+### 4.5 Button (unchanged) and MCUboot recovery
+Button 1 = SW3 on **P0.26**, active-low, and still `mcuboot-button0` with `CONFIG_BOOT_SERIAL_ENTRANCE_GPIO=y` in the deployment image — an actuator held during a battery swap enters serial recovery. Deployment images must set `CONFIG_BOOT_SERIAL_ENTRANCE_GPIO=n` (FA-1). With hold-to-cancel now a core gesture, note the two never overlap: recovery only samples the pin during MCUboot's first milliseconds after reset.
 
-Still to do at the bench: load the real prompts (the first micro-USB cable was charge-only — the module powered but never enumerated), then the current / rail-sag / GNSS measurements below.
+### 4.6 Enclosure implications
+A buzzer needs a small sound port or acoustic membrane instead of a speaker grille and a 70 × 30 mm speaker pocket; the 25 mm buzzer board (or a 12 mm discrete element in production) fits beside the Thingy. Loudness at the user's ear through the enclosure is a FA-6 measurement (Q17). Ingress/cleaning requirements (AST-HW-04) carry over.
 
-### 4.4 Power gating is mandatory
-- The DFR0534/JQ8400-class modules idle in the **10–20 mA** range (unpublished; measure). Left powered that is 7–15 Ah/month — thousands of times the 48 mAh/month pre-activation budget. Therefore the module is powered **only** from press to end-of-prompt (plus tests), via `exp_board_enable` (P0.03) → U14 → VDD_EXP_BRD. Zephyr already models it as a `regulator-fixed`; firmware calls `regulator_enable/disable()`.
-- Boot-to-ready of the module after power-up is expected at ~1–2 s (measure); the T0 prompt therefore starts ~1.5 s after the press. The LED goes on at the press itself so feedback is never silent.
-- Guard against auto-play on power-up: track 01 is 100 ms of silence.
-
-### 4.5 DFR0534 control protocol (from the DFRobot datasheet)
-9600 8N1. Frame `AA <cmd> <len> <data…> <SM>`, `SM` = low byte of the sum of all preceding bytes (check: `AA 13 01 14 D2`, `AA 01 00 AB`).
-
-| Purpose | Frame | Reply |
-|---|---|---|
-| Query play status | `AA 01 00 AB` | `AA 01 01 <00 stop|01 play|02 pause> SM` |
-| Play / pause / stop | `AA 02 00 AC` / `AA 03 00 AD` / `AA 04 00 AE` | — |
-| Play track N (1–65535) | `AA 07 02 <hi> <lo> SM` (e.g. `AA 07 02 00 08 BB`) | — |
-| Play by path | `AA 08 <len> <drive> <path> SM` | — (fallback if index order proves unreliable) |
-| Volume 0–30 | `AA 13 01 <vol> SM` (`AA 13 01 14 D2` = 20) | — |
-| Loop mode | `AA 18 01 <mode> SM` (`03` = play once then stop) | — |
-| End current op | `AA 10 00 BA` | — |
-| Track count | `AA 0C 00 B6` | `AA 0C 02 <hi> <lo> SM` |
-| BUSY pin | high while playing | GPIO alternative to polling `01` |
-
-Gotchas to design around: track index follows **copy order**, not filename — copy prompts one at a time in order (or use play-by-path); set volume explicitly after every power-up; set loop mode `03` once (persist unknown); the header's T/R labels are the module's TX/RX — through the pin-for-pin cable, whichever P1 signal lands on **R** is our TX (swap in pinctrl, never in the cable).
-
-### 4.6 MCUboot serial recovery rides the same button
-The rollator pilot image builds MCUboot with `CONFIG_MCUBOOT_SERIAL=y`, `CONFIG_BOOT_SERIAL_ENTRANCE_GPIO=y` (`mcuboot-button0` = P0.26) and `BOOT_SERIAL_DETECT_DELAY=0`. **A bottom-cap actuator held while batteries are inserted (or during any reset) would trap the device in serial recovery** until the next reset. Deployment images must disable the GPIO entrance (`CONFIG_BOOT_SERIAL_ENTRANCE_GPIO=n` in a `sysbuild/mcuboot.conf` fragment for the pilot/field overlays); SWD remains the recovery path. Tracked as FA-1 work.
-
-### 4.7 Electrical risks to measure at HW-0
-- **Rail sag:** the amp's transients at 3.3 V into 8 Ω can exceed BUCK2's 200 mA on loud content, and BUCK2 also feeds the GNSS LNA and LEDs. Mitigate: volume ≤ ~20/30 for speech, 470–1000 µF bulk capacitance at the module, scope VDD_EXP_BRD and the 1.8 V rail during the loudest prompt. Production: dedicated audio rail from VSYS with its own load switch (the nPM1300's LSOUT2 is only 100 mA — not it).
-- **Idle + playback current** of the DFR0534 (datasheet silent) — drives the incident energy line in §5.8.
-- **Level shifter behaviour when VDD_EXP_BRD is off:** confirm P1 devices do not load SDA/SCL (TXS0102 VCC isolation); confirm the sensors keep working with the module unpowered and powered.
-- **Speaker mating** (FIT0502 lead vs DFR0534 SP± pads/connector).
-
----
+### 4.7 Bench measurements still owed (FA-0)
+- Buzzer board current: off rail (expect 0), idle-powered, sounding at volume 4 (expect ~95 mA) — with PWR_LED/STAT jumpers cut.
+- VDD_EXP_BRD and 1V8 during a volume-4 beep (rail sag).
+- GNSS TTFF trials (unchanged from v0.1).
 
 ## 5. Firmware design (`gosteady-firmware`)
 
@@ -195,55 +156,59 @@ The rollator pilot image builds MCUboot with `CONFIG_MCUBOOT_SERIAL=y`, `CONFIG_
 
 | File | New/changed | Responsibility |
 |---|---|---|
-| `src/assist.c/.h` | **new** | Incident state machine on its own thread (`gs_assist`, prio 6, 2 KB); button semantics; persistence of a pending incident; timing constants |
-| `src/audio_dfr0534.c/.h` | **new** | Power gate (regulator API), UART transport (R1) or I²C-bridge transport (R2), command frames, `audio_play(prompt_id)`, `audio_wait_done(ms)`, self-check |
-| `src/gnss.c/.h` | **new** (FA-5) | Single-fix acquisition around `nrf_modem_gnss_*`; last-fix cache (RAM + `/lfs/assist/lastfix.bin`); PVT → payload fields |
-| `src/cloud.c` | changed | `ASSIST_TOPIC_FMT "gs/%s/assist"`; `gosteady_cloud_assist_publish_wait_ack()` (own cycle, modelled on `connect_publish_stay()`); cmd dispatch gains `assist_ack` + `assist_arm`; heartbeat extras `assist_capable`, `assist_armed`, `audio_ok`, `gnss_fix_age_s` |
-| `src/main.c` | changed | Button wired when `CONFIG_GOSTEADY_ASSIST_ENABLE` even under `FIELD_MODE`; ISR gives `assist_button_sem` instead of the session toggle in assistance builds; LED arbitration for the assistance pattern |
-| `src/wipe.c` | changed | Wipe clears `/lfs/assist/*` (armed flag, pending incident, last fix) |
-| `src/version.h` | changed | `rol-0.2.0-ww` / `-pilot` / `-bench` line; changelog block |
-| `boards/thingy91x_nrf9151_ns.overlay` | changed | R1: `uart1` re-pinned + `current-speed = <9600>` (assistance builds only, via a second overlay `boards/assist_uart1.overlay`); `exp_board_enable` used |
-| `Kconfig`, `CMakeLists.txt`, `prj_rollator_*.conf` | changed | §5.7 |
-| `sysbuild/mcuboot.conf` | **new** | `CONFIG_BOOT_SERIAL_ENTRANCE_GPIO=n` for deployment overlays (§4.6) |
+| `src/assist.c/.h` | **written (v0.4)** | Incident state machine on its own thread (`gs_assist`, prio 6, 2 KB); debounce; **hold-to-cancel** (50 ms button polling, hold tone after 0.6 s, cancel at 3 s — including the initial press); cadence ticks; stub/real transport; ack wait + retry |
+| `src/feedback.h` | **written** | Feedback abstraction: `begin/end`, `countdown_start/mid`, `tick(phase)`, `hold_tone(on)`, `cancelled`, `confirmed(test)`, `failed`, `not_setup`, `fault`, `selftest`; compile-time no-ops for LED-only builds |
+| `src/feedback_buzzer.c` | **written** | Qwiic Buzzer backend: I²C register writes (5-byte burst from `0x03` + ACTIVE), power gate via the `exp_board_enable` regulator, ID check on power-up, pattern set (§5.3) |
+| `src/feedback_speaker.c` + `src/audio_dfr0534.c/.h` | archived | DFR0534 spoken-prompt backend (bench-proven); selectable, not built by default |
+| `dts/bindings/sparkfun,qwiic-buzzer.yaml` | **written** | Minimal binding so the `qwiic_buzzer` node resolves via `I2C_DT_SPEC_GET` |
+| `boards/assist_buzzer_i2c2.overlay` / `boards/assist_buzzer_bitbang.overlay` | **written** | §4.2 |
+| `src/gnss.c/.h` | planned (FA-5) | Single-fix acquisition around `nrf_modem_gnss_*`; last-fix cache |
+| `src/cloud.c` | planned (FA-2) | `ASSIST_TOPIC_FMT "gs/%s/assist"`; priority publish + ack wait; `assist_ack` / `assist_arm` cmds; heartbeat extras `assist_capable`, `assist_armed`, `feedback_ok`, `gnss_fix_age_s` |
+| `src/main.c` | changed | Button wired under `FIELD_MODE` when `GOSTEADY_ASSIST_ENABLE`; ISR → `gs_assist_button_isr()`; feedback init + optional boot self-test; LED handed to the assist thread during incidents |
+| `src/wipe.c` | planned (FA-1) | Wipe clears `/lfs/assist/*` |
+| `sysbuild/mcuboot.conf` | planned (FA-1) | `CONFIG_BOOT_SERIAL_ENTRANCE_GPIO=n` for deployment overlays (§4.5) |
 
 ### 5.2 State machine and timeline
 
-States: `IDLE → PENDING (countdown) → SENDING → AWAIT_ACK → CONFIRMED → LOCATING → IDLE`, with `CANCELLED` and `FAILED_RETRYING` side exits. One incident at a time; a press during `SENDING/AWAIT_ACK/CONFIRMED` is ignored (logged); a press during `LOCATING` is a **new** incident only after `IDLE` (debounced).
+States: `IDLE → PENDING (countdown) → SENDING → AWAIT_ACK → CONFIRMED → LOCATING → IDLE`, with `CANCELLED` and `FAILED_RETRYING` side exits. One incident at a time; a press during `SENDING/AWAIT_ACK/CONFIRMED` is ignored (logged).
 
-| T (s) | Device action | Notes |
-|---|---|---|
-| 0.00 | ISR: 50 ms debounce (re-read after 50 ms, must still be low); ignore if not armed (`assist_armed=false`) → play *"Assistance is not set up yet."* and stop | Deliberate-press gesture: single press ≥ 50 ms. A "hold ≥ 3 s" alternative is rejected (§11 D5) |
-| 0.00 | LED: solid red (assistance pending) — owns the LED until IDLE | Distinct from blue (pre-activation) and green (recording) |
-| 0.00 | Power audio (P0.03 high); wake cloud: `assist_publish_wait_ack()` starts **connect now** (PSM exit + TLS + MQTT if no live session) | Connect typically 3–10 s; wait-for-cellular has no timeout today — assistance uses a bounded variant |
-| ~0.6 | Prompt **P02** *"Assistance button pressed, contacting care circle in 20 seconds."* | Module boot measured **≈ 570 ms** on the bench (2026-09-18) |
-| 10.0 | Tone **P03** then **P04** *"Contacting care circle in 10 seconds."* | |
-| 0–20 | Second press ⇒ `CANCELLED`: play **P05** (tone + *"Cancelled."*), close the session, power audio off, LED off. **No publish** (a `cancel` telemetry event is optional, D9) | |
-| 20.0 | Build payload (§5.4), persist to `/lfs/assist/pending.json`, PUBLISH (QoS 1) on the session opened at T0; on PUBACK enter `AWAIT_ACK` | If the session is still connecting, publish as soon as it is up |
-| 20–50 | Wait ≤ **30 s** for `assist_ack` (cmd topic, matched on `incident_id`). On ack: play **P06** *"Contacted care circle."* (or **P08** test variant), `CONFIRMED` | Ack normally lands < 3 s after PUBACK |
-| ack+0 | Echo `cmd_id` in the next heartbeat (existing `last_cmd_id` plumbing); persist `acked` | Cloud gets a second, durable confirmation |
-| ack+0 | `LOCATING`: release RRC quickly (RAI `SO_RAI_NO_DATA` on the MQTT socket if supported, else wait for the network inactivity release), start GNSS single fix, retry ≤ 180 s | §5.5 |
-| fix | Publish `event:"location"` (same incident id), then `IDLE`; audio off, LED off | One follow-up per incident |
-| no ack | Retry publish at +30 s, +90 s, +210 s (same incident id, `seq` incremented); after the 3rd miss play **P07** *"Could not reach your care circle yet. Still trying."* and stay in `FAILED_RETRYING` with the modem awake up to **10 min** total; thereafter passive retry piggybacks every heartbeat/connect until acked or 24 h old | Bounded energy; cloud flags late arrivals |
-| reboot | `pending.json` present and unacked ⇒ resume `FAILED_RETRYING` at boot (never re-run the countdown) | Survives the crash class in coord §C62 |
+| t (s) | Device | Feedback | Notes |
+|---|---|---|---|
+| 0.00 | ISR on the press edge; 50 ms debounce (pin re-read). Not armed → `not_setup` pattern, stop | red LED on; buzzer powered (ID reply within tens of ms); **"heard you" double chirp** | Deliberate press = ≥ 50 ms |
+| 0.00 | Cloud connect starts (FA-2): PSM exit + TLS + MQTT if no live session | | Connect typically 3–10 s |
+| 1 … 10 | `PHASE_EARLY` | one 120 ms beep per second | |
+| 10.0 | `PHASE_LATE` | 250 ms phase-marker beep, then a double beep per second | |
+| 17.0 | `PHASE_FINAL` | rapid 70 ms beeps every 350 ms | urgency without alarm |
+| any | **Button held ≥ 0.6 s** → steady low tone (1500 Hz) replaces the cadence; released → cadence resumes. **Held ≥ 3.0 s → CANCELLED**: falling two-note, power off, LED off, **nothing sent**. The initial press counts: never releasing it cancels at 3 s (sustained accidental pressure cannot send) | | D18 — validate with older adults (FA-6) |
+| 20.0 | Build payload (§5.4), persist `/lfs/assist/pending.json` (FA-1), PUBLISH on the session opened at T0; on PUBACK → `AWAIT_ACK` | LED red+blue | |
+| 20–50 | Wait ≤ 30 s for `assist_ack` matched on `incident_id` | on ack: green LED, **rising three-note** (test mode: four notes) | Ack normally < 3 s after PUBACK |
+| ack+0 | Echo `cmd_id` in the next heartbeat; persist `acked` | | |
+| ack+0 | `LOCATING`: release RRC (RAI if available), GNSS single fix ≤ 180 s (FA-5) | buzzer already off | §5.5 |
+| fix | Publish `event:"location"`; `IDLE` | | one follow-up per incident |
+| no ack | Retry at +30 s, +90 s, +210 s (same `incident_id`, `seq`++); after the 3rd miss **deep double buzz**; stay in `FAILED_RETRYING` with the modem awake ≤ 10 min; then passive retry on every connect until acked or 24 h old | | bounded energy; cloud flags late arrivals |
+| reboot | `pending.json` unacked ⇒ resume `FAILED_RETRYING` at boot (never re-run the countdown) | | survives the coord §C62 crash class |
 
 Session interaction: the incident never starts/stops a session; `session_active` is reported in the payload only.
 
-### 5.3 Prompt set (audio assets, track index = copy order)
+### 5.3 Feedback pattern set (buzzer)
 
-| # | File | Content | Format |
-|---|---|---|---|
-| 01 | `01_silence.wav` | 100 ms silence (power-up guard) | WAV 16 kHz mono PCM |
-| 02 | `02_pressed_20s.wav` | *"Assistance button pressed, contacting care circle in 20 seconds."* | " |
-| 03 | `03_tone.wav` | 2 × 880 Hz 150 ms beeps | " |
-| 04 | `04_contacting_10s.wav` | *"Contacting care circle in 10 seconds."* | " |
-| 05 | `05_cancelled.wav` | descending two-tone + *"Cancelled."* | " |
-| 06 | `06_contacted.wav` | *"Contacted care circle."* | " |
-| 07 | `07_retrying.wav` | *"Could not reach your care circle yet. Still trying."* | " |
-| 08 | `08_test_ok.wav` | *"Test complete. Care circle contacted."* | " |
-| 09 | `09_not_setup.wav` | *"Assistance is not set up yet."* | " |
-| 10 | `10_fault.wav` | error tone (audio self-check fails to hear BUSY) | " |
+Design intent for older-adult legibility: one cadence per phase, always at the loud resonant pitch; outcomes use **pitch movement** (rising = good, falling = cancelled, deep and long = trouble) so they are distinguishable without counting beeps. All values are firmware constants in `feedback_buzzer.c`; volume 4 unless noted.
 
-Generated once with a neural TTS voice (Amazon Polly, same persona as the Retell agent — D12), slow rate, ≥ 70 dB SPL target at 0.5 m at volume 20/30 (validate in FA-6). Files are versioned in `gosteady-firmware/audio/` with a checksum manifest; the device reports `audio_ok` (self-check: track count == manifest count) in heartbeats.
+| Event | Pattern |
+|---|---|
+| Press accepted | 2 × 80 ms at 2730 Hz ("heard you") |
+| Countdown 0–10 s | 120 ms beep every 1 s |
+| Phase change at 10 s | one 250 ms beep, then 2 × 100 ms beeps every 1 s |
+| Final 3 s | 70 ms beeps every 350 ms |
+| Hold registering (≥ 0.6 s) | steady 1500 Hz tone until release or cancel |
+| Cancelled | 2200 Hz 180 ms → 1000 Hz 450 ms (falling) |
+| Contacted (ack) | 1500 → 2200 → 2730 Hz, 130/130/220 ms (rising) |
+| Test complete | the rising three plus a fourth 2730 Hz note |
+| Failed / still trying | 1000 Hz 600 ms, twice |
+| Not set up | 1500 Hz 250 ms, twice, unhurried |
+| Fault (feedback device absent) | LED only; heartbeat `feedback_ok:false` |
+
+The app shows the same table as "What the beeps mean" (§7). The archived speaker backend maps the same events to its spoken prompts (`audio/prompts/`), so the state machine is backend-agnostic.
 
 ### 5.4 Device-side cloud contract
 
@@ -271,7 +236,7 @@ Generated once with a neural TTS voice (Amazon Polly, same persona as the Retell
 
 | cmd | Fields | Device behaviour |
 |---|---|---|
-| `assist_ack` | `cmd_id:"asst_<uuid>"`, `ts`, `incident_id`, `mode:"live"|"test"`, `status:"accepted"|"not_ready"` | Match `incident_id` to the pending incident; `accepted`+`live` → P06; `accepted`+`test` → P08; `not_ready` → P09 and clear armed flag; echo `cmd_id` in next heartbeat |
+| `assist_ack` | `cmd_id:"asst_<uuid>"`, `ts`, `incident_id`, `mode:"live"|"test"`, `status:"accepted"|"not_ready"` | Match `incident_id` to the pending incident; `accepted` → contacted tone (test variant if `mode:test`); `not_ready` → not-set-up tone and clear the armed flag; echo `cmd_id` in next heartbeat |
 | `assist_arm` | `cmd_id:"asstarm_<uuid>"`, `ts`, `enabled:true|false`, `version:N` | Persist `/lfs/assist/armed.bin` = `{enabled, version}`; echo `cmd_id`; write Shadow `reported.assist_armed` |
 
 Authentication of the ack: it arrives on the device's mutually-authenticated TLS session on a topic only AWS principals with `iot:Publish` can write (the per-thing policy grants the device subscribe/receive only). No additional signature is needed in v1 (D6).
@@ -292,22 +257,22 @@ Authentication of the ack: it arrives on the device's mutually-authenticated TLS
 
 | Kconfig symbol | Default | Purpose |
 |---|---|---|
-| `GOSTEADY_ASSIST_ENABLE` | n (`depends on GOSTEADY_CLOUD_ENABLE`) | Compiles `assist.c`; wires the button under FIELD_MODE; new topic/cmds/heartbeat fields |
-| `GOSTEADY_ASSIST_AUDIO` | n | DFR0534 driver. `GOSTEADY_ASSIST_AUDIO_XPORT_UART1` (R1) / `_I2C_SC16IS750` (R2) choice; `#error` if `UART1` is chosen together with the dump channel in a non-FIELD build |
-| `GOSTEADY_ASSIST_AUDIO_VOLUME` | 20 | 0–30 |
-| `GOSTEADY_ASSIST_GNSS` | n | Compiles `gnss.c` (FA-5); isolable RAM/energy cost |
-| `GOSTEADY_ASSIST_COUNTDOWN_S` / `_MIDPROMPT_S` | 20 / 10 | L1 |
-| `GOSTEADY_ASSIST_ACK_WAIT_S` | 30 | per attempt |
-| `GOSTEADY_ASSIST_RETRY_AWAKE_S` | 600 | active-retry window |
-| `GOSTEADY_ASSIST_GNSS_TIMEOUT_S` | 180 | single-fix retry |
+| `GOSTEADY_ASSIST_ENABLE` | n | Compiles `assist.c`; wires the button under FIELD_MODE; new topic/cmds/heartbeat fields |
+| `GOSTEADY_ASSIST_FEEDBACK` (choice) | **`_BUZZER`** | `_BUZZER` (Qwiic, `select REGULATOR`), `_SPEAKER` (archived DFR0534, selects the hidden `GOSTEADY_ASSIST_AUDIO`), `_NONE` (LED only) |
+| `GOSTEADY_ASSIST_CANCEL_HOLD_MS` | 3000 | Hold-to-cancel threshold |
+| `GOSTEADY_ASSIST_BUZZER_VOLUME` / `_FREQ_HZ` | 4 / 2730 | |
+| `GOSTEADY_ASSIST_FEEDBACK_SELFTEST` | n | Boot-time power-up + identify + chirp (bench) |
+| `GOSTEADY_ASSIST_COUNTDOWN_S` / `_MIDPROMPT_S` / `_ACK_WAIT_S` | 20 / 10 / 30 | |
+| `GOSTEADY_ASSIST_STUB_CLOUD` (+ `_STUB_ACK_MS`) | y when `!CLOUD_ENABLE` | Bench: simulated ack; boots armed |
+| `GOSTEADY_ASSIST_GNSS` | n | `gnss.c` (FA-5); isolable RAM/energy cost |
 
-`CMakeLists.txt`: `target_sources_ifdef(CONFIG_GOSTEADY_ASSIST_ENABLE app PRIVATE src/assist.c)`, `…_ASSIST_AUDIO … src/audio_dfr0534.c`, `…_ASSIST_GNSS … src/gnss.c`. Overlays: `prj_rollator_pilot.conf` / `prj_rollator_field.conf` gain the assist symbols behind a new `prj_rollator_assist.conf` delta during FA-1–FA-5, folded into the pilot overlay at FA-6. `docs/build-configurations.md` matrix updated in lockstep. Version line bumps to `rol-0.2.0-*` (12 chars, fits the 15-char `.dat` cap); the pending `cap` suffix decision in `build-configurations.md` is respected (no third dimension added).
+Overlays: `prj_assist_bench.conf` (buzzer, stub cloud) + `boards/assist_buzzer_i2c2.overlay` (unmodified board) or `boards/assist_buzzer_bitbang.overlay` (the cut bench board); `prj_assist_speaker_bench.conf` + `boards/assist_audio_uart1.overlay` (archived). Deployment: `prj_rollator_pilot.conf` gains the assist symbols behind a `prj_rollator_assist.conf` delta during FA-1–FA-5, folded in at FA-6; the `qwiic_buzzer` node moves into the base board overlay at that point. `docs/build-configurations.md` matrix updated in lockstep. Version line bumps to `rol-0.2.0-*`.
 
 ### 5.8 Energy budget (per incident, 1350 mAh reference cell)
 
 | Term | Estimate | Basis |
 |---|---|---|
-| Audio module powered ~40 s incl. prompts (assume 60 mA avg) | ~0.7 mAh | to be measured (§4.7) |
+| Buzzer board powered ~25 s (idle ≈ few mA; ~95 mA only while a beep sounds, ≈ 3 s cumulative) | ~0.15 mAh | to be measured (§4.7) |
 | Connect + publish + ack hold ~40 s | ~0.6 mAh | 0.25 mAh/cycle + ~50 mA hold |
 | GNSS ≤ 180 s | ~1.5–2.3 mAh | nRF91 GNSS tracking current |
 | Follow-up publish | ~0.25 mAh | |
@@ -316,10 +281,10 @@ Authentication of the ack: it arrives on the device's mutually-authenticated TLS
 | Monthly test | ≈ 4 mAh | |
 | Worst case: 10 min awake retry in no-coverage | ≈ 10–15 mAh | bounded by `RETRY_AWAKE_S` |
 
-Conclusion: the feature is compatible with the one-year target **only** because of L8; the audio module's idle current is the single number that could break it.
+Conclusion: the feature is compatible with the one-year target because of L8 (zero standing current); the buzzer is cheaper per incident than the speaker was, and GNSS remains the dominant term.
 
 ### 5.9 RAM / thread budget
-Rollator pilot build has ~84 KB RAM headroom. Planned additions: `gs_assist` thread 2 KB + 1 KB buffers; audio driver ~0.5 KB; `gnss.c` ~1 KB (PVT struct ~300 B, no `location` library). Expected < 6 KB. Re-measure at each phase; the `location`/A-GNSS libraries are explicitly **not** pulled in for v1.
+Rollator pilot build has ~84 KB RAM headroom. Measured 2026-09-18 on the bench build: assist thread + buzzer backend + bit-bang I²C ≈ +5.7 KB over the speaker build (120,608 B vs 114,944 B, both bench posture); `gnss.c` ~1 KB (PVT struct ~300 B, no `location` library). Expected < 8 KB total. Re-measure at each phase; the `location`/A-GNSS libraries are explicitly **not** pulled in for v1.
 
 ### 5.10 Concurrency and priority (L3)
 - `assist_publish_wait_ack()` takes `s_aws_mutex` like every other publish, so it serializes with an in-flight heartbeat/activity cycle (worst case CONNECT_WAIT 60 s + PUBACK_WAIT 30 s). Mitigation in FA-1: (a) if a session is already up (linger, activity cycle, wake window), the assistance thread **reuses it** — the mutex holder checks an `assist_pending` atomic at its checkpoints and hands the session over instead of disconnecting; (b) `wait_for_cellular_ready()` gets a bounded variant for the assistance path; (c) the pre-activation wake window (holds the mutex up to 600 s) cannot coincide with an armed device (armed ⇒ activated), so no arbitration is needed there.
@@ -464,7 +429,7 @@ Canary (`assistance-canary`, EventBridge daily): creates a synthetic incident (`
 | Surface | Change |
 |---|---|
 | **Care Team screen** | Per-member "Assistance alerts: calls / texts" toggles (self-service; owner sees state), consent sheet on first enable (§8 consent copy), "test recipient" toggle |
-| **Assistance settings** (new, under Account) | Owner: enable/disable, location-sharing consent (walker or owner on their behalf), readiness card ("Ready — 2 contacts" / "Not ready — add a contact who accepts calls or texts"), last test date + result, **Run a test** (arms for 10 min, shows live progress) |
+| **Assistance settings** (new, under Account) | Owner: enable/disable, location-sharing consent (walker or owner on their behalf), readiness card ("Ready — 2 contacts" / "Not ready — add a contact who accepts calls or texts"), last test date + result, **Run a test** (arms for 10 min, shows live progress), **"What the beeps mean"** legend (§5.3) incl. "hold the button for 3 seconds to cancel" |
 | **Dashboard** | Active-incident card pinned at top (red): timeline (requested → contacting → who answered / delivered → acknowledged), **I'm on it** and **Mark resolved**; incident location map link when available. Uses the projected Alert History row for discovery and the incident endpoint for detail |
 | **History** | Incidents list (tests labelled) with detail |
 | **Walker-user view** | `WALKER_VISIBLE_ALERT_TYPES` gains `assistance_request` so the walker sees their own request status (D8) |
@@ -482,7 +447,7 @@ Facility portal: none in v1 (L11).
 **SMS (follow-up):** `GoSteady update: {WalkerName}'s location is now available (captured {time}, ±{acc} m): {url}.`
 **SMS (test):** prefixed `TEST — ` and ends `This was a test; nobody needs help.`
 **Voice (Retell agent script, dynamic variables):** *"Hello {member_name}, this is GoSteady, the family assistance service for {walker_name}. {walker_name} pressed the assistance button on their rollator at {pressed_time_local}. {location_sentence} This is an automated family notification, not emergency services. Please check on {walker_name} now, and call emergency services yourself if you believe they need it. I will repeat that once."* (repeat; then *"Goodbye."*). Voicemail variant identical, prefixed with *"This is an important message from GoSteady for {member_name}."* Test variant opens with *"This is a GoSteady test call."*
-**Device prompts:** §5.3.
+**Device feedback:** beep patterns, §5.3 (no speech in the product).
 **Consent (prefs enable):** "I agree to receive automated phone calls and text messages from GoSteady when {WalkerName} presses the assistance button. These are family notifications, not emergency services. Message and data rates may apply; reply STOP to opt out of texts."
 
 ---
@@ -491,14 +456,14 @@ Facility portal: none in v1 (L11).
 
 | Phase | Scope | Exit criteria | Depends on |
 |---|---|---|---|
-| **FA-0 Hardware gate** (≈ 1 week, bench) | ~~topology~~ done (schematic; R1); ~~bench harness~~ built; ~~cut, flash, press~~ **button → speaker PROVEN 2026-09-18** (factory clips, 570 ms module boot, both UART directions, sensors intact after the cut, speaker mates); **remaining:** load the real prompts (data cable), DFR0534 idle/playback current + rail-sag, power-gate 0 mA off, GNSS TTFF indoors/outdoors/window (10 fixes each) | Numbers recorded in coord §C63.x; energy line in §5.8 replaced with measurements | Hardware on the bench (done) |
+| **FA-0 Hardware gate** (≈ 1 week, bench) | ~~speaker path~~ proven then **retired** (§C63.6/§C64); **buzzer feedback layer + hold-to-cancel written and compiling** (`prj_assist_bench.conf` + `assist_buzzer_*.overlay`); **next:** Qwiic Buzzer arrives → plug into P1 → flash the matching overlay → verify the cadence, hold-cancel, confirmed/cancelled tones, loudness; buzzer current + rail sag; GNSS TTFF indoors/outdoors/window (10 fixes each) | Numbers recorded in coord §C64.x; energy line in §5.8 replaced with measurements | Buzzer on order (BOB-24474 + Qwiic cable) |
 | **FA-1 Firmware core** | `assist.c` + audio driver + button un-gate + LED + persistence/retry + `assist_ack/arm` cmd handling + heartbeat extras + MCUboot entrance fix + shell hooks; **no GNSS**; acceptance with the bench ack stub | Bench: press → prompts at 1.5/10 s → publish at 20 s → stub ack → "Contacted care circle"; cancel path; retry path with the antenna wrapped; reboot mid-`AWAIT_ACK` resumes; RAM/flash deltas recorded; 0 faults over a 24 h soak with hourly presses | FA-0 |
 | **FA-2 Cloud pipeline** | Policy + rule, incidents table, dispatcher (request/location), ack, projection, Patient/RoleAssignments fields, readiness + `assist_arm`, heartbeat/coordinator dispatch, `e2e-assistance-alert.py` (synthetic device + JWTs) | Real device: ack latency p95 < 10 s from PUBACK on dev; duplicate request ⇒ same ack; not-ready ⇒ P09 + disarm; alert card visible in the D2C app via the existing alerts read | FA-1 |
 | **FA-3 Notifications** | Notification stack real: queue, notifier (Retell + Twilio + StatusCallback), webhooks, retries, roll-up, canary, alarms, dashboard | Live two-phone test: one press ⇒ both members get a call **and** a text within 60 s of the ack; outcomes visible in the incident; voicemail + no-answer + STOP cases recorded; canary green 3 days | FA-2, Retell account + number, test numbers |
 | **FA-3b Readiness delivery** | Owner SMS for `device_offline`/`device_silent`/`battery_critical` on assistance-enabled households (≤ 1/day/type), riding the same notifier | `device_silent` reaches the owner's phone (closes the §C62.5 "reached nobody" gap for this cohort) | FA-3 |
 | **FA-4 App** | §7 surfaces, copy, agreements, walker visibility | Owner can enable, member can consent, test runs from the app end-to-end, incident card + ack + close work on phones | FA-2/FA-3 |
 | **FA-5 Location** | `gnss.c`, location ladder, `event:location`, follow-up SMS, geocoding; **FA-5b** cell-based coarse location if Q7 = yes | Outdoors: fix within 180 s in ≥ 80 % of trials; indoors: request still acked and delivered with "not available"; follow-up SMS exactly once | FA-1, FA-3 |
-| **FA-6 Pilot validation** | Human-factors on installed rollators (actuator placement/force, false-press during rolling/braking/transport, cancel gesture), acoustic SPL/intelligibility, poor-coverage runs, energy soak, counsel review, ops runbooks; fold `prj_rollator_assist` into the pilot overlay | All PRD §7 Family-Assistance gates green; prod flag flip decision | everything + enclosure track |
+| **FA-6 Pilot validation** | Human-factors on installed rollators (actuator placement/force, false-press during rolling/braking/transport, **hold-to-cancel discoverability and false cancels**), buzzer loudness through the enclosure, poor-coverage runs, energy soak, counsel review, ops runbooks; fold `prj_rollator_assist` into the pilot overlay | All PRD §7 Family-Assistance gates green; prod flag flip decision | everything + enclosure track |
 
 **Prerequisites outside this spec (PRD §7 current-product gates):** the session-storage exhaustion fix (`2026-07-31-session-storage-exhaustion.md` Options 5+2 then 1) must ship before any assistance pilot — a unit that crashes in a blackout cannot be a safety device; the `telemetry_queue` work there should share the `/lfs/assist/pending.json` durability pattern. Vehicle-transport exclusion, battery-claim validation and the OTA decision remain product gates but do not block FA-0…FA-5 engineering.
 
@@ -509,20 +474,20 @@ Facility portal: none in v1 (L11).
 | # | Scenario | Method | Expected |
 |---|---|---|---|
 | T1 | HW-0 topology check | bench, meter | Reading recorded; sensors alive after any cut |
-| T2 | Audio module current off/idle/play | bench, current board | Off = 0 mA; idle/play numbers logged |
-| T3 | Rail sag at max prompt volume | scope on VDD_EXP_BRD + 1V8 | No brownout, GNSS LNA rail stable |
-| T4 | Press → prompts timing | logic analyser on UART + audio out | P02 ≤ 2.0 s, P03/P04 at 10.0 ± 0.2 s |
-| T5 | Cancel by second press at 5 s / 19 s | bench | P05, no publish, session closed |
-| T6 | Press while not armed | bench | P09, no publish |
-| T7 | Publish at 20 s, ack, P06 | dev cloud | ack latency p95 < 10 s |
-| T8 | No coverage (antenna wrapped) | bench | retries at +30/+90/+210 s, P07 after 3rd, awake ≤ 10 min, later delivery flagged `late` |
+| T2 | Buzzer board current off / idle-powered / sounding | bench, current board | Off = 0 mA; idle + ~95 mA sounding logged |
+| T3 | Rail sag at volume 4 | scope on VDD_EXP_BRD + 1V8 | No brownout, GNSS LNA rail stable |
+| T4 | Press → cadence timing | console log + ear | chirp ≤ 0.3 s; phase change at 10.0 ± 0.2 s; rapid phase at 17.0 s; publish at 20.0 s |
+| T5 | Hold-to-cancel: hold from 5 s and from 18 s; hold the initial press; release at 2.5 s (must NOT cancel) | bench | hold tone from 0.6 s; cancelled tone at 3.0 s; no publish; the 2.5 s release resumes the cadence |
+| T6 | Press while not armed | bench | not-set-up tone, no publish |
+| T7 | Publish at 20 s, ack, contacted tone | dev cloud | ack latency p95 < 10 s |
+| T8 | No coverage (antenna wrapped) | bench | retries at +30/+90/+210 s, failed tone after the 3rd, awake ≤ 10 min, later delivery flagged `late` |
 | T9 | Reboot during AWAIT_ACK | bench | resumes retry, no second countdown, one incident |
 | T10 | Duplicate request (seq 2) | `e2e-assistance-alert.py` | one incident, same ack re-sent |
-| T11 | Not-ready household | e2e | `rejected_not_ready`, ack `not_ready`, device disarmed |
+| T11 | Not-ready household | e2e | `rejected_not_ready`, ack `not_ready`, not-set-up tone, device disarmed |
 | T12 | Fan-out to 3 members (2 voice+sms, 1 sms-only) | live phones | 5 jobs, all outcomes recorded |
 | T13 | Voicemail / no answer / busy / STOP | live phones | outcomes + single retry where specified |
 | T14 | Follow-up location SMS once | e2e + device | exactly one per incident |
-| T15 | Test mode | app + device | only the tester notified; "TEST —" copy; P08; `lastTestAt` updated |
+| T15 | Test mode | app + device | only the tester notified; "TEST —" copy; four-note tone; `lastTestAt` updated |
 | T16 | Member ack / close | app | alert row + incident both acked; audit |
 | T17 | Pause bypass | e2e with `notificationsPaused` set | request still processed |
 | T18 | Walker visibility | e2e (`isWalkerUser`) | `assistance_request` visible to walker |
@@ -555,6 +520,10 @@ Facility portal: none in v1 (L11).
 | D14 | Incident TTL 24 months (hot) | no TTL | Aligns with Alert History; audit trail is retained 6 y regardless |
 | D15 | **R1 (uart1 re-pin to P0.19/P0.18) — confirmed 2026-09-18** by the schematic (reading C); R2 (SC16IS750 on P1) kept as the no-surgery fallback | bit-bang; give up i2c2 | No free UARTE; the dedicated GPIOs exist, so the cheapest route wins |
 | D16 | (proposed) Wi-Fi BSSID scan + cell tuple during the countdown, resolved cloud-side via Google Geolocation; GNSS only after the ack | GNSS-only; cell-only | Indoors is the common case for a rollator user; Wi-Fi is the only fast indoor fix. Gated on the in-tree RAM measurement (FA-5c) |
+| D17 | **Buzzer replaces the speaker** (2026-09-18): SparkFun Qwiic Buzzer on P1 for the prototype, discrete buzzer in production | DFR0534 speaker (proven); piezo on a GPIO/PWM pin | Size + BOM; family-only notification does not need speech; I²C on the existing Qwiic bus needs no UART, no solder-bridge surgery, and keeps every unmodified unit usable. Speaker path archived, still selectable |
+| D18 | **Press-and-hold 3 s cancels**, at any point in the 20 s including the initial press; a steady low tone from 0.6 s signals the hold | second press (v0.1); double press | One gesture with a clear physical meaning; sustained accidental pressure can never send; a panicked hold cancels audibly and a short re-press restarts — validate in FA-6 |
+| D19 | The cut bench board keeps working via a bit-banged I²C bus on P0.18/P0.19 (`gpio-i2c`) | new Thingy:91 X now; re-solder SB8/SB9 | Same node, same driver, DT-only difference; a fresh unit is still preferred for production-representative i2c2 testing |
+| D20 | Production feedback = discrete magnetic buzzer + NPN driver on the custom PCB (GPIO/PWM), same cadence code behind the feedback abstraction | keep the Qwiic board | ~$0.50 vs ~$9, no second MCU, no I²C; the abstraction makes the swap a backend file |
 
 ---
 
@@ -575,6 +544,8 @@ Facility portal: none in v1 (L11).
 - [ ] **Q13 (FA-6):** Counsel review of §8 copy, TCPA consent, and the agreements clause (same open item as ai-coach Q11).
 - [ ] **Q14 (FA-2):** Should `late` arrivals (> 15 min old, device was offline) still fan out? Proposed: yes, with "pressed the button {N} minutes ago; the device only just reconnected" wording.
 - [ ] **Q15 (FA-6):** Recurring test cadence (PRD AST-OPS-03) — monthly prompt in-app? Also whether a test should be required at activation before arming.
+- [ ] **Q16 (FA-3):** The pivot note says "before sending **the text** out" — is the Retell **voice call** still in V1 alongside SMS (PRD AST-SW-02), or is V1 SMS-only with voice later? The cloud design supports either; it changes FA-3 scope and the Retell dependency.
+- [ ] **Q17 (FA-6):** Buzzer loudness target through the enclosure (dB at 0.5 m) and whether one volume level suffices, or the household should be able to pick quiet/normal/loud in the app (→ `assist_arm` carries a volume byte).
 
 ---
 
@@ -583,8 +554,10 @@ Facility portal: none in v1 (L11).
 | Risk | Impact | Mitigation |
 |---|---|---|
 | SB8/SB9 cut isolates the sensor bus (reading A) | Loses wake-on-motion + fuel gauge | HW-0 before cutting; R2 fallback |
-| DFR0534 idle current unmeasured | Could dominate battery if gating fails | L8; heartbeat `audio_ok` + P0.03 state in extras; T2 |
-| Amp transients sag BUCK2 | GNSS LNA/LED brownout, resets | T3, bulk cap, volume cap, production rail |
+| Buzzer board idle current (ATtiny IDLE sleep) | Would dominate battery if gating fails | L8; heartbeat `feedback_ok` + P0.03 state in extras; T2 |
+| 95 mA beeps on BUCK2 alongside the GNSS LNA | rail sag → GNSS dropouts | T3; beeps and GNSS never overlap in the timeline (GNSS starts after the ack) |
+| Hold-to-cancel cancels a real request (panicked hold) | delayed help | audible cancel + short re-press restarts; FA-6 human-factors; consider a second confirmation beep before cancelling |
+| A beep-only device is less self-explanatory than speech | user unsure what is happening | consistent cadences, app legend, onboarding card on the cupholder; a 20 s window is long enough to notice the pattern |
 | No coverage at press | Request delayed | bounded awake retry + persistence + late-arrival copy; storage-exhaustion fix prerequisite |
 | Provider outage (Retell/Twilio) | Silent failure | canary + alarms + DLQ; both channels independent |
 | Persistent-session expiry breaks `assist_arm` delivery | Device never arms | coordinator republish (existing pattern) |
@@ -601,3 +574,21 @@ Facility portal: none in v1 (L11).
 | 2026-09-18 | Claude (with Jace) | Initial umbrella spec v0.1: PRD V2.2 traceability, hardware findings (no free UARTE; SB8/SB9 topology gate; power gating; MCUboot recovery on Button 1), firmware/cloud/app design, phasing FA-0…FA-6, decisions D1–D15, open questions Q1–Q15 |
 | 2026-09-18 | Claude (with Jace) | v0.2: P1 topology resolved from the PCA20065 v2.0.0 schematic (EXP_BOARD_PIN1 = P0.19, PIN2 = P0.18; R1 confirmed, D15); bench harness built in firmware (`prj_assist_bench.conf`, overlay, `assist.c`, `audio_dfr0534.c`, prompt set + loader); Wi-Fi scan positioning proposed (§5.5, D16); Q1/Q2/Q7 answered, Q3 updated |
 | 2026-09-18 | Claude (with Jace) | v0.3: button → speaker proven on the bench (SB8/SB9 cut, sensors intact, module boot 570 ms, factory clips through the full 20 s sequence); canonical mapping corrected to TX = P0.18 / RX = P0.19 (DFRobot `T`/`R` are host-side labels); §4.3 HW-0 result, §5.2 timeline, §9 FA-0 updated |
+| 2026-09-18 | Claude (with Jace) | **v0.4 — direction change:** speaker retired for a SparkFun Qwiic Buzzer on P1 (D17); 20 s beep countdown, **press-and-hold 3 s cancels** (D18); §4 rewritten (buzzer register map, i2c2 vs bit-bang overlays, no cutting), §5.1–5.3/5.7–5.9 rewritten (feedback abstraction, cadence timeline, pattern set), tests/risks/questions updated (Q16 voice-in-V1?, Q17 loudness), §15 PRD V2.3 amendment text added. Firmware feedback layer + state machine written and compiling (coord §C64) |
+
+---
+
+## 15. PRD V2.3 amendment (proposed text, 2026-09-18)
+
+Replace/append in `GoSteady PRD V2.2 Draft - Rollator and Family Assistance.docx` §5 (all rows stay `PROPOSED — FAMILY ASSISTANCE`):
+
+| ID | Proposed V2.3 requirement text |
+|---|---|
+| **AST-HW-03** (replace) | The device shall include a small buzzer capable of clearly audible, distinct beep patterns for the countdown, cancellation, cloud acknowledgement, test success, not-set-up and fault states. Spoken prompts are not required. |
+| **AST-HW-04** (amend) | … after adding the moving actuator and a **sound port or acoustic membrane for the buzzer**. |
+| **AST-FW-02** (replace) | On a validated press the device shall immediately give a short acknowledgement beep and then beep once per second; after 10 seconds the cadence shall change to a double beep per second and in the final 3 seconds to rapid beeps. **Pressing and holding the assistance button for 3 seconds at any time before transmission — including holding the initial press — shall cancel the incident** and produce a distinct falling cancellation tone; a steady tone while the button is held shall indicate that the hold is registering. |
+| **AST-FW-04** (amend) | After authenticated acknowledgement … the device shall play a distinct rising confirmation tone. It shall not play this tone before acknowledgement and shall use bounded retry plus a distinct failure tone if acknowledgement is not received. |
+| **AST-FW-06** (amend) | … The test-complete feedback shall be audibly distinct from the live confirmation tone. |
+| **§6 exclusions** (add) | Spoken prompts / speech output through the device: out of scope for V1 (buzzer cadences only). |
+| **§7 gates** (amend) | Replace "exact 20-second and 10-second spoken prompts, intervening tone, second-press cancellation" with "the 20-second beep countdown with its 10-second and 3-second cadence changes, the 3-second press-and-hold cancellation, and the confirmation/failure tones". Add: buzzer loudness and pattern recognisability validated with older adults through the production enclosure. |
+| **§2.1 / §3** (no change) | Direct family outreach by voice call and SMS is unchanged (pending Q16). |
