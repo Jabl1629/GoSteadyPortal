@@ -1524,7 +1524,7 @@ Phase 2B replaces the Flutter portal's mock data with live AWS-backed reads + wr
 - Threshold tuning with real-world battery curves
 - Signal-strength mapping in target environments
 - Latency measurement: device event → caregiver notification
-- Battery life under production cadence
+- Battery life under production cadence — first field number 2026-09-22: ~29 d (see `2026-09-22-field-battery-analysis-GS0002000005.md`)
 
 ---
 
@@ -1819,7 +1819,7 @@ Surfaced by the first physical-device activation through the facility portal on 
 - [ ] **Family viewer activation flow:** Self-service link request, admin approval, or both?
 
 ### Long-Term (Phase 5+)
-- [ ] **Battery life in production:** Real-world drain rate
+- [x] **Battery life in production — first field measurement 2026-09-22:** GS0002000005 runs **~29 days full → dead (~1.8 mA avg)** under real use at cell-edge signal; ~70 connects/day (24 heartbeats + ~45 session uploads) dominate; offline episodes draw ~8 mA and end in the §C62 crash; no low-battery cut-off → brownout boot loop. Levers + estimate: [`2026-09-22-field-battery-analysis-GS0002000005.md`](2026-09-22-field-battery-analysis-GS0002000005.md) (coord §C66)
 - [ ] **Manufacturing provisioning:** Batch claim-cert flashing workflow
 - [ ] **Reopening Phase 4 (FHIR/HL7v2):** Trigger criteria and partner-driven scope
 - [ ] **HIPAA program formalization:** Trigger when first clinical-channel customer signs
@@ -1863,6 +1863,7 @@ Surfaced by the first physical-device activation through the facility portal on 
 | 5A | Device Onboarding | — | ⬜ Future |
 | 5B | End-to-End Validation | — | ⬜ Future |
 | FA | Family Assistance Alert (umbrella: firmware + cloud + app) | [`family-assistance-alert.md`](family-assistance-alert.md) | 🟡 **Draft v0.4 2026-09-18; PRD V2.3 applied 2026-09-22** — Qwiic buzzer + press-and-hold cancel (speaker retired), PRD V2.3 §5 traceability, phasing FA-0…FA-6, D1–D20, Q1–Q17. Firmware bench harness compiles (stub cloud); no cloud/app code; coord §C63–§C65 |
+| BAT | Field battery analysis — GS0002000005 (2026-07-24 → 09-22) | [`2026-09-22-field-battery-analysis-GS0002000005.md`](2026-09-22-field-battery-analysis-GS0002000005.md) | 📊 **Measured 2026-09-22** — ~29 d full→dead, ~1.8 mA avg; drain split ~60 % baseline / 40 % walking; offline ≈ 8 mA + §C62 crash; brownout boot loop at 3.1 V; 7 levers; predicted death of the current charge Oct 14–18. Coord §C66 |
 
 > Phases 4A/4B/4C (FHIR, HL7v2, Bulk Export) are **cut from active roadmap**. See §12 for trigger criteria to reopen.
 

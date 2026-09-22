@@ -10453,3 +10453,40 @@ Entry owner: Claude (single session over both repos) | Trigger: Jace asked for t
 **Docs in lockstep:** spec §1 retargeted to PRD V2.3, §15 marked applied, §14 changelog row; ARCHITECTURE §12 FA paragraph + spec-index row refreshed (they still described the speaker and "nothing implemented"); firmware `GOSTEADY_CONTEXT.md` latest pointer → §C65.
 
 *Entry owner: Claude (2026-09-22). No code change in either repo.*
+
+---
+
+# §C66 — [firmware+cloud] Field battery analysis GS0002000005: ~29 days full → dead at ~1.8 mA (2026-09-22)
+
+Entry owner: Claude (single session over both repos) | Trigger: Jace asked for a real battery analysis from field data on the one unit in genuine daily use (GS0002000005, activated 2026-07-24). Everything came off the cloud — device untouched. Full write-up: portal `docs/specs/2026-09-22-field-battery-analysis-GS0002000005.md`.
+
+## C66.1 — Result
+
+- **Full → dead = 29.4 days** (98 % / 4184 mV on 07-24 → 0.7 % / 3140 mV on 08-23), ≈ 31 d after removing the two offline-crash losses. **Avg ≈ 1.8 mA ≈ 44 mAh/day** — exactly the §C38 "1.875 mA = 30 d" ceiling, versus the §C38 bench projection of 58–89 d for this build.
+- Second cycle (partial 33 % charge) died in 8 d; the unit was **dead 34 % of the time since activation** (20 of 60 days), recharged 6.4 d and 14 d after dying. Current charge (09-20, unplugged before it settled) predicted to die **Oct 14–18**.
+- **PRD DEV-09 (~1 year) is ~12× off** with this build and this signal environment.
+
+## C66.2 — Why (from the hourly data)
+
+- Quiet hours drain 0.071 pts/h, walking hours 0.193 pts/h → ≈ 60 % always-on baseline / 40 % walking-related. Day-level drop shows **no usage slope** (25–140 active min/day, R² 0.1): fixed cost dominates.
+- Fixed cost = **~70 connections/day** (24 heartbeats + 38–47 per-session uploads; sessions fragment at `AUTO_STOP_STATIONARY_S=15`, median 0.8 min) at **cell-edge signal** (RSRP median −107 dBm, 48 % of hours ≤ −110, 12 % ≤ −120).
+- Two offline episodes (07-31, 8 h; 08-31, 25 h; device-local — other units heartbeated) drew **≈ 8 mA** each and ended in the **§C62 LittleFS fatal** (`fault_counters.fatal` 0→1→2→3, watchdog 0): ≈ 19 % of a charge lost in 33 h, plus the sessions.
+- **No low-battery cut-off:** the cell is run to ~3.1 V, then the nRF9151 brownout-boot-loops — `boot_count` 8 → 1310 in the first dead window (1,302 boots / 6.4 d), 1312 → 1389 in the second. Cell held < 3.1 V for 6 and 14 days.
+
+## C66.3 — Levers (estimates) and what it means for the roadmap
+
+1. Batch session uploads into the heartbeat (derived-record queue = the §C62 fix): −45 connects/day → ~40 d.
+2. Low-battery policy: ≤ 5 % uploads off + 6-h heartbeat; ≤ 2 % final heartbeat + nPM1300 ship mode (ends the boot loop, protects the cell).
+3. Offline back-off (sleep the modem 15–30 min between failed attach attempts): 8 mA → <1 mA when out of coverage.
+4. `AUTO_STOP_STATIONARY_S` 15 → 60–120 s (fewer sessions, better data).
+5. Heartbeat 1 h → 2 h (−10…15 %, offline detection 2 h → 4 h).
+6. Antenna/placement; 7. Care-Circle delivery of battery alerts (APP-06 stub) so a dead unit is charged in hours, not weeks.
+1+3+4 ≈ 2× (~60 d); months need a different connection cadence (product trade).
+
+**Cloud quick win (no firmware):** publish `battery_mv` as a per-device metric next to `BatteryPct` (it is already in every heartbeat/Shadow).
+
+## C66.4 — Data-access notes (so the next pull is 5 minutes)
+
+`AWS_PROFILE=gosteady AWS_REGION=us-east-1` (aws-login session on 460223323193; the `default` profile's static key is dead). Per-device metrics need **both** dimensions `serial` + `service=gosteady-prod-heartbeat-processor`. Shadow carries `battery_mv`/`boot_count`/`fault_counters`; `gosteady-prod-audit` (90 d) carries `device.battery_swapped` with boot counts; `gosteady-prod-activity.deviceSessionKey` = `serial#boot_count#uptime_ms`. No pandoc/LibreOffice/matplotlib on the Mac — analysis was pure-python over the JSON pulls.
+
+*Entry owner: Claude (2026-09-22). No code change; docs + this entry only.*
