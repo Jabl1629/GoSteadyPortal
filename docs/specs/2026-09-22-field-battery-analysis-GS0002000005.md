@@ -139,7 +139,7 @@ Firmware alone therefore reaches a season, not a year, on the present cell. Sess
 
 ## 9. Battery size for one year (after optimization)
 
-Annual energy = daily × 365 plus a 0.3 Ah coverage-loss reserve (with #8 in place). Nominal capacity = that ÷ (usable depth 0.92 × 12-month self-discharge 0.85 × cold-weather 0.90 × aging 0.95 = 0.67) × 1.25 design margin, i.e. **nominal ≈ 1.87 × (annual + 0.3 Ah)** at 3.6–3.7 V.
+Annual energy = daily × 365 plus a 0.3 Ah coverage-loss reserve (with #8 in place). Nominal capacity = that ÷ (usable depth 0.92 × charge lost sitting a year 0.88 = 0.81) × 1.25 design margin, i.e. **nominal ≈ 1.54 × (annual + 0.3 Ah)** at 3.6–3.7 V. (Revised 2026-09-22 after review: the earlier 1.87 stacked self-discharge and calendar aging, which overlap — the irreversible part of self-discharge *is* calendar fade — and a cold-weather factor that does not fit a device used at home.)
 
 Worked example, Tier A midpoint (12 mAh/day):
 
@@ -148,21 +148,19 @@ Worked example, Tier A midpoint (12 mAh/day):
 | Electronics draw over 365 days | 12 mAh × 365 | 4.35 |
 | + reserve for coverage-loss episodes (with the offline back-off in place) | + 0.3 | 4.65 — what the pack must actually deliver |
 | ÷ usable depth (stop at 3.3 V under load, keep 2 % for the ship-mode beacon) | ÷ 0.92 | 5.05 |
-| ÷ self-discharge over a year on one charge (Li-ion ≈ 1.5–3 %/month, front-loaded) | ÷ 0.85 | 5.95 |
-| ÷ cold-weather capacity loss (outdoor walks near 0 °C) | ÷ 0.90 | 6.61 |
-| ÷ calendar aging over the year | ÷ 0.95 | 6.96 — nominal with zero safety margin |
-| × design margin for model uncertainty (±30 % on connect energy and floor) | × 1.25 | **8.7 nominal** |
+| ÷ charge lost sitting a year on one charge — reversible self-discharge **and** calendar fade together (Li-ion at room temperature, ≈ 10–15 %) | ÷ 0.88 | 5.74 — best estimate, no margin |
+| × design margin for model uncertainty (connect energy at cell edge, floor residual, user variance ±30 %) | × 1.25 | **7.2 nominal** |
 
-Indoor-only use drops the cold factor (×1.68 overall instead of 1.87); a pack that is topped up mid-year drops most of the self-discharge term.
+A pack topped up mid-year loses most of the sitting-loss term. The margin is a policy choice: without it, Tier A is a ~5.7 Ah pack.
 
 | Tier | Annual (Ah) | **Nominal pack** | Energy | Example |
 |---|---|---|---|---|
-| A (hourly heartbeat) | 4.0–4.7 | **≈ 8–9.5 Ah** | ~33 Wh | 2 × 21700 (4–5 Ah) in parallel, ~140 g |
-| B (2-h heartbeat) | 2.9–3.7 | **≈ 6–7.5 Ah** | ~26 Wh | 2 × 18650 (3.5 Ah) or one 7 Ah pouch (~60 × 90 × 10 mm) |
-| C (6-h heartbeat) | 2.5–2.9 | **≈ 5–6 Ah** | ~21 Wh | 2 × 18650 (3.0 Ah) or one 6 Ah pouch |
-| Today's firmware, LED off only | 14.6 (+1.5 offline) | ≈ 30 Ah | 110 Wh | not a product — the LED alone is ~10 % |
+| A (hourly heartbeat) | 4.0–4.7 | **≈ 6.5–7.5 Ah** (5.3–6.2 without margin) | ~26 Wh | 2 × 18650 (3.5 Ah) or one 7 Ah pouch, ~100 g |
+| B (2-h heartbeat) | 2.9–3.7 | **≈ 5–6 Ah** (4.0–4.9 without margin) | ~20 Wh | one 21700 (5 Ah) is the no-margin point; 2 × 18650 (3 Ah) with margin |
+| C (6-h heartbeat) | 2.5–2.9 | **≈ 4.5–5 Ah** (3.5–4.0 without margin) | ~17 Wh | one 21700 (5 Ah) |
+| Today's firmware, LED off only | 14.6 (+1.5 offline) | ≈ 25 Ah | 90 Wh | not a product — the LED alone is ~10 % |
 
-**The pivot is #1.** If the 0.6 mA floor is hardware rather than the console (e.g. the nRF5340 bridge or a regulator left on), add 0.5 mA × 8,760 h = 4.4 Ah/year → **+8 Ah nominal**: Tier B becomes a ~16 Ah pack. A 10-minute bench measurement decides between an 8 Ah and a 16 Ah battery.
+**The pivot is #1.** If the 0.6 mA floor is hardware rather than the console (e.g. the nRF5340 bridge or a regulator left on), add 0.5 mA × 8,760 h = 4.4 Ah/year → **+7 Ah nominal**: Tier B becomes a ~12 Ah pack. A 10-minute bench measurement decides between an 8 Ah and a 16 Ah battery.
 
 Primary-cell options (the PRD's "replaceable" direction): a D-size Li-SOCl₂ (3.6 V, 17 Ah, ~61 Wh) with a hybrid-layer capacitor for LTE bursts covers Tier A with margin and is swapped yearly; 6 × lithium AA (L91, 3S2P ≈ 31 Wh) covers Tier B; alkaline AA is unsuitable under LTE-M pulse loads. Any of these replaces the nPM1300 Li-ion charge path with a buck/boost front end — a hardware change, not a firmware one.
 
