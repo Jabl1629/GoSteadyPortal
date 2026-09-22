@@ -18,9 +18,6 @@ Someone set up a **GoSteady** device for **{walker}** and invited you to help ke
 **What you'll be able to see**
 You'll get a simple picture of **{walker}'s** activity — things like how far they go, how long they're active, and how it's trending — plus their device's health (battery, signal). You get this because **{walker}'s household invited you**; access is theirs to give, and to take away.
 
-**This is {walker}'s personal information — please treat it that way**
-What you see is **{walker}'s** private activity information. Use it to support and encourage them — **not** to share, post, screenshot, or use it for anything they wouldn't want. If you no longer should have access, an Admin can remove you, and you can leave anytime.
-
 **Assistance alerts**
 If you turn them on, GoSteady will **call and text you when {walker} presses their assistance button**, with their location when it's available. These are automated calls and texts, and you can turn them off anytime.
 
@@ -76,5 +73,5 @@ Wired in the D2C join flow ([`d2c-care-circle.md`](d2c-care-circle.md) §5.3 / �
 - **Rendering:** Part 1 becomes the Flutter join-agreement panel (reused shape with the walker signup panel, `deviceType`-neutral — a caregiver may follow a rollator user). Part 2 goes into `web/terms.html` after sign-off.
 
 ## Changelog
-- **2026-09-22** — **Assistance alerts + on-demand GPS (PRD V2.3 §5).** Part 1 gains "Assistance alerts" (opt-in automated calls + texts with location when the walker presses the button), the emergency block becomes "Family, not 911" (members decide the response, including calling 911 — AST-SW-07), and "no GPS" becomes "GPS only on an assistance press or test." In-app panel updated to match (bold lead-ins); shared `agreementVersion` → `2026-09-22`. The TCPA consent itself is captured at the per-member prefs enable (FA §8), not at join. Still pending the same counsel pass.
+- **2026-09-22** — **Assistance alerts + on-demand GPS (PRD V2.3 §5).** Part 1 gains "Assistance alerts" (opt-in automated calls + texts with location when the walker presses the button), the emergency block becomes "Family, not 911" (members decide the response, including calling 911 — AST-SW-07), and "no GPS" becomes "GPS only on an assistance press or test." In-app panel updated to match (bold lead-ins); shared `agreementVersion` → `2026-09-22`. The "Keep it private" point (don't share/post/screenshot) was **dropped at operator request** — the use-only-to-support obligation still rides the acknowledgment line ("…and to use {walker}'s information only to support them"). The TCPA consent itself is captured at the per-member prefs enable (FA §8), not at join. Still pending the same counsel pass.
 - **2026-07-18** — Initial draft. Caregiver / Care Circle member plain-language agreement + a Terms clause, companion to the walker agreement. Framed for the invited `family_viewer`: read-only, revocable, use-only-to-support, not-for-emergencies; acknowledgment recorded on accept.

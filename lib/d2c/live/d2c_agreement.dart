@@ -100,11 +100,6 @@ class D2CAgreementPanel extends StatelessWidget {
                 'activity and device health, read-only.',
           ),
           (
-            'Keep it private.',
-            "This is $_who's personal information. Use it to support them — not "
-                'to share, post, or screenshot.',
-          ),
-          (
             'Assistance alerts.',
             'If you turn them on, GoSteady will call and text you when $_who '
                 'presses their assistance button, with their location when '
