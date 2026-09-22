@@ -1113,51 +1113,72 @@ class _SheetScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
-    return Container(
-      decoration: const BoxDecoration(
-        color: AppTheme.warmWhite,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      padding: EdgeInsets.fromLTRB(24, 12, 24, 24 + bottomInset),
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: AppTheme.border,
-                  borderRadius: BorderRadius.circular(100),
+    final media = MediaQuery.of(context);
+    final bottomInset = media.viewInsets.bottom;
+    // Capped below full height so the scrim stays visible above the sheet.
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxHeight: media.size.height * 0.9),
+      child: Container(
+        decoration: const BoxDecoration(
+          color: AppTheme.warmWhite,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        padding: EdgeInsets.fromLTRB(24, 12, 24, 24 + bottomInset),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AppTheme.border,
+                    borderRadius: BorderRadius.circular(100),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              title,
-              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w600,
+              const SizedBox(height: 20),
+              // Scrolls once the form outgrows the sheet — on a phone the
+              // browser chrome (+ the demo banner, + the keyboard) leaves too
+              // little height, and the Send button was clipped out of reach.
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context)
+                            .textTheme
+                            .headlineMedium
+                            ?.copyWith(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w600,
+                            ),
+                      ),
+                      if (subtitle != null) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          subtitle!,
+                          style: const TextStyle(
+                            color: AppTheme.textSoft,
+                            fontSize: 14,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 22),
+                      child,
+                    ],
                   ),
-            ),
-            if (subtitle != null) ...[
-              const SizedBox(height: 6),
-              Text(
-                subtitle!,
-                style: const TextStyle(
-                  color: AppTheme.textSoft,
-                  fontSize: 14,
-                  height: 1.4,
                 ),
               ),
             ],
-            const SizedBox(height: 22),
-            child,
-          ],
+          ),
         ),
       ),
     );
