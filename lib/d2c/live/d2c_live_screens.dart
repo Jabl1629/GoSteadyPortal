@@ -890,15 +890,27 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
     }
     setState(() => _busy = true);
     try {
-      await widget.auth.signUp(
-        name: _name.text,
-        phone: phone,
-        email: _email.text.trim().isEmpty ? null : _email.text,
-      );
+      var existing = false;
+      try {
+        await widget.auth.signUp(
+          name: _name.text,
+          phone: phone,
+          email: _email.text.trim().isEmpty ? null : _email.text,
+        );
+      } on D2CAccountExistsException {
+        // The number already has an account — typically an earlier sign-up
+        // that stopped at the code screen. The code proves the phone, so just
+        // sign in; the claim / invite-accept after it runs the same either way.
+        existing = true;
+      }
       // The pool auto-confirms the account — straight to SMS-OTP, no email
       // confirmation step (phone-first, d2c-phone-only-signin.md).
       final challenge = await widget.auth.startSignIn(phone);
       if (!mounted) return;
+      if (existing) {
+        _snack(context,
+            'This number already has an account — we texted you a code to sign in.');
+      }
       final q = StringBuffer('phoneHint=${Uri.encodeComponent(challenge.phoneHint)}');
       if (widget.walkerId != null) q.write('&walkerId=${Uri.encodeComponent(widget.walkerId!)}');
       if (widget.joinInviteId != null) {

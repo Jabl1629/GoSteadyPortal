@@ -142,6 +142,11 @@ class D2CAuthService extends AuthServiceInterface {
         userAttributes: attrs,
       );
     } on CognitoClientException catch (ex) {
+      // The phone is the username, so "exists" always means the phone — an
+      // unverified duplicate email doesn't fail sign-up in this pool.
+      if (ex.code == 'UsernameExistsException') {
+        throw D2CAccountExistsException(_friendlyMessage(ex.code, ex.message));
+      }
       throw AuthException(_friendlyMessage(ex.code, ex.message));
     } catch (ex) {
       throw AuthException(ex.toString());
@@ -449,6 +454,13 @@ class D2CAuthService extends AuthServiceInterface {
         return message ?? 'Something went wrong. Please try again.';
     }
   }
+}
+
+/// Thrown by [D2CAuthService.signUp] when the phone already has an account.
+/// Callers can continue with [D2CAuthService.startSignIn] — the SMS code
+/// proves the phone, so a repeated sign-up is just a sign-in.
+class D2CAccountExistsException extends AuthException {
+  const D2CAccountExistsException(super.message);
 }
 
 /// The pending SMS-OTP challenge returned by [D2CAuthService.startSignIn].

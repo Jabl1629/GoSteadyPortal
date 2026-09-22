@@ -457,3 +457,13 @@ rework later). Done in code:
   web` clean; public-lookup live-smoke green. Two findings logged in §9
   (two-code first-timer flow; read-path battery/90-day gaps). Full
   end-to-end remains gated on the Twilio secret (item 4).
+- **2026-09-22** — **"Create your account" falls through to sign-in when the
+  phone already has an account.** A sign-up that stopped at the code screen
+  (account created, code never entered) left the number stranded: retrying
+  "Create your account" hit `UsernameExistsException` → "An account with that
+  phone already exists." Now `D2CAuthService.signUp` throws a typed
+  `D2CAccountExistsException`, and the sign-up screen continues straight to
+  `startSignIn` (the SMS code proves the phone; the claim / invite-accept after
+  it is unchanged) with a "we texted you a code to sign in" note. Safe to key
+  on the code alone: the phone is the username, and a duplicate *unverified*
+  email does not fail `SignUp` in this pool (verified on the dev pool).
