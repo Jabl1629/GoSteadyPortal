@@ -91,3 +91,65 @@ The §C38 bench projection for this build was 58–89 days; the field delivers 2
 1 + 3 + 4 together plausibly double life to ~60 days; months require rethinking connection cadence (e.g. 6-h heartbeats with PSM ≈ 100 d), which is a product trade against offline detection.
 
 **Cloud-only quick win:** emit `battery_mv` (already in every heartbeat/Shadow) as a per-device metric next to `BatteryPct`, so future curves are read in volts without the OCV-table artefacts.
+
+---
+
+## 7. Calibrated energy model (fleet cross-check, 2026-09-22 later)
+
+Adding the other six units (four production, two bench; 455-day hourly history) separates the three costs the single-device data could not:
+
+| Evidence | Value |
+|---|---|
+| **Idle floor** — GS0002000003 / GS0002000004 sat unactivated for 56–58 days (24-h safety-net heartbeat only, 1.8–2.5 hb/day, no walking): 1.15 and 1.06 pts/day | **≈ 14 mAh/day ≈ 0.6 mA**, 24/7 — vs the ≈ 0.05–0.07 mA the shipping-mode design (§C40) assumed |
+| **Per heartbeat connect** — bench units GS9999999981/98 at 24 hb/day and 1–6 sessions/day: 1.42–1.62 pts/day (19–22 mAh) minus the floor, over 22 extra connects | **0.23–0.34 mAh** at −90…−100 dBm; GS0002000005's quiet hours give **0.35 mAh** at −108 dBm |
+| **Per session** — day-weighted fit over 10 segments, drop = 1.42 + 0.046 × sessions/day (R² 0.86); GS0002000005's own hourly split | **0.35–0.6 mAh per session** (upload connect ≈ 0.3 + sampling/LED/flash ≈ 0.1–0.15 for a 2-min session); GS0002000005 ≈ 0.45 |
+
+**GS0002000005's 44 mAh/day, decomposed:** idle floor 14 (32 %) · 24 heartbeats 8.4 (19 %) · 47 session uploads ≈ 14 (32 %) · sampling + green LED + flash ≈ 7 (16 %). The bench "58–89 days" model missed all three: the floor is 9× its assumption, connections are 70/day not 32, and each costs the top of its range at cell edge.
+
+**Why the floor is 0.6 mA (leading suspect, config-confirmed, bench-unverified):** the deployed image (`build_rollator_gs0002000005/gosteady-firmware/zephyr/.config`) has `CONFIG_SERIAL=y`, `CONFIG_UART_CONSOLE=y`, `CONFIG_LOG_BACKEND_UART=y`, `CONFIG_UART_INTERRUPT_DRIVEN=y` and no `CONFIG_PM_DEVICE` — the console UARTE stays enabled with RX armed, which on nRF91 keeps the high-frequency clock domain up at roughly 0.4–0.7 mA. That alone matches the measured floor minus the expected ~0.07 mA of PSM modem + PMIC + ADXL367 + bridge MCU. Verify before betting the battery size on it (§9). Also confirmed from the config: no RAI (`CONFIG_LTE_RAI_REQ` unset), system mode `LTE_M_NBIOT_GPS` (offline searches sweep NB-IoT too), PSM requested 3 h / 2 s, eDRX not requested.
+
+## 8. Highest-value optimizations (GS0002000005 profile: 47 sessions, 90 walking-min, cell-edge signal)
+
+| # | Change | Mechanism | Saving (mAh/day) | Cost / risk |
+|---|---|---|---|---|
+| 1 | **Field builds: console/UART off** (`CONFIG_SERIAL=n`, `UART_CONSOLE=n`, `LOG_BACKEND_UART=n`, or `PM_DEVICE` + suspend uart0 after boot); keep RTT/flash forensics | 0.6 → ~0.1 mA floor | **−11 to −12** (−27 %) | Loses the bench console in field images (use a bench overlay). Must be measured (§9). |
+| 2 | **Batch session uploads into the heartbeat** — session end writes a ~256 B derived record to a flash queue; the hourly connect drains it. This is the §C62 fix. | −45 connects/day × ~0.3 mAh | **−13** (−30 %) | Data latency ≤ 1 h. Sessions survive reboot; removes the offline-crash path. |
+| 3 | **RAI on the last publish + TLS session resumption** on the remaining connects | shorter RRC tail, no full handshake | **−3** (0.35 → ~0.22 mAh/connect) | AS-RAI needs Rel-14 support at the carrier; resumption is a modem socket option. |
+| 4 | **Heartbeat 1 h → 2 h** | 12 fewer connects | **−2.6** (after #3) | Offline/dead detection 2 h → 4 h, downlink cmd latency ≤ 2 h. |
+| 5 | **Session LED duty-cycled** (100 ms per 2 s) instead of solid | ~2 mA × 90 min | **−2.7** | Cue kept. |
+| 6 | **Session hysteresis** `AUTO_STOP_STATIONARY_S` 15 → 60–120 s | 47 → ~15–20 sessions/day | −1 after #2 (−8 without it) | Mainly data quality (whole walks, not 0.8-min fragments). |
+| 7 | Gyro off during sessions (algorithm is accel-only) | BMI270 ~0.4 mA × 1.5 h | −0.6 | none |
+| 8 | **Offline back-off + low-battery policy** (sleep the modem 15–30 min between failed attaches; ≤ 5 % uploads off / 6-h heartbeat; ≤ 2 % final heartbeat + nPM1300 ship mode) | stops the 8 mA offline drain (≈ 250 mAh per 60 days at this site ≈ 1.5 Ah/year) and the brownout boot loop | 0 steady-state; **≈ −4/day equivalent** here | Mandatory for any one-year claim; also protects the cell. |
+| 9 | Heartbeat 2 h → 6 h (product decision) | 4 connects/day | −1.8 more | Dead-device detection 12 h. |
+
+**Resulting daily budgets** (idle residual 0.1–0.15 mA, connect 0.22 mAh, sampling 3 mAh, LED 0.3, time-sync/fuel-gauge/ADXL ≈ 1):
+
+| Tier | Contents | mAh/day | On today's 1350 mAh cell |
+|---|---|---|---|
+| Today | as deployed | 44 | 29 d (measured) |
+| A | #1 #2 #3 #5 #6 #7 #8, hourly heartbeat | **12–15** | ~90–110 d |
+| B | A + 2-h heartbeat (#4) | **9–12** | ~110–150 d |
+| C | B + 6-h heartbeat (#9) | **7–10** | ~135–190 d |
+
+Firmware alone therefore reaches a season, not a year, on the present cell. Session count stops mattering once uploads are batched; walking minutes (sampling) and signal (connect energy) remain the user-dependent terms.
+
+## 9. Battery size for one year (after optimization)
+
+Annual energy = daily × 365 plus a 0.3 Ah coverage-loss reserve (with #8 in place). Nominal capacity = that ÷ (usable depth 0.92 × 12-month self-discharge 0.85 × cold-weather 0.90 × aging 0.95 = 0.67) × 1.25 design margin, i.e. **nominal ≈ 1.87 × (annual + 0.3 Ah)** at 3.6–3.7 V.
+
+| Tier | Annual (Ah) | **Nominal pack** | Energy | Example |
+|---|---|---|---|---|
+| A (hourly heartbeat) | 4.4–5.5 | **≈ 9–11 Ah** | ~37 Wh | 2 × 21700 (5 Ah) in parallel, ~140 g |
+| B (2-h heartbeat) | 3.3–4.4 | **≈ 7–9 Ah** | ~30 Wh | 2 × 18650 (3.5 Ah) or one 8 Ah pouch (~65 × 95 × 10 mm) |
+| C (6-h heartbeat) | 2.6–3.7 | **≈ 5.5–7.5 Ah** | ~24 Wh | 2 × 18650 (3.0–3.5 Ah) |
+| Today's firmware, for reference | 16 (+1.5 offline) | ≈ 33 Ah | 120 Wh | not a product |
+
+**The pivot is #1.** If the 0.6 mA floor is hardware rather than the console (e.g. the nRF5340 bridge or a regulator left on), add 0.5 mA × 8,760 h = 4.4 Ah/year → **+8 Ah nominal**: Tier B becomes a ~16 Ah pack. A 10-minute bench measurement decides between an 8 Ah and a 16 Ah battery.
+
+Primary-cell options (the PRD's "replaceable" direction): a D-size Li-SOCl₂ (3.6 V, 17 Ah, ~61 Wh) with a hybrid-layer capacitor for LTE bursts covers Tier A with margin and is swapped yearly; 6 × lithium AA (L91, 3S2P ≈ 31 Wh) covers Tier B; alkaline AA is unsuitable under LTE-M pulse loads. Any of these replaces the nPM1300 Li-ion charge path with a buck/boost front end — a hardware change, not a firmware one.
+
+## 10. What to measure this week (cheap, decisive)
+
+1. **Idle floor on the bench:** a unit on battery (`vbus=0`), activated, no motion, between heartbeats — read the nPM1300 `AVG_CURRENT` line the `LOW_POWER` build already logs, then flash the same image with `CONFIG_SERIAL=n`/`UART_CONSOLE=n` and compare via a PPK2 or the Shadow slope over 48 h. Expect 0.6 mA → ≤ 0.1 mA.
+2. **Per-connect energy at cell edge:** PPK2 trace of one heartbeat at −105…−110 dBm, with and without RAI/TLS resumption.
+3. **Cycle 3 tracking on GS0002000005:** 3.80 V ≈ Sep 29, 3.69 V ≈ Oct 6, dead ≈ Oct 16 — an early death confirms cell damage from the brownout episodes and argues for #8 first.

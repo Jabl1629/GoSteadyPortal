@@ -10490,3 +10490,15 @@ Entry owner: Claude (single session over both repos) | Trigger: Jace asked for a
 `AWS_PROFILE=gosteady AWS_REGION=us-east-1` (aws-login session on 460223323193; the `default` profile's static key is dead). Per-device metrics need **both** dimensions `serial` + `service=gosteady-prod-heartbeat-processor`. Shadow carries `battery_mv`/`boot_count`/`fault_counters`; `gosteady-prod-audit` (90 d) carries `device.battery_swapped` with boot counts; `gosteady-prod-activity.deviceSessionKey` = `serial#boot_count#uptime_ms`. No pandoc/LibreOffice/matplotlib on the Mac — analysis was pure-python over the JSON pulls.
 
 *Entry owner: Claude (2026-09-22). No code change; docs + this entry only.*
+
+## C66.5 — Addendum (same day): calibrated model, optimization plan, one-year battery size
+
+Cross-checked against the other six units (portal spec §7–§10):
+
+- **Idle floor is 0.6 mA, not 0.06.** GS0002000003/04 sat unactivated 56–58 days with only the daily safety-net heartbeat and still lost 1.06–1.15 pts/day (≈ 14 mAh/day). Deployed `.config` has `CONFIG_SERIAL=y` + `UART_CONSOLE=y` + `LOG_BACKEND_UART=y` + `UART_INTERRUPT_DRIVEN=y`, no `PM_DEVICE` → console UARTE armed 24/7 (leading suspect; bench-verify with the nPM1300 `AVG_CURRENT` log or a PPK2).
+- **Per connect 0.23–0.35 mAh** (bench units at −90…−100 dBm vs GS05 at −108); **per session 0.35–0.6 mAh** (fleet fit drop = 1.42 + 0.046·sessions/day, R² 0.86). GS05's 44 mAh/day = floor 14 + 24 heartbeats 8 + 47 uploads 14 + sampling/LED 7.
+- **Plan (mAh/day saved, GS05 profile):** console/UART off in field builds −11…12; batch uploads into the heartbeat (= §C62 derived-record queue) −13; RAI + TLS resumption −3; LED duty-cycle −2.7; 2-h heartbeat −2.6; session hysteresis (data quality) ~−1; offline back-off + low-battery ship-mode (mandatory; ≈ 1.5 Ah/yr at GS05's site otherwise). **Tier A ≈ 12–15 mAh/day (~100 d on 1350 mAh), Tier B (2-h hb) ≈ 9–12, Tier C (6-h hb) ≈ 7–10.**
+- **One-year pack (nominal ≈ 1.87 × annual, incl. depth/self-discharge/cold/aging/25 % margin):** Tier A **9–11 Ah**, Tier B **7–9 Ah**, Tier C **5.5–7.5 Ah** at 3.7 V (24–37 Wh). If the 0.6 mA floor turns out to be hardware, add ~8 Ah. Primary alternative: D-size Li-SOCl₂ + HLC (61 Wh) or 6× lithium AA; alkaline unsuitable.
+- **Cloud-side ask stands:** emit `battery_mv` per device. **Firmware asks in order:** (1) `CONFIG_SERIAL=n`-class field overlay + bench measurement, (2) derived-record queue + heartbeat-batched uploads, (3) RAI/TLS resumption, (4) low-battery + offline policies, (5) LED duty cycle, (6) auto-stop hysteresis.
+
+*Addendum owner: Claude (2026-09-22, later). No code change.*
