@@ -130,6 +130,31 @@ class _PrimaryButton extends StatelessWidget {
   }
 }
 
+/// Full-width outlined companion to [_PrimaryButton] — same height + radius so
+/// a stacked primary/secondary pair reads as one set.
+class _SecondaryButton extends StatelessWidget {
+  const _SecondaryButton({required this.label, required this.onPressed});
+
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 52,
+      child: OutlinedButton(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppTheme.sageDark,
+          side: const BorderSide(color: AppTheme.border, width: 1.5),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+        onPressed: onPressed,
+        child: Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+      ),
+    );
+  }
+}
+
 String _errText(Object e) =>
     e is AuthException ? e.message : (e is ApiException ? e.message : 'Something went wrong. Please try again.');
 
@@ -216,129 +241,268 @@ class _D2CSetupLandingScreenState extends State<D2CSetupLandingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return _OnboardScaffold(
-      title: 'Set up your walker',
-      children: [
-        FutureBuilder<PublicWalkerLookup>(
-          future: _future,
-          builder: (context, snap) {
-            if (snap.connectionState != ConnectionState.done) {
-              return const Padding(
-                padding: EdgeInsets.symmetric(vertical: 32),
-                child: Center(child: CircularProgressIndicator()),
-              );
-            }
-            if (snap.hasError) {
-              return _Message(
-                icon: Icons.wifi_off_rounded,
-                text: "Couldn't reach GoSteady. Check your connection and try again.",
-              );
-            }
-            final lookup = snap.data!;
-            // DT-4: device-appropriate noun — a rollator isn't a "walker".
-            final noun =
-                lookup.deviceType == 'rollator_platform' ? 'rollator' : 'walker';
-            switch (lookup.status) {
-              case PublicWalkerStatus.unclaimed:
-              case PublicWalkerStatus.reserved:
-                // Reserved (claim-binding §5.5): the device is held for a
-                // specific phone. Show WHO it's for + an explicit question,
-                // so a claim is never silent — the button IS the confirm.
-                final reserved =
-                    lookup.status == PublicWalkerStatus.reserved;
-                final mask = lookup.recipientMask ?? '';
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _Message(
-                      icon: reserved
-                          ? Icons.phone_iphone
-                          : Icons.check_circle_outline,
-                      text: reserved
-                          ? (mask.isEmpty
-                              ? 'This $noun is reserved. Set it up with the '
-                                  'phone number it was registered for.'
-                              : 'This $noun is reserved for the phone ending in '
-                                  '$mask. Enter that number to set it up — '
-                                  "we'll text a code to verify it.")
-                          : 'This $noun is ready to set up.',
-                    ),
-                    const SizedBox(height: 20),
-                    if (widget.signedIn)
-                      // Already signed in → claim directly (their verified
-                      // phone is enforced against the binding server-side). The
-                      // user-agreement is re-shown on every claim/rotation (NOT
-                      // on a plain sign-in) — device changes are rare, so a
-                      // fresh acknowledgment each time is cheap and honest. The
-                      // claim button is the clickwrap; claim() records the
-                      // acknowledged version server-side (d2c-user-agreement.md).
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          D2CAgreementPanel(
-                            audience: AgreementAudience.walker,
-                            deviceNoun: noun,
-                          ),
-                          const SizedBox(height: 16),
-                          _PrimaryButton(
-                            label: reserved
-                                ? 'Yes — set up this $noun'
-                                : 'Claim this $noun',
-                            busy: _claiming,
-                            onPressed: _claimNow,
-                          ),
-                        ],
-                      )
-                    else if (reserved)
-                      // Reserved + new user: collect the phone HERE so the
-                      // account page is name + email only (§5.5).
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          _field(_phone,
-                              label: 'Your mobile number',
-                              keyboard: TextInputType.phone),
-                          _PrimaryButton(
-                            label: 'Continue',
-                            onPressed: () => _continueReserved(noun, mask),
-                          ),
-                        ],
-                      )
-                    else
-                      _PrimaryButton(
-                        label: 'Get started',
-                        onPressed: () => context.go(
-                          '/sign-up?walkerId=${Uri.encodeComponent(widget.walkerId)}',
+    return _SetupLandingScaffold(
+      child: FutureBuilder<PublicWalkerLookup>(
+        future: _future,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const Padding(
+              padding: EdgeInsets.symmetric(vertical: 48),
+              child: Center(child: CircularProgressIndicator(color: AppTheme.sage)),
+            );
+          }
+          if (snap.hasError) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const _SetupHero(
+                  icon: Icons.wifi_off_rounded,
+                  title: "Can't reach GoSteady",
+                  body: 'Check your connection and try again.',
+                ),
+                const SizedBox(height: 28),
+                _PrimaryButton(
+                  label: 'Try again',
+                  onPressed: () => setState(() {
+                    _future = widget.repository.lookupWalker(widget.walkerId);
+                  }),
+                ),
+              ],
+            );
+          }
+          final lookup = snap.data!;
+          // DT-4: device-appropriate noun — a rollator isn't a "walker".
+          final noun =
+              lookup.deviceType == 'rollator_platform' ? 'rollator' : 'walker';
+          switch (lookup.status) {
+            case PublicWalkerStatus.unclaimed:
+            case PublicWalkerStatus.reserved:
+              // Reserved (claim-binding §5.5): the device is held for a
+              // specific phone. Show WHO it's for + an explicit question,
+              // so a claim is never silent — the button IS the confirm.
+              final reserved =
+                  lookup.status == PublicWalkerStatus.reserved;
+              final mask = lookup.recipientMask ?? '';
+              final String body;
+              if (!reserved) {
+                body = widget.signedIn
+                    ? 'This $noun is ready to set up. Review the notes '
+                        'below, then connect it to your account.'
+                    : 'This $noun is ready to set up. Create a GoSteady '
+                        'account to connect it and start seeing activity.';
+              } else if (mask.isEmpty) {
+                body = 'This $noun is reserved. Set it up with the phone '
+                    'number it was registered for.';
+              } else if (widget.signedIn) {
+                body = 'This $noun is reserved for the phone ending in $mask.';
+              } else {
+                body = 'This $noun is reserved for the phone ending in '
+                    "$mask. Enter that number and we'll text a code to "
+                    'verify it.';
+              }
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _SetupHero(
+                    icon: reserved
+                        ? Icons.phone_iphone_rounded
+                        : Icons.check_rounded,
+                    title: 'Set up your $noun',
+                    body: body,
+                  ),
+                  const SizedBox(height: 28),
+                  if (widget.signedIn)
+                    // Already signed in → claim directly (their verified
+                    // phone is enforced against the binding server-side). The
+                    // user-agreement is re-shown on every claim/rotation (NOT
+                    // on a plain sign-in) — device changes are rare, so a
+                    // fresh acknowledgment each time is cheap and honest. The
+                    // claim button is the clickwrap; claim() records the
+                    // acknowledged version server-side (d2c-user-agreement.md).
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        D2CAgreementPanel(
+                          audience: AgreementAudience.walker,
+                          deviceNoun: noun,
                         ),
+                        const SizedBox(height: 16),
+                        _PrimaryButton(
+                          label: reserved
+                              ? 'Yes — set up this $noun'
+                              : 'Claim this $noun',
+                          busy: _claiming,
+                          onPressed: _claimNow,
+                        ),
+                      ],
+                    )
+                  else if (reserved)
+                    // Reserved + new user: collect the phone HERE so the
+                    // account page is name + email only (§5.5).
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        _field(_phone,
+                            label: 'Your mobile number',
+                            keyboard: TextInputType.phone),
+                        _PrimaryButton(
+                          label: 'Continue',
+                          onPressed: () => _continueReserved(noun, mask),
+                        ),
+                      ],
+                    )
+                  else
+                    _PrimaryButton(
+                      label: 'Get started',
+                      onPressed: () => context.go(
+                        '/sign-up?walkerId=${Uri.encodeComponent(widget.walkerId)}',
                       ),
-                    if (!widget.signedIn)
-                      TextButton(
-                        onPressed: () => context.go('/sign-in'),
-                        child: const Text('I already have an account'),
-                      ),
+                    ),
+                  if (!widget.signedIn) ...[
+                    const SizedBox(height: 12),
+                    _SecondaryButton(
+                      label: 'I already have an account',
+                      onPressed: () => context.go('/sign-in'),
+                    ),
                   ],
-                );
-              case PublicWalkerStatus.claimed:
-                // Post-allocation, the persistent QR is the way back in —
-                // text a login code to the registered number, or pick a Care
-                // Circle member (d2c-qr-relogin).
-                return _ClaimedReloginView(
-                  walkerId: widget.walkerId,
-                  repository: widget.repository,
-                  noun: noun,
-                );
-              case PublicWalkerStatus.decommissioned:
-                return _Message(
-                  icon: Icons.block,
-                  text: 'This $noun has been retired and can no longer be set up.',
-                );
-              case PublicWalkerStatus.unknown:
-                return _Message(
-                  icon: Icons.help_outline,
-                  text: "This link doesn't look right. Double-check the code on your $noun's sticker.",
-                );
-            }
-          },
+                ],
+              );
+            case PublicWalkerStatus.claimed:
+              // Post-allocation, the persistent QR is the way back in —
+              // text a login code to the registered number, or pick a Care
+              // Circle member (d2c-qr-relogin).
+              return _ClaimedReloginView(
+                walkerId: widget.walkerId,
+                repository: widget.repository,
+                noun: noun,
+              );
+            case PublicWalkerStatus.decommissioned:
+              return _SetupHero(
+                icon: Icons.block_rounded,
+                title: 'This $noun is retired',
+                body: 'It has been taken out of service and can no longer '
+                    'be set up.',
+              );
+            case PublicWalkerStatus.unknown:
+              return _SetupHero(
+                icon: Icons.help_outline_rounded,
+                title: "We couldn't find this $noun",
+                body: "This link doesn't look right. Double-check the code "
+                    "on your $noun's sticker.",
+              );
+          }
+        },
+      ),
+    );
+  }
+}
+
+/// Chrome for the public QR landing: brand mark on top, then the state's
+/// content, all on one centered axis. Deliberately NOT [_OnboardScaffold] —
+/// that one is a left-aligned form layout, and mixing its title with centered
+/// status content is what made the landing look misaligned.
+class _SetupLandingScaffold extends StatelessWidget {
+  const _SetupLandingScaffold({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppTheme.warmWhite,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(24, 32, 24, 40),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const _BrandMark(),
+                  const SizedBox(height: 48),
+                  child,
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// GoSteady mark + wordmark — same treatment as the facility top bar and the
+/// userdemo splash.
+class _BrandMark extends StatelessWidget {
+  const _BrandMark();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: AppTheme.sage,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: const Icon(Icons.accessibility_new_rounded, color: Colors.white, size: 20),
+        ),
+        const SizedBox(width: 10),
+        Text(
+          'GoSteady',
+          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                fontSize: 22,
+                fontWeight: FontWeight.w600,
+                color: AppTheme.textDark,
+              ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Icon disc + centered serif title + supporting line — the header of every
+/// QR-landing state.
+class _SetupHero extends StatelessWidget {
+  const _SetupHero({required this.icon, required this.title, required this.body});
+
+  final IconData icon;
+  final String title;
+  final String body;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          width: 76,
+          height: 76,
+          decoration: BoxDecoration(
+            color: AppTheme.sage.withOpacity(0.12),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(icon, size: 38, color: AppTheme.sage),
+        ),
+        const SizedBox(height: 24),
+        Text(
+          title,
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                fontSize: 28,
+                height: 1.2,
+                fontWeight: FontWeight.w600,
+                color: AppTheme.textDark,
+              ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          body,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 16, color: AppTheme.textSoft, height: 1.5),
         ),
       ],
     );
@@ -453,9 +617,10 @@ class _ClaimedReloginViewState extends State<_ClaimedReloginView> {
         final recipients = snap.data ?? const <WalkerRecipient>[];
         if (snap.hasError || recipients.isEmpty) {
           // Nothing to sign into from here (unowned, or no accounts yet).
-          return _Message(
-            icon: Icons.lock_outline,
-            text: 'This ${widget.noun} is already set up. Open the GoSteady '
+          return _SetupHero(
+            icon: Icons.lock_outline_rounded,
+            title: 'Already set up',
+            body: 'This ${widget.noun} is already set up. Open the GoSteady '
                 'app and sign in with your phone number to see activity.',
           );
         }
@@ -469,24 +634,28 @@ class _ClaimedReloginViewState extends State<_ClaimedReloginView> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _Message(
-              icon: Icons.lock_outline,
-              text: 'This ${widget.noun} is set up. Get back in and we\'ll '
-                  'text you a login code.',
+            _SetupHero(
+              icon: Icons.lock_outline_rounded,
+              title: 'Welcome back',
+              body: "This ${widget.noun} is already set up. We'll text you a "
+                  'login code to get back in.',
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 28),
             _PrimaryButton(
-              label: "That's me — text a code to ${primary.mask}",
+              // Kept to one line at phone width — the fixed-height button
+              // clips a wrapped label. "I'm in the Care Circle" below is the
+              // "not me" branch, so the "that's me" framing is implied.
+              label: 'Text a login code to ${primary.mask}',
               busy: _sending,
               onPressed: () => _sendCode(primary),
             ),
             if (others.isNotEmpty) ...[
               const SizedBox(height: 12),
               if (!_showCircle)
-                TextButton(
+                _SecondaryButton(
+                  label: "I'm in the Care Circle",
                   onPressed:
                       _sending ? null : () => setState(() => _showCircle = true),
-                  child: const Text("I'm in the Care Circle"),
                 )
               else ...[
                 const SizedBox(height: 4),
