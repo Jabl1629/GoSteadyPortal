@@ -1,6 +1,6 @@
 # Family Assistance Alert — button → speaker → cloud → Care Circle voice + SMS (umbrella spec)
 
-> **Status:** 🟡 **Draft v0.4 — 2026-09-18 (evening).** **Direction change:** the DFR0534 speaker is retired (size + BOM; family-only notification does not need speech). Feedback is now a **SparkFun Qwiic Buzzer** on the P1 Qwiic connector: **20 s of beeps before the request goes out; press-and-hold 3 s cancels.** Firmware feedback layer + hold-to-cancel state machine written and compiling (coord §C64); buzzer on order; the speaker path stays selectable as an archived option (bench-proven, §C63.6). PRD V2.3 amendment text in §15. No cloud code. Written against **PRD V2.2 Draft (2026-09-18) §5** (the product authority for this feature) and the repo evidence surveyed the same day (firmware `main`@`55dbf92`, portal `feature/infra-scaffold`@`1f2c784`).
+> **Status:** 🟡 **Draft v0.4 — 2026-09-18 (evening); PRD V2.3 Draft applied 2026-09-22 (§15).** **Direction change:** the DFR0534 speaker is retired (size + BOM; family-only notification does not need speech). Feedback is now a **SparkFun Qwiic Buzzer** on the P1 Qwiic connector: **20 s of beeps before the request goes out; press-and-hold 3 s cancels.** Firmware feedback layer + hold-to-cancel state machine written and compiling (coord §C64); buzzer on order; the speaker path stays selectable as an archived option (bench-proven, §C63.6). PRD V2.3 amendment text in §15. No cloud code. Written against **PRD V2.2 Draft (2026-09-18) §5** (the product authority for this feature) and the repo evidence surveyed the same day (firmware `main`@`55dbf92`, portal `feature/infra-scaffold`@`1f2c784`).
 > **Scope:** A deliberate assistance button on the rollator device that (1) gives the walker user audible feedback through a small buzzer, (2) publishes an assistance request with best-available location over LTE-M, and (3) makes the cloud **concurrently call (Retell) and text (Twilio) every enrolled Care Circle member**, tracking delivery and acknowledgement in a durable incident record. **Care Circle only — no monitoring center, no EMS dispatch, no fall detection.**
 > **Spans:** firmware (`gosteady-firmware`), cloud (`infra/`), consumer app (`lib/d2c/`), hardware prototype (Thingy:91 X + SparkFun Qwiic Buzzer BOB-24474).
 > **Depends on (deployed):** Core Device Contract v1 (`activate`/`wipe` cmds, `last_cmd_id` echo, connection-coordinator), 1A/1B ingestion, D2C auth pool + claim, Care Circle (`d2c-care-circle.md`), Twilio SMS (`_shared/sms.py`), 1.7 audit, 2A-AA ack.
@@ -32,16 +32,16 @@ The walker user presses the large actuator on the cupholder. The device chirps b
 
 ---
 
-## 1. Requirements traceability (PRD V2.2 §5 → this spec)
+## 1. Requirements traceability (PRD V2.3 §5 → this spec)
 
 | PRD ID | Requirement (abridged) | Where satisfied | Phase |
 |---|---|---|---|
 | AST-HW-01 | One large tactile actuator mechanically operating the Thingy:91 X center button | §4.2 (Button 1 = SW3 on P0.26; also the MCUboot recovery button — §4.6) | FA-0 (mech: enclosure track) |
 | AST-HW-02 | Resist false actuation during rolling/braking/transport | §5.2 debounce + deliberate-press gesture; §10 T-rows; enclosure track | FA-6 |
-| AST-HW-03 | ~~Speaker: intelligible speech~~ → **buzzer with distinct cadences** for countdown / cancel / ack / test / fault (PRD V2.3 amendment, §15) | §4 Qwiic Buzzer; §5.3 pattern set | FA-0/FA-1 |
-| AST-HW-04 | Ingress/cleaning/structure preserved with actuator + sound opening | Enclosure track (out of firmware/cloud scope; listed as gate) | FA-6 |
+| AST-HW-03 | ~~Speaker: intelligible speech~~ → **buzzer with distinct cadences** for countdown / cancel / ack / test / fault (PRD V2.3) | §4 Qwiic Buzzer; §5.3 pattern set | FA-0/FA-1 |
+| AST-HW-04 | Ingress/cleaning/structure preserved with actuator + buzzer sound port (PRD V2.3) | Enclosure track (out of firmware/cloud scope; listed as gate) | FA-6 |
 | AST-FW-01 | Validated press → Assistance Pending; start LTE + GNSS work; 20 s cancel window | §5.2 state machine (**hold 3 s to cancel**); §5.5 GNSS/LTE coexistence (why "LTE first, GNSS after ack") | FA-1 |
-| AST-FW-02 | ~~Exact spoken prompts, second-press cancel~~ → **beep cadence phases at T0/T10/T17, press-and-hold 3 s cancels with distinct feedback** (§15) | §5.2 timeline, §5.3 patterns | FA-1 |
+| AST-FW-02 | ~~Exact spoken prompts, second-press cancel~~ → **beep cadence phases at T0/T10/T17, press-and-hold 3 s cancels with distinct feedback** (PRD V2.3) | §5.2 timeline, §5.3 patterns | FA-1 |
 | AST-FW-03 | Publish `assistance_request` with incident id, identity, timestamps, battery/radio, best location | §5.4 payload contract | FA-1/FA-2 |
 | AST-FW-04 | Confirmation feedback only after **authenticated** ack that cloud durably accepted + started workflow; bounded retry + failure feedback; priority over routine traffic | §5.4 ack semantics; §5.3 confirmed/failed patterns; §6.3 dispatcher ordering; §5.10 priority path | FA-1/FA-2 |
 | AST-FW-05 | No fix ⇒ still send; send stale fix with age; `location_status` acquiring/unavailable; follow-up location update | §5.5 location ladder; §6.3 `event:location` | FA-5 |
@@ -575,12 +575,15 @@ Facility portal: none in v1 (L11).
 | 2026-09-18 | Claude (with Jace) | v0.2: P1 topology resolved from the PCA20065 v2.0.0 schematic (EXP_BOARD_PIN1 = P0.19, PIN2 = P0.18; R1 confirmed, D15); bench harness built in firmware (`prj_assist_bench.conf`, overlay, `assist.c`, `audio_dfr0534.c`, prompt set + loader); Wi-Fi scan positioning proposed (§5.5, D16); Q1/Q2/Q7 answered, Q3 updated |
 | 2026-09-18 | Claude (with Jace) | v0.3: button → speaker proven on the bench (SB8/SB9 cut, sensors intact, module boot 570 ms, factory clips through the full 20 s sequence); canonical mapping corrected to TX = P0.18 / RX = P0.19 (DFRobot `T`/`R` are host-side labels); §4.3 HW-0 result, §5.2 timeline, §9 FA-0 updated |
 | 2026-09-18 | Claude (with Jace) | **v0.4 — direction change:** speaker retired for a SparkFun Qwiic Buzzer on P1 (D17); 20 s beep countdown, **press-and-hold 3 s cancels** (D18); §4 rewritten (buzzer register map, i2c2 vs bit-bang overlays, no cutting), §5.1–5.3/5.7–5.9 rewritten (feedback abstraction, cadence timeline, pattern set), tests/risks/questions updated (Q16 voice-in-V1?, Q17 loudness), §15 PRD V2.3 amendment text added. Firmware feedback layer + state machine written and compiling (coord §C64) |
+| 2026-09-22 | Claude (with Jace) | **PRD V2.3 Draft created** from V2.2 by applying §15 (rows verbatim + the implied consistency edits listed there); §1 traceability retargeted to PRD V2.3; V2.2 docx left untouched |
 
 ---
 
-## 15. PRD V2.3 amendment (proposed text, 2026-09-18)
+## 15. PRD V2.3 amendment (proposed 2026-09-18 — **applied 2026-09-22**)
 
-Replace/append in `GoSteady PRD V2.2 Draft - Rollator and Family Assistance.docx` §5 (all rows stay `PROPOSED — FAMILY ASSISTANCE`):
+**Applied:** `GoSteady PRD V2.3 Draft - Rollator and Family Assistance.docx` (iCloud `Documents/GoSteady/`, created from V2.2, which is left untouched) carries every row below, plus the consistency edits those rows imply: the document-field table (version `2.3 Draft`, revision date and decision cutoff 2026-09-22, revision scope), the DEV-09 qualification (`speaker` → `buzzer` in the energy budget), the qualification columns of AST-HW-03 / AST-FW-02 / AST-FW-04 (speech-intelligibility wording → loudness / cadence / tone wording), the §7 gate bullet "intelligible speaker" → "buzzer", the §8 mapping header (`V2.3 disposition`), and a §10 revision-history row. §2.1 / §3 voice-call + SMS outreach is untouched (Q16 still open).
+
+Original proposal, kept for the record — replace/append in `GoSteady PRD V2.2 Draft - Rollator and Family Assistance.docx` §5 (all rows stay `PROPOSED — FAMILY ASSISTANCE`):
 
 | ID | Proposed V2.3 requirement text |
 |---|---|

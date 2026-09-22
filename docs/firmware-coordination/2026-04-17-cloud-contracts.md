@@ -10430,8 +10430,26 @@ superseded pending Jace's docx edit.
 
 **Open (Jace):** Q16 — is the Retell voice call still in V1 next to SMS (the
 pivot note said "sending the text out")? Q17 — loudness target / app-selectable
-volume. Retell number still pending. PRD V2.3 docx edit per spec §15.
+volume. Retell number still pending. ~~PRD V2.3 docx edit per spec §15~~ — done 2026-09-22 (§C65).
 
 ---
 
 *Entry owner: Claude (2026-09-18). Firmware compiles; nothing flashed with a buzzer yet; no cloud code, no deploy.*
+
+---
+
+# C65 — PRD V2.3 Draft created: buzzer + press-and-hold cancel now in the PRD (2026-09-22)
+
+Entry owner: Claude (single session over both repos) | Trigger: Jace asked for the spec-§15 amendment to be applied inline and saved as V2.3.
+
+**What:** `GoSteady PRD V2.3 Draft - Rollator and Family Assistance.docx` now sits next to V2.2 in the iCloud `Documents/GoSteady/` folder (V2.2 untouched). Built by editing the V2.2 package XML directly (python-docx-generated file, single-run cells), XSD-validated against the original, re-read through the macOS docx importer.
+
+**Rows applied verbatim from spec §15:** AST-HW-03 (small buzzer, distinct beep patterns, spoken prompts not required), AST-HW-04 (sound port / acoustic membrane for the buzzer), AST-FW-02 (acknowledgement beep → 1 beep/s → double beeps after 10 s → rapid beeps in the last 3 s; **press-and-hold 3 s cancels at any time, including the initial press**, with a steady hold tone and a falling cancel tone), AST-FW-04 (rising confirmation tone only after authenticated ack; distinct failure tone), AST-FW-06 (test mode covers the buzzer; test-complete tone distinct from live), §6 new exclusion row (spoken prompts / speech output — out of scope for V1), §7 gate bullet rewritten (20 s beep countdown with 10 s / 3 s cadence changes, 3 s press-and-hold cancel, confirmation/failure tones) + new gate (buzzer loudness and beep-pattern recognizability validated with older adults through the production enclosure).
+
+**Consistency edits the rows imply (not in §15's table, called out so nobody hunts for them):** document-field table (`2.3 Draft`, revision date + decision cutoff 2026-09-22, revision scope = "replace speaker/spoken prompts with buzzer/beep cadences, second-press cancel with 3 s press-and-hold; retain V2.2 Care Circle-only alert + V2.1 baseline"); DEV-09 qualification `speaker` → `buzzer`; AST-HW-03 / AST-FW-02 / AST-FW-04 qualification columns (speech-intelligibility wording → loudness / cadence / tone wording; "the phrase confirms" → "the tone confirms"); §7 bullet "intelligible speaker" → "buzzer"; §8 header `V2.3 disposition`; §10 revision-history row for 2.3 Draft. All status cells stay `PROPOSED — FAMILY ASSISTANCE`.
+
+**Untouched on purpose:** §2.1 / §3 / §5.3 voice-call + SMS outreach (Q16 — is the Retell call still in V1 — remains open), GNSS rows, PERS exclusions.
+
+**Docs in lockstep:** spec §1 retargeted to PRD V2.3, §15 marked applied, §14 changelog row; ARCHITECTURE §12 FA paragraph + spec-index row refreshed (they still described the speaker and "nothing implemented"); firmware `GOSTEADY_CONTEXT.md` latest pointer → §C65.
+
+*Entry owner: Claude (2026-09-22). No code change in either repo.*
