@@ -190,3 +190,23 @@ Envelope from Jace: lies flat, ideally square, **10–15 mm thick, footprint dia
 Catalog data quality: table rows with truncated lengths and one capacity that the product page contradicts. Treat catalog capacities as typical at 0.2 C; the 25 % design margin in §9 absorbs a 5–10 % real-capacity shortfall. Custom shapes: vendor MOQ 5–10 k pcs per model — not for this phase.
 
 **Fit against §9:** a 5–5.5 Ah pouch covers Tier B/C with full margin and Tier A without margin (5.3–6.2 Ah needed). 7 Ah (2P 18650) covers Tier A with margin at 19 mm height. 8 Ah at ≤ 15 mm means accepting a ~90 mm diagonal.
+
+### 11.1 Relaxed envelope: diagonal < 90 mm, target ~8 Ah (2026-09-22, later)
+
+Physics at 450–550 Wh/L inside a 90 mm diagonal: ≤ 6.4–7.8 Ah at 13 mm, ≤ 7.4–9.0 Ah at 15 mm. No catalog (LiPol/lipobatteries.net family, Ufine, lipobattery.us, Alibaba/Benzo; Grepow and DNK are not scrapeable) lists a single ≤ 15 mm pouch that reaches 8 Ah inside 90 mm — the closest is 7.8 Ah at 91.7 mm. 8–10 Ah inside 90 mm exists only as two stacked cells at 17–22 mm.
+
+| Option | Ah / Wh | T × W × L (mm) | Diag | Height | Notes |
+|---|---|---|---|---|---|
+| LiPol **LP135570** | 7.0 / 25.9 | 13 × 55 × 70 | 89.0 | 13 | 517 Wh/L (credible); catalog row only, no product page — quote/datasheet on request; ~110 g |
+| LiPol **LP125871** | 7.8 / 28.9 | 12 × 58 × 71 | **91.7** | 12 | 584 Wh/L; 1.7 mm over the diagonal; catalog row only |
+| LiPol LP126365 | 6.5 / 24.1 | 12 × 63 × 65 | 90.5 | 12 | nearly square; 489 Wh/L (most credible density) |
+| Ufine **125565** | 6.0 / 22.2 | 12 × 55 × 65 (max) | 85.1 | 12 | product page: PCM, 110 g, 1.2 A std, 500-cycle table, 4.2 V/2.75 V |
+| LiPol LP124770 | 5–6 | 12 × 47 × 70 | 84.3 | 12 | table 6 Ah, product page 5 Ah |
+| **Ufine 955565-2P** (two 9.5 mm cells) | **10.0 / 37** | 19 × 55 × 65 (max) | 85.1 | 19 | standard product: PCM, 153 g, 2 A std charge/discharge, 4.2 V |
+| 2 × LiPol LP785767 stacked | 10.0 / 37 | ~17 × 57 × 67 | 88.0 | ~17 | thinnest 10 Ah stack; cell claims 621 Wh/L (optimistic — plan on ~9 Ah); vendor assembles 2P at MOQ 5 |
+| Ufine 225060 | 9.0 / 33.3 | 22 × 50 × 60 (max) | 78.1 | 22 | 9 Ah inside an 80 mm diagonal; 167 g |
+| 2 × 21700 side by side (Samsung 50S / LG M50LT / Molicel P50B) | 10.0 / 36 | ~22 × 44 × 72 | 84 | 22 | premium cells with real datasheets, ~145 g with PCM |
+| 3 × 18650 (3.5 Ah) | 10.5 / 38 | ~19 × 56 × 67 | 87 | 19 | |
+| LiPol 2P 18650 (stocked) | 7.0 / 25.9 | 19 × 37 × 67 | 77 | 19 | 140 g, PCM + JST PHR-2 |
+
+Recommendation: if the cupholder can take 17–19 mm, **Ufine 955565-2P (10 Ah, 85 mm)** or the 2 × LP785767 stack — 10 Ah is ~1.4× the Tier A design point and absorbs the real-world uncertainty Jace flagged. If height is capped at 13 mm, **LP135570 (7 Ah, 89 mm)** is the only near-8 Ah single inside 90 mm; LP125871 (7.8 Ah) if 92 mm is tolerable.
