@@ -169,3 +169,24 @@ Primary-cell options (the PRD's "replaceable" direction): a D-size Li-SOCl₂ (3
 1. **Idle floor on the bench:** a unit on battery (`vbus=0`), activated, no motion, between heartbeats — read the nPM1300 `AVG_CURRENT` line the `LOW_POWER` build already logs, then flash the same image with `CONFIG_SERIAL=n`/`UART_CONSOLE=n` and compare via a PPK2 or the Shadow slope over 48 h. Expect 0.6 mA → ≤ 0.1 mA.
 2. **Per-connect energy at cell edge:** PPK2 trace of one heartbeat at −105…−110 dBm, with and without RAI/TLS resumption.
 3. **Cycle 3 tracking on GS0002000005:** 3.80 V ≈ Sep 29, 3.69 V ≈ Oct 6, dead ≈ Oct 16 — an early death confirms cell damage from the brownout episodes and argues for #8 first.
+
+## 11. Candidate cells for the current cupholder (2026-09-22)
+
+Envelope from Jace: lies flat, ideally square, **10–15 mm thick, footprint diagonal < 80 mm** (the 10 Ah LP146079, 14 × 60 × 80, diagonal 100 mm, forced a redesign). Sources: lipobatteries.net catalog (244 models, all listing pages merged), its sister sites (lipolbattery.com, li-polymer-battery.com), lipobattery.us, DNK Power, Alibaba/Benzo listings.
+
+**Physics first.** The vendor's own catalog runs 460–620 Wh/L (median 548). A 57 × 57 mm square (diagonal 80) holds 4.7–5.7 Ah at 12 mm, 5.8–7.1 Ah at 15 mm, 7.8–9.5 Ah at 20 mm. **No single pouch delivers 8 Ah at ≤ 15 mm inside an 80 mm diagonal**; the 8–9 Ah cells Jace spotted (LP125678 12 × 56 × 78 and LP126074 12 × 60 × 75) both have a 96 mm diagonal, and LP126074's implied 625–633 Wh/L is at the very top of the catalog — treat as optimistic.
+
+| Option | Capacity | T × W × L (mm) | Diag | Credibility / notes |
+|---|---|---|---|---|
+| **LP124861** pouch | 5.0 Ah (18.5 Wh) | 12 × 48 × 62 | 78 | Has a product page (weight 100 g incl. PCM, MOQ 5, PCM + wires), cross-listed on sister sites, 527 Wh/L — the safe buy-now pouch |
+| LP124962 pouch | 5.5 Ah | 12 × 49 × 62 | 79 | Catalog-only row (no page, no datasheet listing); 558 Wh/L plausible |
+| LP105555 pouch | 5.0 Ah | 10 × 55 × 55 | 78 | Most square; catalog-only; 612 Wh/L is top-decile — verify |
+| LP115453 / LP105359 / LP134663 pouch | 5.0 Ah | 11 × 54 × 53 / 10 × 53 × 59 / 13 × 46 × 63 | 76 / 79 / 78 | Catalog-only; LP134663 (491 Wh/L) most conservative |
+| **2P 18650 (LP18650A+ ×2)** | 7.0 Ah (25.9 Wh) | 19 × 37 × 67 | 77 | Stocked pack, 140 g, PCM + JST PHR-2 — Tier A with full margin, but 19 mm tall |
+| 2 × LP105555 / 2 × LP115453 stacked (vendor assembles 2P) | 10 Ah | ~21 × 55 × 55 / ~22 × 54 × 53 | 78 / 76 | Covers every tier with margin; needs 21–22 mm height |
+| 2 × 21700 side by side | 10 Ah | ~22 × 44 × 72 | 84 | Slightly over the diagonal |
+| Near misses at ≤ 15 mm | LP105265 5.6 Ah 10 × 52 × 65 (83); LP124770 12 × 47 × 70 (84; table says 6 Ah, **its product page says 5 Ah**); LP135570 7 Ah 13 × 55 × 70 (89) | | | Diagonal 83–89 — the redesign question |
+
+Catalog data quality: table rows with truncated lengths and one capacity that the product page contradicts. Treat catalog capacities as typical at 0.2 C; the 25 % design margin in §9 absorbs a 5–10 % real-capacity shortfall. Custom shapes: vendor MOQ 5–10 k pcs per model — not for this phase.
+
+**Fit against §9:** a 5–5.5 Ah pouch covers Tier B/C with full margin and Tier A without margin (5.3–6.2 Ah needed). 7 Ah (2P 18650) covers Tier A with margin at 19 mm height. 8 Ah at ≤ 15 mm means accepting a ~90 mm diagonal.
