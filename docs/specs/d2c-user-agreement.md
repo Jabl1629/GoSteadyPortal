@@ -21,11 +21,14 @@ GoSteady is a small device that attaches to your walker or rollator. It notices 
 **What GoSteady does**
 Your GoSteady device measures how you get around — things like how far you go, how long you're active, and how quickly you move. It shows you and your chosen family a simple picture of your day and how it's trending.
 
-**What it measures — and what it doesn't**
-The device only senses *movement*. It has **no microphone, no camera, and no GPS** — it doesn't listen, watch, or track where you are.
+**Asking for help**
+Once assistance alerts are set up, you can press the **assistance button** on your rollator. It beeps for 20 seconds, then GoSteady **calls and texts your Care Circle** and shares where you are. To cancel, **hold the button down for 3 seconds**.
 
-**It's not a doctor, and it's not for emergencies**
-GoSteady is a wellness and activity product. It is **not a medical device**, it can't diagnose or treat anything, and it does **not** detect falls or emergencies. **If you ever feel unwell, hurt, or unsafe, call 911 or a family member right away** — don't wait on the app.
+**What it measures — and what it doesn't**
+The device senses *movement*. It has **no microphone and no camera** — it doesn't listen or watch. It uses **GPS only when the assistance button is pressed or tested**, to help your Care Circle find you. It **never tracks where you go**.
+
+**Family, not 911**
+Assistance alerts go to **your family — not to 911 or a monitoring center** — and someone may not answer. GoSteady is a wellness and activity product. It is **not a medical device or a medical alert service**, it can't diagnose or treat anything, and it does **not** detect falls. **If you ever feel unwell, hurt, or unsafe, call 911** — don't wait on the app.
 
 **Meet Steady, your activity coach**
 GoSteady includes **Steady**, an automated coaching feature.
@@ -115,6 +118,7 @@ The published [terms.html](../../web/terms.html) and [privacy.html](../../web/pr
 - **Rendering:** Part 1 becomes a Flutter setup screen (the D2C onboarding flow) and, optionally, a plain `web/welcome.html` companion page; Part 2 edits go into the existing `web/*.html` after sign-off.
 
 ## Changelog
+- **2026-09-22** — **Assistance button + on-demand GPS (PRD V2.3 §5 / [family-assistance-alert.md](family-assistance-alert.md) §7).** Part 1 gains "Asking for help" (20 s beep countdown → Care Circle call + text; hold 3 s to cancel), "no GPS" becomes "GPS only on an assistance press or test, never tracking," and the emergency block becomes "Family, not 911" (no monitoring center, no guaranteed answer — AST-SW-07). "Once … set up" keeps it true before a household is armed (AST-SW-05). The in-app panel (`d2c_agreement.dart`) now renders a bold lead-in per point; `agreementVersion` → **`2026-09-22`**. Published legal pages amended to match, both copies (gosteady.co via GoSteadyWeb + `web/` served at app./dev.portal.): Terms gain §5 "Assistance alerts & location" + automated-call consent in §4 + PERS/911 disclaimer; Privacy discloses on-demand location + assistance records + voice/mapping processors; consumer SMS terms add the optional assistance-alert category. **`web/sms-consent.html` (Twilio proof-of-consent) deliberately unchanged** until the assistance opt-in UI exists (FA-4). Part 2c's "walker cap" genericization done in the same pass. Still pending counsel (Q11 + FA Q13).
 - **2026-07-20** — **Agreement now shows on every device claim/rotation, not just first-time signup** (prod + dev). Previously the `D2CAgreementPanel` clickwrap rendered only on the "Create your account" screen, so an already-signed-in owner **rotating/claiming** a device skipped it (they took the "Claim this device" direct path). Now the panel renders above that claim button too — the claim button is the clickwrap — personalized to the device noun (walker/rollator). NOT shown on a plain sign-in (device changes are rare; a fresh acknowledgment per claim is cheap). `claim()` records the acknowledged `agreementVersion` server-side regardless (`d2c-claim/handler.py`). Also: the coach it references is now the **"activity coach"** (persona rename).
 - **2026-07-18** — Genericized on form factor: "walker cap" → "GoSteady device," neutral attach verb, dropped walker-only "steps" from the metric examples (rollators report distance/active-time/pace); added a per-`deviceType` render note and a Part 2 item (2c) to genericize the same "smart walker cap" language in the published Terms/Privacy — the trial is rollator-focused.
 - **2026-07-18** — Initial draft. Plain-language whole-product agreement for the setup/demo read-through + coach clauses for the existing Terms/Privacy. Authored after confirming the three published legal pages already exist (effective 2026-06-01) and identifying the coach coverage gap.

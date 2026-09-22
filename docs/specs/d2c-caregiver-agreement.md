@@ -21,8 +21,11 @@ You'll get a simple picture of **{walker}'s** activity — things like how far t
 **This is {walker}'s personal information — please treat it that way**
 What you see is **{walker}'s** private activity information. Use it to support and encourage them — **not** to share, post, screenshot, or use it for anything they wouldn't want. If you no longer should have access, an Admin can remove you, and you can leave anytime.
 
-**It's not a doctor, and it's not for emergencies**
-GoSteady is a wellness and activity product. It is **not a medical device**, it can't diagnose or treat anything, and it does **not** detect falls or emergencies — it won't alert you if something goes wrong in the moment. **If you're ever worried {walker} is unwell, hurt, or unsafe, call them or 911 right away** — don't wait on the app.
+**Assistance alerts**
+If you turn them on, GoSteady will **call and text you when {walker} presses their assistance button**, with their location when it's available. These are automated calls and texts, and you can turn them off anytime.
+
+**Family, not 911**
+GoSteady **doesn't contact 911 or a monitoring center**, and it does **not** detect falls — it won't alert you if something goes wrong unless {walker} presses the button. It is **not a medical device or a medical alert service**. When {walker} asks for help, **you decide what to do — including calling 911**. **If you're ever worried {walker} is unwell, hurt, or unsafe, call them or 911 right away** — don't wait on the app.
 
 **What you can do**
 You can **view** {walker}'s activity and **acknowledge a notification** to note you've seen it (for example, "I called Mom"). Acknowledging is just a note for the family — it is **not** a medical or clinical action, and it doesn't dispatch help. Managing the device, the Care Circle, and settings stays with the household's Admin(s).
@@ -31,7 +34,7 @@ You can **view** {walker}'s activity and **acknowledge a notification** to note 
 We'll text a code to your phone when you sign in, a note confirming your access, and — if you'd like — occasional updates about {walker}'s activity. **Reply STOP** to any text to stop them. Message and data rates may apply. We **never** sell or share your number.
 
 **What GoSteady measures — and what it doesn't**
-The device only senses *movement*. It has **no microphone, no camera, and no GPS** — it doesn't listen, watch, or track anyone's location.
+The device senses *movement*. It has **no microphone and no camera**. It uses **GPS only when the assistance button is pressed or tested** — it never tracks where {walker} goes.
 
 **Your information**
 To give you access we keep your name and mobile number, and a record that you joined this Care Circle. Your information is **encrypted** and access is limited. We **do not sell your information. Ever.** You can ask us to delete it, and you can leave the Care Circle, at any time.
@@ -73,4 +76,5 @@ Wired in the D2C join flow ([`d2c-care-circle.md`](d2c-care-circle.md) §5.3 / �
 - **Rendering:** Part 1 becomes the Flutter join-agreement panel (reused shape with the walker signup panel, `deviceType`-neutral — a caregiver may follow a rollator user). Part 2 goes into `web/terms.html` after sign-off.
 
 ## Changelog
+- **2026-09-22** — **Assistance alerts + on-demand GPS (PRD V2.3 §5).** Part 1 gains "Assistance alerts" (opt-in automated calls + texts with location when the walker presses the button), the emergency block becomes "Family, not 911" (members decide the response, including calling 911 — AST-SW-07), and "no GPS" becomes "GPS only on an assistance press or test." In-app panel updated to match (bold lead-ins); shared `agreementVersion` → `2026-09-22`. The TCPA consent itself is captured at the per-member prefs enable (FA §8), not at join. Still pending the same counsel pass.
 - **2026-07-18** — Initial draft. Caregiver / Care Circle member plain-language agreement + a Terms clause, companion to the walker agreement. Framed for the invited `family_viewer`: read-only, revocable, use-only-to-support, not-for-emergencies; acknowledgment recorded on accept.

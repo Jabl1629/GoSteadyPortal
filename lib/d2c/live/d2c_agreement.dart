@@ -41,38 +41,98 @@ class D2CAgreementPanel extends StatelessWidget {
           ? walkerName!.trim()
           : 'your family member';
 
-  List<String> get _points => audience == AgreementAudience.walker
+  /// [_who] at the start of a sentence ("Your family member's household…").
+  String get _whoStart => _who[0].toUpperCase() + _who.substring(1);
+
+  /// (bold lead-in, plain body) per point. The assistance + location points
+  /// track PRD V2.3 §5 (Family Assistance Alert): GPS only on a button press
+  /// or test, family notification only — never 911 / a monitoring center
+  /// (AST-SW-07). "Once … set up" keeps the copy true before the feature is
+  /// armed for a household (AST-SW-05 gates it on consent + a contact).
+  List<(String, String)> get _points => audience == AgreementAudience.walker
       ? [
-          'GoSteady notices how much you move each day, so you — and the '
-              'family you choose — can see how your walking is going.',
-          "It's not a doctor and it's not for emergencies. It does not detect "
-              'falls. If you ever feel unwell, hurt, or unsafe, call 911 or a '
-              'family member right away — don\'t wait on the app.',
-          'No microphone, camera, or GPS — the $deviceNoun only senses '
-              'movement.',
-          "We'll text a code when you sign in, and — if you'd like — occasional "
-              'notes about your activity. Reply STOP anytime. We never sell '
-              'your number.',
-          'You choose who sees your information, and you can remove them '
-              'anytime. We never sell your information.',
-          'You can ask us to delete your data and stop using GoSteady whenever '
-              'you want. You should be 18 or older to set up an account.',
+          (
+            'Your activity.',
+            'GoSteady notices how much you move each day, so you — and the '
+                'family you choose — can see how your walking is going.',
+          ),
+          (
+            'Asking for help.',
+            'Once assistance alerts are set up, press the assistance button on '
+                'your $deviceNoun. It beeps for 20 seconds, then GoSteady calls '
+                'and texts your Care Circle. To cancel, hold the button down for '
+                '3 seconds.',
+          ),
+          (
+            'Your location.',
+            'GPS is used only when the assistance button is pressed or tested '
+                '— to help your Care Circle find you. It never tracks where you '
+                "go. There's no microphone or camera.",
+          ),
+          (
+            'Family, not 911.',
+            'Alerts go to your family — not to 911 or a monitoring center — and '
+                "someone may not answer. GoSteady isn't a doctor and doesn't "
+                'detect falls. In an emergency, call 911.',
+          ),
+          (
+            'Text messages.',
+            "We'll text a code when you sign in, and — if you'd like — "
+                'occasional notes about your activity. Reply STOP anytime. We '
+                'never sell your number.',
+          ),
+          (
+            'Who sees it.',
+            'You choose who sees your information, and you can remove them '
+                'anytime. We never sell your information.',
+          ),
+          (
+            'Your choices.',
+            'You can ask us to delete your data and stop using GoSteady '
+                'whenever you want. You should be 18 or older to set up an '
+                'account.',
+          ),
         ]
       : [
-          "$_who's household invited you to see how they're getting around — "
-              'activity and device health, read-only.',
-          "This is $_who's personal information. Use it to support them — not "
-              'to share, post, or screenshot.',
-          "It's not a doctor and it's not for emergencies. It does not detect "
-              "falls. If you're ever worried $_who is unwell or unsafe, call "
-              'them or 911 right away — don\'t wait on the app.',
-          'You can view activity and acknowledge a notification (a note for '
-              'the family that you saw it — not a medical action).',
-          "We'll text you a code, a note confirming your access, and — if "
-              "you'd like — updates about $_who's activity. Reply STOP anytime. "
-              'We never sell your number.',
-          'You can leave the Care Circle anytime, and an Admin can remove you. '
-              'You should be 18 or older to join.',
+          (
+            'What you see.',
+            "$_whoStart's household invited you to see how they're getting around — "
+                'activity and device health, read-only.',
+          ),
+          (
+            'Keep it private.',
+            "This is $_who's personal information. Use it to support them — not "
+                'to share, post, or screenshot.',
+          ),
+          (
+            'Assistance alerts.',
+            'If you turn them on, GoSteady will call and text you when $_who '
+                'presses their assistance button, with their location when '
+                "it's available. These are automated calls and texts.",
+          ),
+          (
+            'Family, not 911.',
+            "GoSteady doesn't contact 911 or a monitoring center, doesn't detect "
+                "falls, and isn't a doctor. When $_who asks for help, you decide "
+                "what to do — including calling 911. If you're worried, don't "
+                'wait on the app.',
+          ),
+          (
+            'Acknowledging.',
+            'You can view activity and acknowledge a notification — a note for '
+                'the family that you saw it, not a medical action.',
+          ),
+          (
+            'Text messages.',
+            "We'll text you a code, a note confirming your access, and — if "
+                "you'd like — updates about $_who's activity. Reply STOP anytime. "
+                'We never sell your number.',
+          ),
+          (
+            'Leaving.',
+            'You can leave the Care Circle anytime, and an Admin can remove you. '
+                'You should be 18 or older to join.',
+          ),
         ];
 
   @override
@@ -98,7 +158,7 @@ class D2CAgreementPanel extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
-          for (final p in _points)
+          for (final (lead, body) in _points)
             Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: Row(
@@ -116,8 +176,16 @@ class D2CAgreementPanel extends StatelessWidget {
                     ),
                   ),
                   Expanded(
-                    child: Text(
-                      p,
+                    child: Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: '$lead ',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          TextSpan(text: body),
+                        ],
+                      ),
                       style: const TextStyle(
                         color: AppTheme.textDark,
                         fontSize: 14,
@@ -152,21 +220,31 @@ class _AcknowledgmentLine extends StatelessWidget {
     final tail = audience == AgreementAudience.walker
         ? '.'
         : ", and to use $who's information only to support them.";
-    return DefaultTextStyle(
+    // One paragraph with the links as inline spans, so it wraps like prose — a
+    // Wrap of separate Text widgets left a stray leading space on line two.
+    const link = PlaceholderAlignment.baseline;
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(text: lead),
+          const WidgetSpan(
+            alignment: link,
+            baseline: TextBaseline.alphabetic,
+            child: _LegalLink('Terms of Service', D2CLegal.termsUrl),
+          ),
+          const TextSpan(text: ' and '),
+          const WidgetSpan(
+            alignment: link,
+            baseline: TextBaseline.alphabetic,
+            child: _LegalLink('Privacy Policy', D2CLegal.privacyUrl),
+          ),
+          TextSpan(text: tail),
+        ],
+      ),
       style: const TextStyle(
         color: AppTheme.textSoft,
         fontSize: 12.5,
         height: 1.45,
-      ),
-      child: Wrap(
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          Text(lead),
-          const _LegalLink('Terms of Service', D2CLegal.termsUrl),
-          const Text(' and '),
-          const _LegalLink('Privacy Policy', D2CLegal.privacyUrl),
-          Text(tail),
-        ],
       ),
     );
   }

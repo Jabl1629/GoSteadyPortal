@@ -433,7 +433,7 @@ Canary (`assistance-canary`, EventBridge daily): creates a synthetic incident (`
 | **Dashboard** | Active-incident card pinned at top (red): timeline (requested → contacting → who answered / delivered → acknowledged), **I'm on it** and **Mark resolved**; incident location map link when available. Uses the projected Alert History row for discovery and the incident endpoint for detail |
 | **History** | Incidents list (tests labelled) with detail |
 | **Walker-user view** | `WALKER_VISIBLE_ALERT_TYPES` gains `assistance_request` so the walker sees their own request status (D8) |
-| **Onboarding / agreements** | User + caregiver agreements gain the "family notification, not emergency services; GoSteady does not contact 911" clause (AST-SW-07); TCPA consent text at prefs enable (`d2c-user-agreement.md`, `d2c-caregiver-agreement.md` amendments) |
+| **Onboarding / agreements** | User + caregiver agreements gain the "family notification, not emergency services; GoSteady does not contact 911" clause (AST-SW-07); TCPA consent text at prefs enable (`d2c-user-agreement.md`, `d2c-caregiver-agreement.md` amendments). **Agreements + published Terms/Privacy/consumer SMS terms amended 2026-09-22** (in-app panel `agreementVersion` `2026-09-22`; pending counsel Q13). The Twilio proof-of-consent page `web/sms-consent.html` is updated here, at FA-4, once the prefs-enable consent screen exists |
 | **Routes / repo** | `D2CRoutes.assistance`, `…incident/:id`; `D2CRepository` gains `assistanceStatus()`, `updateAssistancePrefs()`, `armTest()`, `incidents()`, `incident(id)`, `ackIncident()`, `closeIncident()` (mock + live) |
 
 Facility portal: none in v1 (L11).

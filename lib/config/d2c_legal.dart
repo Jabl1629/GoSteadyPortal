@@ -10,7 +10,7 @@ class D2CLegal {
 
   /// Bump when the substance of either agreement changes. Sent to the API on
   /// claim/accept and stored as `agreementVersion`. Matches the draft date.
-  static const String agreementVersion = '2026-07-18';
+  static const String agreementVersion = '2026-09-22';
 
   /// Published legal pages (live at the marketing domain). `sms-consent.html`
   /// is intentionally omitted until it's deployed there — the live Terms +

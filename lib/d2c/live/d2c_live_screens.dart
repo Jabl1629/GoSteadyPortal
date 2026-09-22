@@ -833,29 +833,35 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
   final _phone = TextEditingController();
   bool _busy = false;
   String? _reservedMask; // •••-1234 when this walker is reserved for a phone
+  String _deviceNoun = 'GoSteady device'; // agreement copy; "rollator" once known
 
   @override
   void initState() {
     super.initState();
-    // When the phone was already collected on the reserved landing we know
-    // the reservation — no lookup needed. Only retail / reload-fallback
-    // (phone field shown) benefits from the guidance hint.
-    if ((widget.prefilledPhone ?? '').trim().isEmpty) _maybeLoadReservation();
+    _loadDeviceContext();
   }
 
-  Future<void> _maybeLoadReservation() async {
+  /// Best-effort public lookup of the walker being set up: personalizes the
+  /// agreement's device noun, and — only on the retail / reload-fallback path
+  /// (phone field shown) — surfaces the reservation hint. When the phone was
+  /// already collected on the reserved landing the reservation is known.
+  Future<void> _loadDeviceContext() async {
     final repo = widget.repository;
     final wid = widget.walkerId;
     if (repo == null || wid == null || wid.isEmpty) return;
     try {
       final lookup = await repo.lookupWalker(wid);
       if (!mounted) return;
-      if (lookup.status == PublicWalkerStatus.reserved &&
-          (lookup.recipientMask ?? '').isNotEmpty) {
-        setState(() => _reservedMask = lookup.recipientMask);
-      }
+      final showHint = (widget.prefilledPhone ?? '').trim().isEmpty &&
+          lookup.status == PublicWalkerStatus.reserved &&
+          (lookup.recipientMask ?? '').isNotEmpty;
+      setState(() {
+        _deviceNoun =
+            lookup.deviceType == 'rollator_platform' ? 'rollator' : 'walker';
+        if (showHint) _reservedMask = lookup.recipientMask;
+      });
     } catch (_) {
-      // Best-effort guidance; a lookup hiccup just omits the hint.
+      // Best-effort; a lookup hiccup keeps the neutral noun and omits the hint.
     }
   }
 
@@ -951,7 +957,15 @@ class _D2CSignUpScreenState extends State<D2CSignUpScreen> {
         const SizedBox(height: 14),
         // User-agreement acknowledgment (d2c-user-agreement.md). "Continue" is
         // the clickwrap gate; the acknowledged version is recorded on claim.
-        const D2CAgreementPanel(audience: AgreementAudience.walker),
+        // An invitee arriving from /join is a Care Circle member, not the
+        // device user: they get the caregiver agreement (OTP auto-accepts the
+        // invite, so this is their only acknowledgment on this path).
+        D2CAgreementPanel(
+          audience: widget.joinInviteId != null
+              ? AgreementAudience.caregiver
+              : AgreementAudience.walker,
+          deviceNoun: _deviceNoun,
+        ),
         const SizedBox(height: 16),
         _PrimaryButton(label: 'Continue', busy: _busy, onPressed: _submit),
       ],
