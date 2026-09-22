@@ -126,14 +126,14 @@ Two-term fit across the same segments (drop = 1.38 + 0.034 × sessions/day + 0.0
 | 8 | **Offline back-off + low-battery policy** (sleep the modem 15–30 min between failed attaches; ≤ 5 % uploads off / 6-h heartbeat; ≤ 2 % final heartbeat + nPM1300 ship mode) | stops the 8 mA offline drain (≈ 250 mAh per 60 days at this site ≈ 1.5 Ah/year) and the brownout boot loop | 0 steady-state; **≈ −4/day equivalent** here | Mandatory for any one-year claim; also protects the cell. |
 | 9 | Heartbeat 2 h → 6 h (product decision) | 4 connects/day | −1.8 more | Dead-device detection 12 h. |
 
-**Resulting daily budgets** (idle residual 0.1–0.15 mA, connect 0.22 mAh, sampling 3 mAh, LED 0.3, time-sync/fuel-gauge/ADXL ≈ 1):
+**Resulting daily budgets** (LED off; idle residual 0.1–0.15 mA = 2.4–3.6; connect 0.22 mAh; recording with LED off ≈ 1.5–2.5 mA × 95 min ≈ 2–3; session overhead ≈ 0.5; time-sync/fuel-gauge/ADXL ≈ 1):
 
 | Tier | Contents | mAh/day | On today's 1350 mAh cell |
 |---|---|---|---|
 | Today | as deployed | 44 | 29 d (measured) |
-| A | #1 #2 #3 #5 #6 #7 #8, hourly heartbeat | **12–15** | ~90–110 d |
-| B | A + 2-h heartbeat (#4) | **9–12** | ~110–150 d |
-| C | B + 6-h heartbeat (#9) | **7–10** | ~135–190 d |
+| A | #1 #2 #3 #5 #6 #7 #8, hourly heartbeat | **11–13** | ~100–120 d |
+| B | A + 2-h heartbeat (#4) | **8–10** | ~130–170 d |
+| C | B + 6-h heartbeat (#9) | **7–8** | ~170–190 d |
 
 Firmware alone therefore reaches a season, not a year, on the present cell. Session count stops mattering once uploads are batched; walking minutes (sampling) and signal (connect energy) remain the user-dependent terms.
 
@@ -143,10 +143,10 @@ Annual energy = daily × 365 plus a 0.3 Ah coverage-loss reserve (with #8 in pla
 
 | Tier | Annual (Ah) | **Nominal pack** | Energy | Example |
 |---|---|---|---|---|
-| A (hourly heartbeat) | 4.4–5.5 | **≈ 9–11 Ah** | ~37 Wh | 2 × 21700 (5 Ah) in parallel, ~140 g |
-| B (2-h heartbeat) | 3.3–4.4 | **≈ 7–9 Ah** | ~30 Wh | 2 × 18650 (3.5 Ah) or one 8 Ah pouch (~65 × 95 × 10 mm) |
-| C (6-h heartbeat) | 2.6–3.7 | **≈ 5.5–7.5 Ah** | ~24 Wh | 2 × 18650 (3.0–3.5 Ah) |
-| Today's firmware, for reference | 16 (+1.5 offline) | ≈ 33 Ah | 120 Wh | not a product |
+| A (hourly heartbeat) | 4.0–4.7 | **≈ 8–9.5 Ah** | ~33 Wh | 2 × 21700 (4–5 Ah) in parallel, ~140 g |
+| B (2-h heartbeat) | 2.9–3.7 | **≈ 6–7.5 Ah** | ~26 Wh | 2 × 18650 (3.5 Ah) or one 7 Ah pouch (~60 × 90 × 10 mm) |
+| C (6-h heartbeat) | 2.5–2.9 | **≈ 5–6 Ah** | ~21 Wh | 2 × 18650 (3.0 Ah) or one 6 Ah pouch |
+| Today's firmware, LED off only | 14.6 (+1.5 offline) | ≈ 30 Ah | 110 Wh | not a product — the LED alone is ~10 % |
 
 **The pivot is #1.** If the 0.6 mA floor is hardware rather than the console (e.g. the nRF5340 bridge or a regulator left on), add 0.5 mA × 8,760 h = 4.4 Ah/year → **+8 Ah nominal**: Tier B becomes a ~16 Ah pack. A 10-minute bench measurement decides between an 8 Ah and a 16 Ah battery.
 
