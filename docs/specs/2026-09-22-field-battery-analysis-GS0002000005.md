@@ -141,6 +141,20 @@ Firmware alone therefore reaches a season, not a year, on the present cell. Sess
 
 Annual energy = daily × 365 plus a 0.3 Ah coverage-loss reserve (with #8 in place). Nominal capacity = that ÷ (usable depth 0.92 × 12-month self-discharge 0.85 × cold-weather 0.90 × aging 0.95 = 0.67) × 1.25 design margin, i.e. **nominal ≈ 1.87 × (annual + 0.3 Ah)** at 3.6–3.7 V.
 
+Worked example, Tier A midpoint (12 mAh/day):
+
+| Step | Factor | Ah |
+|---|---|---|
+| Electronics draw over 365 days | 12 mAh × 365 | 4.35 |
+| + reserve for coverage-loss episodes (with the offline back-off in place) | + 0.3 | 4.65 — what the pack must actually deliver |
+| ÷ usable depth (stop at 3.3 V under load, keep 2 % for the ship-mode beacon) | ÷ 0.92 | 5.05 |
+| ÷ self-discharge over a year on one charge (Li-ion ≈ 1.5–3 %/month, front-loaded) | ÷ 0.85 | 5.95 |
+| ÷ cold-weather capacity loss (outdoor walks near 0 °C) | ÷ 0.90 | 6.61 |
+| ÷ calendar aging over the year | ÷ 0.95 | 6.96 — nominal with zero safety margin |
+| × design margin for model uncertainty (±30 % on connect energy and floor) | × 1.25 | **8.7 nominal** |
+
+Indoor-only use drops the cold factor (×1.68 overall instead of 1.87); a pack that is topped up mid-year drops most of the self-discharge term.
+
 | Tier | Annual (Ah) | **Nominal pack** | Energy | Example |
 |---|---|---|---|---|
 | A (hourly heartbeat) | 4.0–4.7 | **≈ 8–9.5 Ah** | ~33 Wh | 2 × 21700 (4–5 Ah) in parallel, ~140 g |
