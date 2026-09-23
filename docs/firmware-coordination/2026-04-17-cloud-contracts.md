@@ -10506,3 +10506,30 @@ Cross-checked against the other six units (portal spec §7–§10):
 - **Cell sourcing (2026-09-23):** Ufine UFX955565-2P 10 Ah quoted at 19 × 55 × 68 mm (diag 87.5 — inside the 90 mm cupholder limit), $11.90 sample, no UN38.3 yet ($600/20 wd); LiPol LP146079 10 Ah (14 × 60 × 80, diag 100) $7 @ 100 pcs with UN38.3 at $1,010, invoice unpaid. Spec §11.2. Any 10 Ah pack charges in ~13–15 h on the nPM1300's 0.8 A.
 
 *Addendum owner: Claude (2026-09-22, later). No code change.*
+
+---
+
+# §C67 — [firmware] Family Assistance FA-0 hardware gate passed: Qwiic buzzer on an unmodified Thingy:91 X, deferred-send rule (2026-09-23)
+
+Entry owner: Claude (firmware session with Jace at the bench) | Trigger: buzzer in hand, plugged into P1 of GS0002000003 (retired prod unit, SB8/SB9 intact — now the bench unit). Firmware `5b0af63` + `HEAD`; spec v0.5.
+
+## C67.1 — What passed
+
+- **Buzzer:** answers the ID query 82 ms after VDD_EXP_BRD comes up (ID 0x5E, fw 1.0); boot self-test chirp; powered off between incidents.
+- **Countdown (stub cloud):** press → feedback ready +84 ms → mid-countdown +10.02 s → publish +20.03 s → ack + rising tone +22.03 s → idle. On the spec timeline to within 50 ms.
+- **Hold-to-cancel, all cases:** early hold cancels at +8.55 s; never-let-go cancels at +3.31 s; 2 s hold released → countdown continues; **hold from 18.6 s → send deferred at T20 → cancelled at +21.6 s; hold from 19.3 s released at 20.7 s → sent at +20.72 s.** Jace ran the first four on the physical button; the scripted hooks reproduced them plus the fifth.
+
+## C67.2 — Two things the bench corrected
+
+1. **Wiring truth (spec §4.2 corrected):** P1 SDA/SCL are on the 3.3 V side of the TXS0102, not the sensor bus directly. The buzzer's 2.2 kΩ pull-ups loaded the 1.8 V bus through the shifter: the master's lows went marginal and the on-board sensors (0x14 0x1d 0x76) dropped off the bus whenever the rail was on — the buzzer never ACKed. `nordic,drive-mode = <NRF_DRIVE_H0D1>` on the i2c2 pins (in `assist_buzzer_i2c2.overlay`) fixed it; scan with the rail on now shows every device. Cutting the buzzer's `I2C` jumper is optional margin. Production (discrete buzzer, D20) is unaffected.
+2. **Deferred-send rule (D21):** the first physical late-cancel test sent anyway — a hold begun at 18 s cannot reach 3 s by T20, so the last ~2.5 s were un-cancellable, contradicting AST-FW-02. `run_countdown()` now evaluates the hold before the deadline and never transmits while the button is down: release ⇒ send at once, 3 s ⇒ cancel. Bounded at 3 s. No PRD wording change needed ("at any time before transmission" is now literally true).
+
+## C67.3 — Bench tooling that landed
+
+uart1 control channel (`/dev/cu.usbmodem1105` @ 1 Mbaud, bench builds only): `PRESS` (synthetic debounced press — the raw ISR path is discarded by the 50 ms pin re-read), `HOLD <ms>` (button reads as held; compiled out under FIELD_MODE), `PING`. Console on `/dev/cu.usbmodem1102` @ 115200 with DTR. Bus-scan diagnostics in `feedback_buzzer.c` (rail on / rail off) when the buzzer does not answer, plus a scan after a good self-test. nrfutil cannot erase the nRF9151's external flash (`ext_mem_erase_mode=ERASE_NONE` only).
+
+## C67.4 — Still owed for FA-0, then FA-1
+
+Buzzer current + rail sag at volume 4 (PPK2 or the nPM1300 log), loudness through the enclosure (Q17), GNSS TTFF indoors/outdoors. Then FA-1: pending-incident persistence, real transport in `cloud.c`, `assist_ack`/`assist_arm` handling, heartbeat extras, MCUboot serial-recovery entrance off in deployment images. FA-2 (cloud pipeline) can start in parallel — nothing there depends on the buzzer.
+
+*Entry owner: Claude (2026-09-23). Firmware pushed (`main`); no cloud code.*

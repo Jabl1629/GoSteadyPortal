@@ -1,6 +1,6 @@
 # Family Assistance Alert — button → speaker → cloud → Care Circle voice + SMS (umbrella spec)
 
-> **Status:** 🟡 **Draft v0.4 — 2026-09-18 (evening); PRD V2.3 Draft applied 2026-09-22 (§15).** **Direction change:** the DFR0534 speaker is retired (size + BOM; family-only notification does not need speech). Feedback is now a **SparkFun Qwiic Buzzer** on the P1 Qwiic connector: **20 s of beeps before the request goes out; press-and-hold 3 s cancels.** Firmware feedback layer + hold-to-cancel state machine written and compiling (coord §C64); buzzer on order; the speaker path stays selectable as an archived option (bench-proven, §C63.6). PRD V2.3 amendment text in §15. No cloud code. Written against **PRD V2.2 Draft (2026-09-18) §5** (the product authority for this feature) and the repo evidence surveyed the same day (firmware `main`@`55dbf92`, portal `feature/infra-scaffold`@`1f2c784`).
+> **Status:** 🟡 **Draft v0.5 — 2026-09-23: FA-0 firmware gate passed on the bench** (unmodified GS0002000003; coord §C67): buzzer answers in 82 ms, cadence on the spec timeline, all hold-to-cancel cases pass incl. the new deferred-send rule (D21). PRD V2.3 Draft applied 2026-09-22 (§15). **Direction change:** the DFR0534 speaker is retired (size + BOM; family-only notification does not need speech). Feedback is now a **SparkFun Qwiic Buzzer** on the P1 Qwiic connector: **20 s of beeps before the request goes out; press-and-hold 3 s cancels.** Firmware feedback layer + hold-to-cancel state machine written and compiling (coord §C64); buzzer on order; the speaker path stays selectable as an archived option (bench-proven, §C63.6). PRD V2.3 amendment text in §15. No cloud code. Written against **PRD V2.2 Draft (2026-09-18) §5** (the product authority for this feature) and the repo evidence surveyed the same day (firmware `main`@`55dbf92`, portal `feature/infra-scaffold`@`1f2c784`).
 > **Scope:** A deliberate assistance button on the rollator device that (1) gives the walker user audible feedback through a small buzzer, (2) publishes an assistance request with best-available location over LTE-M, and (3) makes the cloud **concurrently call (Retell) and text (Twilio) every enrolled Care Circle member**, tracking delivery and acknowledgement in a durable incident record. **Care Circle only — no monitoring center, no EMS dispatch, no fall detection.**
 > **Spans:** firmware (`gosteady-firmware`), cloud (`infra/`), consumer app (`lib/d2c/`), hardware prototype (Thingy:91 X + SparkFun Qwiic Buzzer BOB-24474).
 > **Depends on (deployed):** Core Device Contract v1 (`activate`/`wipe` cmds, `last_cmd_id` echo, connection-coordinator), 1A/1B ingestion, D2C auth pool + claim, Care Circle (`d2c-care-circle.md`), Twilio SMS (`_shared/sms.py`), 1.7 audit, 2A-AA ack.
@@ -131,6 +131,8 @@ Dashboard renders `openAlerts` as `_AlertCard`s with an ack action; screens: das
 
 A plain Qwiic (JST-SH 4-pin) cable connects P1 to either of the buzzer's Qwiic sockets; polarity is keyed. The Qwiic-to-Gravity cable from the speaker experiment is no longer needed.
 
+**Correction from the bench (2026-09-23, §C67):** P1's SDA/SCL are *not* the sensor bus directly — they sit on the 3.3 V side of the TXS0102 (U24), whose 1.8 V side is i2c2 and whose supply is VDD_EXP_BRD. With the rail off the connector is isolated (all four on-board sensors ACK); with the rail on, the Qwiic Buzzer's 2.2 kΩ pull-ups to 3.3 V load the 1.8 V open-drain drivers through the shifter: the nRF9151's lows went marginal and the sensors (0x14 0x1d 0x76) stopped ACKing. Fix: `nordic,drive-mode = <NRF_DRIVE_H0D1>` on the i2c2 pins (`assist_buzzer_i2c2.overlay`) — afterwards every device ACKs with the rail on (`0x14 0x1d 0x34 0x6b 0x76`). Cutting the buzzer's `I2C` pull-up jumper is optional margin. Production (D20) is unaffected — no shifter, no Qwiic pull-ups.
+
 ### 4.3 What the speaker experiment established (kept for the record)
 - `EXP_BOARD_PIN1` = **P0.19**, `EXP_BOARD_PIN2` = **P0.18** (schematic PCA20065 v2.0.0) — dedicated GPIOs behind P1 pins 4/3; SB8/SB9 only bridge them onto SCL/SDA.
 - The nRF9151 has **no spare UARTE** (uart2 ↔ i2c2, uart3 ↔ spi3). Irrelevant for an I²C buzzer; it is why any UART peripheral would have needed the uart1 re-pin.
@@ -180,6 +182,7 @@ States: `IDLE → PENDING (countdown) → SENDING → AWAIT_ACK → CONFIRMED �
 | 10.0 | `PHASE_LATE` | 250 ms phase-marker beep, then a double beep per second | |
 | 17.0 | `PHASE_FINAL` | rapid 70 ms beeps every 350 ms | urgency without alarm |
 | any | **Button held ≥ 0.6 s** → steady low tone (1500 Hz) replaces the cadence; released → cadence resumes. **Held ≥ 3.0 s → CANCELLED**: falling two-note, power off, LED off, **nothing sent**. The initial press counts: never releasing it cancels at 3 s (sustained accidental pressure cannot send) | | D18 — validate with older adults (FA-6) |
+| 20.0, button down | **Never transmit while the button is held (D21):** if a hold is in progress at T20 the send is deferred — release ⇒ send at once; hold reaches 3.0 s ⇒ CANCELLED. Bounded at 3 s by construction | hold tone / rapid beeps continue | Bench 2026-09-23: hold from 18.6 s → deferred → cancelled at 21.6 s; hold from 19.3 s released at 20.7 s → sent at 20.72 s |
 | 20.0 | Build payload (§5.4), persist `/lfs/assist/pending.json` (FA-1), PUBLISH on the session opened at T0; on PUBACK → `AWAIT_ACK` | LED red+blue | |
 | 20–50 | Wait ≤ 30 s for `assist_ack` matched on `incident_id` | on ack: green LED, **rising three-note** (test mode: four notes) | Ack normally < 3 s after PUBACK |
 | ack+0 | Echo `cmd_id` in the next heartbeat; persist `acked` | | |
@@ -292,6 +295,8 @@ Rollator pilot build has ~84 KB RAM headroom. Measured 2026-09-18 on the bench b
 - Cmd dispatch runs on the `aws_iot` library thread: `assist_ack` handling only sets state and gives a semaphore; the audio prompt is played by `gs_assist`.
 
 ### 5.11 Bench/test hooks
+
+**Implemented 2026-09-23 (uart1 control channel, bench builds only):** `PRESS` → `gs_assist_inject_press()` (a synthetic debounced press; the ISR path alone is discarded because the pin re-read sees the button released); `HOLD <ms>` → `gs_assist_inject_hold()` (`button_down()` reads as held for ms; compiled out under `FIELD_MODE`); `PING`. Every countdown case in §10 runs unattended with these; physical-button holds work on top.
 - uart0 shell (bench builds): `assist press`, `assist arm on|off`, `audio play <n>`, `audio volume <v>`, `gnss fix` — the FA-1 acceptance harness.
 - Test images use a stub cloud: `infra/scripts/assist-bench-ack.py` publishes `assist_ack` via `aws iot-data publish` on observing the request (FA-1, before the dispatcher exists).
 
@@ -456,7 +461,7 @@ Facility portal: none in v1 (L11).
 
 | Phase | Scope | Exit criteria | Depends on |
 |---|---|---|---|
-| **FA-0 Hardware gate** (≈ 1 week, bench) | ~~speaker path~~ proven then **retired** (§C63.6/§C64); **buzzer feedback layer + hold-to-cancel written and compiling** (`prj_assist_bench.conf` + `assist_buzzer_*.overlay`); **next:** Qwiic Buzzer arrives → plug into P1 → flash the matching overlay → verify the cadence, hold-cancel, confirmed/cancelled tones, loudness; buzzer current + rail sag; GNSS TTFF indoors/outdoors/window (10 fixes each) | Numbers recorded in coord §C64.x; energy line in §5.8 replaced with measurements | Buzzer on order (BOB-24474 + Qwiic cable) |
+| **FA-0 Hardware gate** (≈ 1 week, bench) | ~~speaker path~~ proven then **retired** (§C63.6/§C64); **buzzer feedback layer + hold-to-cancel written and compiling** (`prj_assist_bench.conf` + `assist_buzzer_*.overlay`); **✅ firmware gate passed 2026-09-23 on unmodified GS0002000003 (§C67): buzzer ID in 82 ms, cadence on the spec timeline, all five hold-to-cancel cases;** still owed: loudness through the enclosure; buzzer current + rail sag; GNSS TTFF indoors/outdoors/window (10 fixes each) | Numbers recorded in coord §C64.x; energy line in §5.8 replaced with measurements | Buzzer on order (BOB-24474 + Qwiic cable) |
 | **FA-1 Firmware core** | `assist.c` + audio driver + button un-gate + LED + persistence/retry + `assist_ack/arm` cmd handling + heartbeat extras + MCUboot entrance fix + shell hooks; **no GNSS**; acceptance with the bench ack stub | Bench: press → prompts at 1.5/10 s → publish at 20 s → stub ack → "Contacted care circle"; cancel path; retry path with the antenna wrapped; reboot mid-`AWAIT_ACK` resumes; RAM/flash deltas recorded; 0 faults over a 24 h soak with hourly presses | FA-0 |
 | **FA-2 Cloud pipeline** | Policy + rule, incidents table, dispatcher (request/location), ack, projection, Patient/RoleAssignments fields, readiness + `assist_arm`, heartbeat/coordinator dispatch, `e2e-assistance-alert.py` (synthetic device + JWTs) | Real device: ack latency p95 < 10 s from PUBACK on dev; duplicate request ⇒ same ack; not-ready ⇒ P09 + disarm; alert card visible in the D2C app via the existing alerts read | FA-1 |
 | **FA-3 Notifications** | Notification stack real: queue, notifier (Retell + Twilio + StatusCallback), webhooks, retries, roll-up, canary, alarms, dashboard | Live two-phone test: one press ⇒ both members get a call **and** a text within 60 s of the ack; outcomes visible in the incident; voicemail + no-answer + STOP cases recorded; canary green 3 days | FA-2, Retell account + number, test numbers |
@@ -500,6 +505,17 @@ Facility portal: none in v1 (L11).
 
 ---
 
+**Bench results 2026-09-23 (GS0002000003, `prj_assist_bench.conf` + `assist_buzzer_i2c2.overlay`, stub cloud):**
+
+| Case | Log | Result |
+|---|---|---|
+| Countdown | feedback ready +84 ms, mid +10.02 s, publish +20.03 s, ack + rising tone +22.03 s | pass |
+| Cancel early (hold from 5.5 s) | cancelled at +8.55 s (3.03 s hold) | pass |
+| Never let go | cancelled at +3.31 s | pass |
+| 2 s hold, release | countdown continues, confirmed +22.05 s | pass |
+| Cancel late (hold from 18.6 s) | **failed before D21** (sent at 20.04 s); after D21: deferred at T20, cancelled at +21.6 s | pass |
+| Hold across T20, released at 20.7 s | deferred, sent at +20.72 s, confirmed +22.72 s | pass |
+
 ## 11. Decisions log
 
 | # | Decision | Alternatives | Why |
@@ -524,6 +540,7 @@ Facility portal: none in v1 (L11).
 | D18 | **Press-and-hold 3 s cancels**, at any point in the 20 s including the initial press; a steady low tone from 0.6 s signals the hold | second press (v0.1); double press | One gesture with a clear physical meaning; sustained accidental pressure can never send; a panicked hold cancels audibly and a short re-press restarts — validate in FA-6 |
 | D19 | The cut bench board keeps working via a bit-banged I²C bus on P0.18/P0.19 (`gpio-i2c`) | new Thingy:91 X now; re-solder SB8/SB9 | Same node, same driver, DT-only difference; a fresh unit is still preferred for production-representative i2c2 testing |
 | D20 | Production feedback = discrete magnetic buzzer + NPN driver on the custom PCB (GPIO/PWM), same cadence code behind the feedback abstraction | keep the Qwiic board | ~$0.50 vs ~$9, no second MCU, no I²C; the abstraction makes the swap a backend file |
+| D21 | **Never transmit while the button is held** (2026-09-23): a hold in progress at T20 defers the send until release (send at once) or cancels at 3 s | fixed T20 regardless of the button; treat any hold at T20 as cancel | The bench showed the last ~2.5 s were un-cancellable (a hold begun at 18 s cannot reach 3 s by T20), contradicting AST-FW-02 "at any time before transmission". Deferral keeps the PRD wording literally true and is bounded at 3 s |
 
 ---
 
@@ -575,6 +592,7 @@ Facility portal: none in v1 (L11).
 | 2026-09-18 | Claude (with Jace) | v0.2: P1 topology resolved from the PCA20065 v2.0.0 schematic (EXP_BOARD_PIN1 = P0.19, PIN2 = P0.18; R1 confirmed, D15); bench harness built in firmware (`prj_assist_bench.conf`, overlay, `assist.c`, `audio_dfr0534.c`, prompt set + loader); Wi-Fi scan positioning proposed (§5.5, D16); Q1/Q2/Q7 answered, Q3 updated |
 | 2026-09-18 | Claude (with Jace) | v0.3: button → speaker proven on the bench (SB8/SB9 cut, sensors intact, module boot 570 ms, factory clips through the full 20 s sequence); canonical mapping corrected to TX = P0.18 / RX = P0.19 (DFRobot `T`/`R` are host-side labels); §4.3 HW-0 result, §5.2 timeline, §9 FA-0 updated |
 | 2026-09-18 | Claude (with Jace) | **v0.4 — direction change:** speaker retired for a SparkFun Qwiic Buzzer on P1 (D17); 20 s beep countdown, **press-and-hold 3 s cancels** (D18); §4 rewritten (buzzer register map, i2c2 vs bit-bang overlays, no cutting), §5.1–5.3/5.7–5.9 rewritten (feedback abstraction, cadence timeline, pattern set), tests/risks/questions updated (Q16 voice-in-V1?, Q17 loudness), §15 PRD V2.3 amendment text added. Firmware feedback layer + state machine written and compiling (coord §C64) |
+| 2026-09-23 | Claude (with Jace) | **v0.5 — FA-0 firmware gate passed on the bench** (GS0002000003, unmodified): wiring truth (P1 behind the TXS0102; i2c2 high-drive fix, §4.2 correction), deferred-send rule (D21, §5.2), bench hooks PRESS/HOLD (§5.11), §10 results table |
 | 2026-09-22 | Claude (with Jace) | **PRD V2.3 Draft created** from V2.2 by applying §15 (rows verbatim + the implied consistency edits listed there); §1 traceability retargeted to PRD V2.3; V2.2 docx left untouched |
 
 ---
