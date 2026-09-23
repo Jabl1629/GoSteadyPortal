@@ -210,3 +210,16 @@ Physics at 450–550 Wh/L inside a 90 mm diagonal: ≤ 6.4–7.8 Ah at 13 mm, �
 | LiPol 2P 18650 (stocked) | 7.0 / 25.9 | 19 × 37 × 67 | 77 | 19 | 140 g, PCM + JST PHR-2 |
 
 Recommendation: if the cupholder can take 17–19 mm, **Ufine 955565-2P (10 Ah, 85 mm)** or the 2 × LP785767 stack — 10 Ah is ~1.4× the Tier A design point and absorbs the real-world uncertainty Jace flagged. If height is capped at 13 mm, **LP135570 (7 Ah, 89 mm)** is the only near-8 Ah single inside 90 mm; LP125871 (7.8 Ah) if 92 mm is tolerable.
+
+### 11.2 Sourcing status (2026-09-23)
+
+| | Ufine UFX955565-2P (Jenny, quote 2026-09-23) | LiPol LP146079 (Carol, thread since 2026-09-01) |
+|---|---|---|
+| Pack | 10 Ah, 3.7 V, **19 × 55 × 68 mm** (diag **87.5**), two 5 Ah cells, ~153 g | 10 Ah, 3.7 V, 14 × 60 × 80 mm (diag **100** — forced the cupholder redesign) |
+| Protection / wiring | PCB (overcurrent, overvoltage, overcharge, disconnection); 3-wire JST SHR-03V-S-B confirmed pin 1 BAT+, pin 2 10 kΩ NTC, pin 3 GND | PCM, 10 kΩ 1 % B3435 NTC, JST SHR-03V-S-B config A; 3 A continuous (1 A connector-limited), 2 A charge, PCM cut-off 4–4.5 A, 4.20 V max |
+| Price | $11.90 sample; volume not yet quoted | $22 sample (10 pcs + $199 freight = $419); $7 at 100 pcs (+ $239 freight = $939); invoice link issued 09-16, unpaid |
+| Lead time | samples ship ≥ Sep 30 (holiday); production TBD | 15 working days |
+| UN38.3 | not certified for the 2P; $600 and ~20 working days; single-cell 955565 report attached | not certified; $450 (BCTC) + 80 destructive units = $1,010, 30 working days; name-on-report question open |
+| Open questions | NTC beta (want B3435 to match the Thingy DTS), max dims incl. PCB/label, min capacity + cycle life at ~0.1 C, 100/500/1k pricing + MOQ, whether the $600 covers destructive units, production lead time | none technical; commercial decision only |
+
+Charge-time note for either 10 Ah pack: the nPM1300 tops out at ~0.8 A, so a full charge from empty takes ~13–15 h.

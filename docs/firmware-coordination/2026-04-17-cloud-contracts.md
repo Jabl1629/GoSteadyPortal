@@ -10503,4 +10503,6 @@ Cross-checked against the other six units (portal spec §7–§10):
 
 - **Jace's calls (same day):** session LED **off** (`CONFIG_GOSTEADY_SESSION_LED=n`; recording draws ≈ 4.4 mA by the two-term fleet fit — ≈ 0.45 mAh per session + 0.073 mAh per recording minute — and the LED is most of it: −3…5 mAh/day). **Onomondo SoftSIM**: published saving ≈ 46 µA idle (≈ 1 mAh/day, ≈ 0.4 Ah/yr, less under PSM) — a BOM/board-area/provisioning play, not a battery one; needs NCS ≥ 3.4.0 + 32 kB NVS + TF-M keys + per-device UART provisioning → park with the custom-board work. **One-year pack, LED-off basis (derating revised after Jace's review — no cold factor, self-discharge and calendar fade merged into one 0.88 term, single 25 % margin; nominal ≈ 1.54 × annual):** Tier A (hourly hb) **6.5–7.5 Ah**, Tier B (2-h) **5–6 Ah**, Tier C (6-h) **4.5–5 Ah** nominal (≈ 20 % less without the margin); LED-off alone ≈ 25 Ah (not viable); +7 Ah if the 0.6 mA floor is hardware.
 
+- **Cell sourcing (2026-09-23):** Ufine UFX955565-2P 10 Ah quoted at 19 × 55 × 68 mm (diag 87.5 — inside the 90 mm cupholder limit), $11.90 sample, no UN38.3 yet ($600/20 wd); LiPol LP146079 10 Ah (14 × 60 × 80, diag 100) $7 @ 100 pcs with UN38.3 at $1,010, invoice unpaid. Spec §11.2. Any 10 Ah pack charges in ~13–15 h on the nPM1300's 0.8 A.
+
 *Addendum owner: Claude (2026-09-22, later). No code change.*
