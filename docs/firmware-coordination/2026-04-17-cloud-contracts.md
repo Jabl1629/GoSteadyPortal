@@ -10557,4 +10557,8 @@ GS0002000003: all five sounds end-to-end (feedback 0.6 s into the hold, cancel a
 
 Jace auditioned glide, steps, chime and fade with the real button and picked **steps** (six descending whole-tone pips, 400 ms apart, then the ding-dong). `CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE` default → 2; the boot log now names the sound (`hold-to-cancel steps`); a bare `CANCELSTYLE` is rejected instead of selecting 0. Reflashed + verified on GS0002000003. PRD AST-FW-02 still says "a steady tone while the button is held" — replacement wording proposed in spec §15, not yet applied.
 
+## C68.5 — The red light blinks with the beeps (spec D24)
+
+`light.c` beat mode: once the buzzer answers, LED1 + the charge LED are dark between beeps and flash red at full brightness for exactly each note (countdown ticks, hold pips, cancel ding-dong). `feedback_buzzer.c` brackets every note with `gs_light_flash(true/false)` — blocking notes around their sleep, the hold's self-timed pips on the next 20 ms poll — so no timers or work queue. Solid red stays the fallback when the buzzer doesn't answer; sending/contacted colours unchanged. Bench on GS0002000003: cancel at 3.01 s and full send/confirm at +20.02/+22.02 s with no errors; the look through the cap is Jace's call.
+
 *Entry owner: Claude (2026-09-29). Firmware pushed (`main`); no cloud code.*
