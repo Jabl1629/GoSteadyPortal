@@ -10533,3 +10533,24 @@ uart1 control channel (`/dev/cu.usbmodem1105` @ 1 Mbaud, bench builds only): `PR
 Buzzer current + rail sag at volume 4 (PPK2 or the nPM1300 log), loudness through the enclosure (Q17), GNSS TTFF indoors/outdoors. Then FA-1: pending-incident persistence, real transport in `cloud.c`, `assist_ack`/`assist_arm` handling, heartbeat extras, MCUboot serial-recovery entrance off in deployment images. FA-2 (cloud pipeline) can start in parallel — nothing there depends on the buzzer.
 
 *Entry owner: Claude (2026-09-23). Firmware pushed (`main`); no cloud code.*
+
+
+# §C68 — [firmware] Cap status light = LED1 + borrowed charge LED; hold-to-cancel sound candidates (2026-09-29)
+
+Entry owner: Claude (firmware session with Jace at the bench) | Trigger: Jace — (1) the hold-to-cancel tone "seems more negative / concern than the normal tones", brainstorm options; (2) light more LEDs so the blue waiting-to-activate and red assistance lights carry through the bottom cap. Spec v0.6 (§4.8, §5.3, D22, Q18).
+
+## C68.1 — Status light
+
+- New `src/light.c/.h`: the activation flow (blue 1 Hz wake-window pulse, green 3 s confirm) and every assistance state (red countdown, red + blue sending, green contacted) light **LED1 and LED3** in the same colour. LED3 is the nPM1300 "charge LED" (RGB on its three 5 mA LED sinks, anodes on VSYS): borrowed in host mode while lit, handed back to the charger modes on release. This board runs the sinks as **error / charging / host** (read at boot, 0/1/2) — the schematic nets `CHG_LED`/`ERR_LED` are the other way round. The PMIC keeps its registers across an nRF9151 reset, so init clears the host latches and restores the charger modes if a reset caught the LED borrowed.
+- Not driven: **LED2** is on the nRF5340 (P0.14/P0.26/P0.15) — reachable only with a custom connectivity-bridge build mirroring nRF9151 P0.22–P0.24 (TRACEDATA0–2, which also run to the nRF5340), reflashed on every unit; the **buzzer's LEDs** are ~0.3 mA and fixed-function (red PWR is on the buzzer rail — already lit through the whole incident; blue STAT lights only while a tone sounds).
+- Recording green stays LED1-only. Rollator pilot image (PREACT) links: RAM 63.07 % (+32 B).
+
+## C68.2 — Hold-to-cancel sound candidates
+
+`gs_feedback_hold_tone(on)` became `gs_feedback_hold(ms, span)` / `gs_feedback_hold_end()` so the backend can play progress; hold polling runs at 20 ms while it plays. Buzzer candidates (`CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE`, bench-switchable `CANCELSTYLE <n>`): 0 steady (v0.5), **1 glide (default)** 2730 → 1620 Hz, 2 steps (six whole-tone pips), 3 chime (descending major arpeggio), 4 fade (the countdown pip slowing and quieting). 1–4 share a neutral "stood down" end cue (2730 → 2167 Hz ding-dong) instead of the deep falling two-note. Pick pending (spec Q18).
+
+## C68.3 — Bench
+
+GS0002000003: all five sounds end-to-end (feedback 0.6 s into the hold, cancel at 3.00–3.01 s); regression — 2 s hold released → sent +20.007 s / confirmed +22.007 s; hold from 19.0 s → deferred at T20 → cancelled +22.03 s. New control hooks: `LED <colour|off>`, `CANCELSTYLE <0-4>`. Visual check of LED3 through the cap is Jace's.
+
+*Entry owner: Claude (2026-09-29). Firmware pushed (`main`); no cloud code.*

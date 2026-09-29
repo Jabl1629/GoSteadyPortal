@@ -1,6 +1,6 @@
 # Family Assistance Alert — button → speaker → cloud → Care Circle voice + SMS (umbrella spec)
 
-> **Status:** 🟡 **Draft v0.5 — 2026-09-23: FA-0 firmware gate passed on the bench** (unmodified GS0002000003; coord §C67): buzzer answers in 82 ms, cadence on the spec timeline, all hold-to-cancel cases pass incl. the new deferred-send rule (D21). PRD V2.3 Draft applied 2026-09-22 (§15). **Direction change:** the DFR0534 speaker is retired (size + BOM; family-only notification does not need speech). Feedback is now a **SparkFun Qwiic Buzzer** on the P1 Qwiic connector: **20 s of beeps before the request goes out; press-and-hold 3 s cancels.** Firmware feedback layer + hold-to-cancel state machine written and compiling (coord §C64); buzzer on order; the speaker path stays selectable as an archived option (bench-proven, §C63.6). PRD V2.3 amendment text in §15. No cloud code. Written against **PRD V2.2 Draft (2026-09-18) §5** (the product authority for this feature) and the repo evidence surveyed the same day (firmware `main`@`55dbf92`, portal `feature/infra-scaffold`@`1f2c784`).
+> **Status:** 🟡 **Draft v0.6 — 2026-09-29: cap light + cancel-sound candidates** (coord §C68): every assistance state and the waiting-to-activate blue pulse now light LED1 **and the borrowed nPM1300 charge LED** (§4.8, D22); four candidate hold-to-cancel sounds are on the bench unit behind `CANCELSTYLE` for audition (§5.3, Q18). **v0.5 — 2026-09-23: FA-0 firmware gate passed on the bench** (unmodified GS0002000003; coord §C67): buzzer answers in 82 ms, cadence on the spec timeline, all hold-to-cancel cases pass incl. the new deferred-send rule (D21). PRD V2.3 Draft applied 2026-09-22 (§15). **Direction change:** the DFR0534 speaker is retired (size + BOM; family-only notification does not need speech). Feedback is now a **SparkFun Qwiic Buzzer** on the P1 Qwiic connector: **20 s of beeps before the request goes out; press-and-hold 3 s cancels.** Firmware feedback layer + hold-to-cancel state machine written and compiling (coord §C64); buzzer on order; the speaker path stays selectable as an archived option (bench-proven, §C63.6). PRD V2.3 amendment text in §15. No cloud code. Written against **PRD V2.2 Draft (2026-09-18) §5** (the product authority for this feature) and the repo evidence surveyed the same day (firmware `main`@`55dbf92`, portal `feature/infra-scaffold`@`1f2c784`).
 > **Scope:** A deliberate assistance button on the rollator device that (1) gives the walker user audible feedback through a small buzzer, (2) publishes an assistance request with best-available location over LTE-M, and (3) makes the cloud **concurrently call (Retell) and text (Twilio) every enrolled Care Circle member**, tracking delivery and acknowledgement in a durable incident record. **Care Circle only — no monitoring center, no EMS dispatch, no fall detection.**
 > **Spans:** firmware (`gosteady-firmware`), cloud (`infra/`), consumer app (`lib/d2c/`), hardware prototype (Thingy:91 X + SparkFun Qwiic Buzzer BOB-24474).
 > **Depends on (deployed):** Core Device Contract v1 (`activate`/`wipe` cmds, `last_cmd_id` echo, connection-coordinator), 1A/1B ingestion, D2C auth pool + claim, Care Circle (`d2c-care-circle.md`), Twilio SMS (`_shared/sms.py`), 1.7 audit, 2A-AA ack.
@@ -11,7 +11,7 @@
 
 ## 0. In one paragraph
 
-The walker user presses the large actuator on the cupholder. The device chirps back within a few hundred milliseconds, lights its LED, and starts a **20-second beep countdown**: one beep per second, a double beep per second after 10 s, rapid beeps in the last 3 s. Meanwhile it brings the modem out of PSM and opens its MQTT session. **Pressing and holding the button for 3 seconds at any point cancels** (a steady low tone confirms the hold is registering, then a falling two-note says "cancelled"); nothing is sent. At 20 s it publishes an `assistance_request` (unique incident id, press + send timestamps, battery/radio, and whatever location it has — usually *none yet*) on a new, policy-restricted topic `gs/{serial}/assist`. The cloud writes a durable incident, projects it into the D2C dashboard as a critical alert, enqueues one voice-call job and one SMS job **per enrolled member**, and only then sends an authenticated `assist_ack` downlink — which is what makes the device play its rising "contacted" tone. Retell then places the calls and Twilio sends the texts, both stating plainly that this is a family notification and not emergency services; webhooks record who answered / got voicemail / was delivered. After the ack, the device runs a bounded GNSS acquisition and publishes a follow-up location, which triggers one follow-up SMS with a map link. Care Circle members tap "I'm on it" in the app; the incident closes when a member marks it resolved. A test mode, armed from the app, exercises the exact same path but routes only to the tester.
+The walker user presses the large actuator on the cupholder. The device chirps back within a few hundred milliseconds, lights its LED, and starts a **20-second beep countdown**: one beep per second, a double beep per second after 10 s, rapid beeps in the last 3 s. Meanwhile it brings the modem out of PSM and opens its MQTT session. **Pressing and holding the button for 3 seconds at any point cancels** (a descending sound tracks the hold, then a soft "ding-dong" says "cancelled" — the sound is being chosen on the bench, §5.3/Q18); nothing is sent. At 20 s it publishes an `assistance_request` (unique incident id, press + send timestamps, battery/radio, and whatever location it has — usually *none yet*) on a new, policy-restricted topic `gs/{serial}/assist`. The cloud writes a durable incident, projects it into the D2C dashboard as a critical alert, enqueues one voice-call job and one SMS job **per enrolled member**, and only then sends an authenticated `assist_ack` downlink — which is what makes the device play its rising "contacted" tone. Retell then places the calls and Twilio sends the texts, both stating plainly that this is a family notification and not emergency services; webhooks record who answered / got voicemail / was delivered. After the ack, the device runs a bounded GNSS acquisition and publishes a follow-up location, which triggers one follow-up SMS with a map link. Care Circle members tap "I'm on it" in the app; the incident closes when a member marks it resolved. A test mode, armed from the app, exercises the exact same path but routes only to the tester.
 
 ```
  Rollator user                 Device (nRF9151 + Qwiic Buzzer)            AWS                              Care Circle
@@ -66,7 +66,7 @@ PRD §7 release gates that this spec owns are restated as exit criteria in §9 (
 
 ### 2.1 Firmware (`gosteady-firmware`)
 - **Button:** `sw0` = Button 1 (SW3) on **P0.26**, active-low with pull-up. `main.c` registers a GPIO edge ISR that only gives a binary semaphore; the main loop consumes it once per second and toggles a *session* (bench behaviour). **In every shipping overlay (`GOSTEADY_FIELD_MODE=y`) the button is never configured** — the ISR is not registered. Session start also refuses in pre-activation (`-EACCES`). The assistance path must not route through session start.
-- **LEDs:** plain GPIO on P0.29/30/31; conventions: blue 1 Hz pulse = pre-activation wake window, solid green 3 s = activation confirmed, solid green = recording (when `SESSION_LED`). Helpers block the calling thread; nothing arbitrates LED ownership.
+- **LEDs:** plain GPIO on P0.29/30/31; conventions: blue 1 Hz pulse = pre-activation wake window, solid green 3 s = activation confirmed, solid green = recording (when `SESSION_LED`). Helpers block the calling thread; nothing arbitrates LED ownership. *(v0.6: the activation and assistance flows now go through `src/light.c`, which also lights the nPM1300 charge LED — §4.8.)*
 - **Cloud (`cloud.c`):** one `aws_iot` session guarded by `s_aws_mutex`; publishes are QoS 1 with a 30 s PUBACK wait; normal cycle is connect → publish → **1.5 s linger** → disconnect. The pre-activation wake window uses `connect_publish_stay()`, which publishes and then **holds the connection polling a flag every 500 ms** — the exact primitive an "await ack" needs. Downlink `gs/{serial}/cmd` is re-subscribed on every connect and dispatched (`json_obj_parse`) synchronously on the library thread: `activate`, `wipe`, unknown → warn. There is **no priority queue**; heartbeat and activity are peer threads racing for the mutex. Activity backlog is RAM-only, 4 deep (the `telemetry_queue` partition is carved, unimplemented).
 - **Cellular:** `lte_lc_connect_async`, PSM requested (granted TAU 3 h / active 2 s); the modem stays PSM-registered between hourly heartbeats, so a wake-to-publish is seconds, not a fresh attach. RSRP/SNR via `AT+CESQ`/`%XSNRSQ`. **No GNSS code anywhere.** The `lte_link_control` default system mode (`LTE_M_NBIOT_GPS`) is not overridden, so GNSS is already in the modem system mode.
 - **Budget:** rollator deployment build (`prj_rollator_pilot.conf`) = **63.05 % RAM (143,760 / 227,992 B)**, flash 26 %. Snippets are already off on the rollator for RAM. Pre-activation storage budget ≈ 48 mAh/month; **≈ 0.25 mAh per connect+publish cycle** is the reusable energy unit.
@@ -152,15 +152,30 @@ A buzzer needs a small sound port or acoustic membrane instead of a speaker gril
 - VDD_EXP_BRD and 1V8 during a volume-4 beep (rail sag).
 - GNSS TTFF trials (unchanged from v0.1).
 
+### 4.8 Status light through the cap (v0.6, 2026-09-29)
+
+The light has to carry through the bottom cap, so the user-facing flows light every LED the nRF9151 can reach, in the same colour (`src/light.c`):
+
+| LED | What it is | Driven by | Used |
+|---|---|---|---|
+| LED1 | RGB, top-mount 1.6 mm (LTST-C19HE1WT) | nRF9151 P0.29 R / P0.31 G / P0.30 B via MOSFETs; 100 Ω / 39 Ω / 39 Ω from VDD_LED 3.3 V (~10–13 mA) | ✅ all flows (unchanged) |
+| LED3 | the "charge LED": RGB, side-mount (Optek OVSRRGBCC3) | nPM1300 LED0 / LED1 / LED2 sinks, 5 mA each, anodes on VSYS. This board runs them as **error / charging / host** (read at boot: 0/1/2) — the schematic nets `CHG_LED`/`ERR_LED` are the other way round | ✅ **new:** borrowed in host mode while an activation or assistance light is on, handed back to the charger on release; init recovers it if a reset caught it borrowed |
+| LED2 | RGB, side-mount (Optek) | **nRF5340** P0.14 R / P0.26 G / P0.15 B (the connectivity-bridge MCU) | ❌ unreachable from the nRF9151 without a custom bridge build. Possible later: nRF9151 P0.22–P0.24 (TRACEDATA0–2, the "GPIO1–3" harness) run to the nRF5340; a ~30-line bridge module could mirror them onto LED2 — every unit's nRF5340 reflashed (SW2 → nRF53) |
+| Buzzer PWR | red, 4.7 kΩ from the buzzer's 3.3 V (~0.3 mA) | VDD_EXP_BRD | already on for the whole incident; adds red, so it is **not** switched on for the blue flow |
+| Buzzer STAT | blue, 2.2 kΩ from the ATtiny (~0.3 mA) | ATtiny firmware: lit only while a tone sounds (volume ≠ 0) | flashes with every beep; cannot be held on silently |
+
+Colours are unchanged (Q12): red = countdown, red + blue = sending, green = contacted; blue 1 Hz pulse = waiting to activate, green 3 s = activated. Session green stays LED1-only. Bench check: control-channel `LED <colour>` holds a colour on LED1 + LED3.
+
 ## 5. Firmware design (`gosteady-firmware`)
 
 ### 5.1 Module map
 
 | File | New/changed | Responsibility |
 |---|---|---|
-| `src/assist.c/.h` | **written (v0.4)** | Incident state machine on its own thread (`gs_assist`, prio 6, 2 KB); debounce; **hold-to-cancel** (50 ms button polling, hold tone after 0.6 s, cancel at 3 s — including the initial press); cadence ticks; stub/real transport; ack wait + retry |
-| `src/feedback.h` | **written** | Feedback abstraction: `begin/end`, `countdown_start/mid`, `tick(phase)`, `hold_tone(on)`, `cancelled`, `confirmed(test)`, `failed`, `not_setup`, `fault`, `selftest`; compile-time no-ops for LED-only builds |
-| `src/feedback_buzzer.c` | **written** | Qwiic Buzzer backend: I²C register writes (5-byte burst from `0x03` + ACTIVE), power gate via the `exp_board_enable` regulator, ID check on power-up, pattern set (§5.3) |
+| `src/assist.c/.h` | **written (v0.4)** | Incident state machine on its own thread (`gs_assist`, prio 6, 2 KB); debounce; **hold-to-cancel** (50 ms button polling, 20 ms while hold progress plays; progress from 0.6 s, cancel at 3 s — including the initial press); cadence ticks; stub/real transport; ack wait + retry |
+| `src/feedback.h` | **written** | Feedback abstraction: `begin/end`, `countdown_start/mid`, `tick(phase)`, `hold(ms, span)` / `hold_end` (v0.6; was `hold_tone(on)`), `set_cancel_style` (bench), `cancelled`, `confirmed(test)`, `failed`, `not_setup`, `fault`, `selftest`; compile-time no-ops for LED-only builds |
+| `src/feedback_buzzer.c` | **written** | Qwiic Buzzer backend: I²C register writes (5-byte burst from `0x03` + ACTIVE), power gate via the `exp_board_enable` regulator, ID check on power-up, pattern set (§5.3) incl. the hold-to-cancel candidates |
+| `src/light.c/.h` | **written (v0.6)** | Status light: LED1 + the nPM1300 charge LED (borrowed in host mode, restored on release, recovered at boot) for the activation and assistance flows (§4.8) |
 | `src/feedback_speaker.c` + `src/audio_dfr0534.c/.h` | archived | DFR0534 spoken-prompt backend (bench-proven); selectable, not built by default |
 | `dts/bindings/sparkfun,qwiic-buzzer.yaml` | **written** | Minimal binding so the `qwiic_buzzer` node resolves via `I2C_DT_SPEC_GET` |
 | `boards/assist_buzzer_i2c2.overlay` / `boards/assist_buzzer_bitbang.overlay` | **written** | §4.2 |
@@ -176,13 +191,13 @@ States: `IDLE → PENDING (countdown) → SENDING → AWAIT_ACK → CONFIRMED �
 
 | t (s) | Device | Feedback | Notes |
 |---|---|---|---|
-| 0.00 | ISR on the press edge; 50 ms debounce (pin re-read). Not armed → `not_setup` pattern, stop | red LED on; buzzer powered (ID reply within tens of ms); **"heard you" double chirp** | Deliberate press = ≥ 50 ms |
+| 0.00 | ISR on the press edge; 50 ms debounce (pin re-read). Not armed → `not_setup` pattern, stop | status light red (LED1 + charge LED); buzzer powered (ID reply within tens of ms); **"heard you" double chirp** | Deliberate press = ≥ 50 ms |
 | 0.00 | Cloud connect starts (FA-2): PSM exit + TLS + MQTT if no live session | | Connect typically 3–10 s |
 | 1 … 10 | `PHASE_EARLY` | one 120 ms beep per second | |
 | 10.0 | `PHASE_LATE` | 250 ms phase-marker beep, then a double beep per second | |
 | 17.0 | `PHASE_FINAL` | rapid 70 ms beeps every 350 ms | urgency without alarm |
-| any | **Button held ≥ 0.6 s** → steady low tone (1500 Hz) replaces the cadence; released → cadence resumes. **Held ≥ 3.0 s → CANCELLED**: falling two-note, power off, LED off, **nothing sent**. The initial press counts: never releasing it cancels at 3 s (sustained accidental pressure cannot send) | | D18 — validate with older adults (FA-6) |
-| 20.0, button down | **Never transmit while the button is held (D21):** if a hold is in progress at T20 the send is deferred — release ⇒ send at once; hold reaches 3.0 s ⇒ CANCELLED. Bounded at 3 s by construction | hold tone / rapid beeps continue | Bench 2026-09-23: hold from 18.6 s → deferred → cancelled at 21.6 s; hold from 19.3 s released at 20.7 s → sent at 20.72 s |
+| any | **Button held ≥ 0.6 s** → hold progress (§5.3) replaces the cadence; released → cadence resumes. **Held ≥ 3.0 s → CANCELLED**: "stood down" end cue, power off, light off, **nothing sent**. The initial press counts: never releasing it cancels at 3 s (sustained accidental pressure cannot send) | | D18 — validate with older adults (FA-6) |
+| 20.0, button down | **Never transmit while the button is held (D21):** if a hold is in progress at T20 the send is deferred — release ⇒ send at once; hold reaches 3.0 s ⇒ CANCELLED. Bounded at 3 s by construction | hold progress / rapid beeps continue | Bench 2026-09-23: hold from 18.6 s → deferred → cancelled at 21.6 s; hold from 19.3 s released at 20.7 s → sent at 20.72 s |
 | 20.0 | Build payload (§5.4), persist `/lfs/assist/pending.json` (FA-1), PUBLISH on the session opened at T0; on PUBACK → `AWAIT_ACK` | LED red+blue | |
 | 20–50 | Wait ≤ 30 s for `assist_ack` matched on `incident_id` | on ack: green LED, **rising three-note** (test mode: four notes) | Ack normally < 3 s after PUBACK |
 | ack+0 | Echo `cmd_id` in the next heartbeat; persist `acked` | | |
@@ -203,13 +218,25 @@ Design intent for older-adult legibility: one cadence per phase, always at the l
 | Countdown 0–10 s | 120 ms beep every 1 s |
 | Phase change at 10 s | one 250 ms beep, then 2 × 100 ms beeps every 1 s |
 | Final 3 s | 70 ms beeps every 350 ms |
-| Hold registering (≥ 0.6 s) | steady 1500 Hz tone until release or cancel |
-| Cancelled | 2200 Hz 180 ms → 1000 Hz 450 ms (falling) |
+| Hold registering (≥ 0.6 s) | **being chosen (Q18)** — candidate progress sounds below; v0.5 was a steady 1500 Hz tone |
+| Cancelled | candidates 1–4: 120 ms silence, then a soft "ding-dong" 2730 → 2167 Hz (a major third), 110/300 ms. v0.5: 2200 Hz 180 ms → 1000 Hz 450 ms |
 | Contacted (ack) | 1500 → 2200 → 2730 Hz, 130/130/220 ms (rising) |
 | Test complete | the rising three plus a fourth 2730 Hz note |
 | Failed / still trying | 1000 Hz 600 ms, twice |
 | Not set up | 1500 Hz 250 ms, twice, unhurried |
 | Fault (feedback device absent) | LED only; heartbeat `feedback_ok:false` |
+
+**Hold-to-cancel candidates (v0.6, `CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE`, bench-switchable with `CANCELSTYLE <n>`).** Jace's bench note (2026-09-29): the v0.5 hold tone "seems more negative / concern than the normal tones". Why: a flat, unbroken tone reads as an alarm; 1500 Hz is off the element's resonance, where it sounds buzzy; it says nothing about progress; and the cancel motif lands in the deep register that *failed* and *fault* use. The candidates describe progress (the listener can hear how close the cancel is), stay in the element's clean band, and share one neutral end cue:
+
+| # | Name | While held (0.6 → 3.0 s) |
+|---|---|---|
+| 0 | steady (v0.5) | flat 1500 Hz until release/cancel; falling two-note into 1000 Hz |
+| 1 | **glide** (default) | one continuous slide 2730 → 1620 Hz (exponential, so even in pitch), easing from volume 4 to 3 at 60 %; leaving resonance adds a natural fade — "winding down" |
+| 2 | steps | six 150 ms pips stepping down whole tones (2730, 2432, 2167, 1930, 1720, 1532 Hz), 400 ms apart — "counting back down" |
+| 3 | chime | three 700 ms notes descending a major arpeggio (2730, 2167, 1820 Hz) — the mirror of the rising "contacted" tone |
+| 4 | fade | the countdown pip itself (2730 Hz, 100 ms) slowing (450 → 600 ms gaps) and stepping down in volume — "being turned down" |
+
+Volume steps are coarse on this board (4 direct; 3 via 100 Ω; 2 via 330 Ω; 1 via 2.2 kΩ ≈ −35 dB), so fades stop at 2–3. Live pitch/volume changes are supported by the SparkFun firmware (any register write while active re-applies `tone()`); the glide writes every 20 ms.
 
 The app shows the same table as "What the beeps mean" (§7). The archived speaker backend maps the same events to its spoken prompts (`audio/prompts/`), so the state machine is backend-agnostic.
 
@@ -297,6 +324,7 @@ Rollator pilot build has ~84 KB RAM headroom. Measured 2026-09-18 on the bench b
 ### 5.11 Bench/test hooks
 
 **Implemented 2026-09-23 (uart1 control channel, bench builds only):** `PRESS` → `gs_assist_inject_press()` (a synthetic debounced press; the ISR path alone is discarded because the pin re-read sees the button released); `HOLD <ms>` → `gs_assist_inject_hold()` (`button_down()` reads as held for ms; compiled out under `FIELD_MODE`); `PING`. Every countdown case in §10 runs unattended with these; physical-button holds work on top.
+- **Added 2026-09-29:** `CANCELSTYLE <0-4>` (hold-to-cancel sound, §5.3) and `LED <red|green|blue|magenta|cyan|yellow|white|off>` (hold a colour on LED1 + the charge LED to judge it through the cap, §4.8).
 - uart0 shell (bench builds): `assist press`, `assist arm on|off`, `audio play <n>`, `audio volume <v>`, `gnss fix` — the FA-1 acceptance harness.
 - Test images use a stub cloud: `infra/scripts/assist-bench-ack.py` publishes `assist_ack` via `aws iot-data publish` on observing the request (FA-1, before the dispatcher exists).
 
@@ -540,6 +568,7 @@ Facility portal: none in v1 (L11).
 | D18 | **Press-and-hold 3 s cancels**, at any point in the 20 s including the initial press; a steady low tone from 0.6 s signals the hold | second press (v0.1); double press | One gesture with a clear physical meaning; sustained accidental pressure can never send; a panicked hold cancels audibly and a short re-press restarts — validate in FA-6 |
 | D19 | The cut bench board keeps working via a bit-banged I²C bus on P0.18/P0.19 (`gpio-i2c`) | new Thingy:91 X now; re-solder SB8/SB9 | Same node, same driver, DT-only difference; a fresh unit is still preferred for production-representative i2c2 testing |
 | D20 | Production feedback = discrete magnetic buzzer + NPN driver on the custom PCB (GPIO/PWM), same cadence code behind the feedback abstraction | keep the Qwiic board | ~$0.50 vs ~$9, no second MCU, no I²C; the abstraction makes the swap a backend file |
+| D22 | **Status light = LED1 + the borrowed nPM1300 charge LED** (2026-09-29) for the activation and assistance flows | also LED2; buzzer LEDs | More light through the cap with no hardware change: the PMIC is on the nRF9151's I²C bus. LED2 hangs off the nRF5340 (custom bridge firmware on every unit); the buzzer's LEDs are ~0.3 mA and fixed-function (§4.8) |
 | D21 | **Never transmit while the button is held** (2026-09-23): a hold in progress at T20 defers the send until release (send at once) or cancels at 3 s | fixed T20 regardless of the button; treat any hold at T20 as cancel | The bench showed the last ~2.5 s were un-cancellable (a hold begun at 18 s cannot reach 3 s by T20), contradicting AST-FW-02 "at any time before transmission". Deferral keeps the PRD wording literally true and is bounded at 3 s |
 
 ---
@@ -562,6 +591,7 @@ Facility portal: none in v1 (L11).
 - [ ] **Q14 (FA-2):** Should `late` arrivals (> 15 min old, device was offline) still fan out? Proposed: yes, with "pressed the button {N} minutes ago; the device only just reconnected" wording.
 - [ ] **Q15 (FA-6):** Recurring test cadence (PRD AST-OPS-03) — monthly prompt in-app? Also whether a test should be required at activation before arming.
 - [ ] **Q16 (FA-3):** The pivot note says "before sending **the text** out" — is the Retell **voice call** still in V1 alongside SMS (PRD AST-SW-02), or is V1 SMS-only with voice later? The cloud design supports either; it changes FA-3 scope and the Retell dependency.
+- [ ] **Q18 (FA-1):** Which hold-to-cancel sound (§5.3 candidates 1–4, or keep v0.5)? Default is **1 glide** until Jace picks on the bench; then it becomes the Kconfig default and the "What the beeps mean" row.
 - [ ] **Q17 (FA-6):** Buzzer loudness target through the enclosure (dB at 0.5 m) and whether one volume level suffices, or the household should be able to pick quiet/normal/loud in the app (→ `assist_arm` carries a volume byte).
 
 ---
@@ -593,6 +623,7 @@ Facility portal: none in v1 (L11).
 | 2026-09-18 | Claude (with Jace) | v0.3: button → speaker proven on the bench (SB8/SB9 cut, sensors intact, module boot 570 ms, factory clips through the full 20 s sequence); canonical mapping corrected to TX = P0.18 / RX = P0.19 (DFRobot `T`/`R` are host-side labels); §4.3 HW-0 result, §5.2 timeline, §9 FA-0 updated |
 | 2026-09-18 | Claude (with Jace) | **v0.4 — direction change:** speaker retired for a SparkFun Qwiic Buzzer on P1 (D17); 20 s beep countdown, **press-and-hold 3 s cancels** (D18); §4 rewritten (buzzer register map, i2c2 vs bit-bang overlays, no cutting), §5.1–5.3/5.7–5.9 rewritten (feedback abstraction, cadence timeline, pattern set), tests/risks/questions updated (Q16 voice-in-V1?, Q17 loudness), §15 PRD V2.3 amendment text added. Firmware feedback layer + state machine written and compiling (coord §C64) |
 | 2026-09-23 | Claude (with Jace) | **v0.5 — FA-0 firmware gate passed on the bench** (GS0002000003, unmodified): wiring truth (P1 behind the TXS0102; i2c2 high-drive fix, §4.2 correction), deferred-send rule (D21, §5.2), bench hooks PRESS/HOLD (§5.11), §10 results table |
+| 2026-09-29 | Claude (with Jace) | **v0.6 — cap light + cancel-sound candidates:** status light lights LED1 + the borrowed nPM1300 charge LED for the activation and assistance flows (§4.8, D22; LED2 and the buzzer's LEDs assessed and left out); four hold-to-cancel candidates + a neutral "stood down" end cue behind `CANCELSTYLE` (§5.3, Q18); bench hooks `LED`/`CANCELSTYLE` (§5.11) |
 | 2026-09-22 | Claude (with Jace) | **PRD V2.3 Draft created** from V2.2 by applying §15 (rows verbatim + the implied consistency edits listed there); §1 traceability retargeted to PRD V2.3; V2.2 docx left untouched |
 
 ---
