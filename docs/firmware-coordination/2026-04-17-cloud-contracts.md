@@ -10553,4 +10553,8 @@ Entry owner: Claude (firmware session with Jace at the bench) | Trigger: Jace �
 
 GS0002000003: all five sounds end-to-end (feedback 0.6 s into the hold, cancel at 3.00–3.01 s); regression — 2 s hold released → sent +20.007 s / confirmed +22.007 s; hold from 19.0 s → deferred at T20 → cancelled +22.03 s. New control hooks: `LED <colour|off>`, `CANCELSTYLE <0-4>`. Visual check of LED3 through the cap is Jace's.
 
+## C68.4 — Decision (same day): "steps" (spec D23)
+
+Jace auditioned glide, steps, chime and fade with the real button and picked **steps** (six descending whole-tone pips, 400 ms apart, then the ding-dong). `CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE` default → 2; the boot log now names the sound (`hold-to-cancel steps`); a bare `CANCELSTYLE` is rejected instead of selecting 0. Reflashed + verified on GS0002000003. PRD AST-FW-02 still says "a steady tone while the button is held" — replacement wording proposed in spec §15, not yet applied.
+
 *Entry owner: Claude (2026-09-29). Firmware pushed (`main`); no cloud code.*
